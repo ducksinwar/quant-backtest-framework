@@ -107,3 +107,47 @@ Tests (10 new in tests/test_pricers.py):
 
 ### Commit
 `git commit -m "Add BasePricer and EquityPricer"`
+
+## 2026-06-15 – StrategyStructure and Trade
+
+### Prompt
+Please read `design_notes.md` again, focusing on Section 3.2 (StrategyStructure) and Section 3.3 (Trade).  
+We are continuing Phase 1 of the framework. The existing codebase includes Instrument, DataFeed, CsvBackend, EquityPriceProvider, BasePricer, and EquityPricer.
+
+**Task: Build the StrategyStructure and Trade classes.**  
+Write unit tests for both. Follow the design notes exactly.
+
+Details:
+
+1. **StrategyStructure** (`backtester/structures/strategy_structure.py`)  
+   - Holds a fixed list of `Instrument` legs (in Phase 1 always one leg).  
+   - Has an event log (list of dicts) that records lifecycle events: `open`, `partial add`, `partial unwind`, `roll`, `full close`.  
+   - Each event stores: `event_type`, `date`, `unit_size_change`, `cost_exposure`, `cost_leg_id`, `cost_free`.  
+   - Lifecycle methods: `open(date)`, `add_size(date, amount)`, `unwind(date, fraction=1.0)`, `roll(new_structure, date)`.  
+   - `get_cost_exposure()` returns the risk metric(s) for cost quoting.  
+   - Include a `structure_id` field, `original_entry_date`, and optional `tags`.
+
+2. **Trade** (`backtester/trades/trade.py`)  
+   - Internal state: `trade_id`, `active_structures`, `structure_history`, `tags`, `entry_date`, `exit_date`.  
+   - Lifecycle methods: `add_structure`, `add_to_structure`, `unwind_structure`, `roll_structure`.  
+   - In Phase 1, every trade contains exactly one structure with one leg.
+
+3. **Unit tests**  
+   - Create `tests/test_strategy_structure.py` and `tests/test_trade.py`.  
+   - Test event log population, full/partial unwind, entry/exit date tracking, size scaling, and weighted-average entry price updates.
+
+### Agent output summary
+Source files:
+- backtester/structures/strategy_structure.py — StrategyStructure with event log, lifecycle methods (open, add_size, unwind, roll), get_cost_exposure, leg size scaling
+- backtester/structures/__init__.py — package init
+- backtester/trades/trade.py — Trade class with active_structures/structure_history two-list pattern, lifecycle methods, weighted-average entry price on add_to_structure
+
+Tests (34 new across 2 files):
+- tests/test_strategy_structure.py — 17 tests: open event, original_entry_date, add_size event and scaling, full/partial unwind events and size reduction, get_cost_exposure, roll NotImplementedError, tags, multi-event log sequence
+- tests/test_trade.py — 17 tests: entry_date, active/history lists, open event delegation, exit_date on full unwind, partial unwind keeps active/doesn't set exit, multiple structures exit_date logic, add_to_structure size scaling and weighted entry price, roll delegation, tags, initial None state
+
+### Manual changes
+- None
+
+### Commit
+`git commit -m "Add StrategyStructure and Trade"`
