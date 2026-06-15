@@ -151,3 +151,52 @@ Tests (34 new across 2 files):
 
 ### Commit
 `git commit -m "Add StrategyStructure and Trade"`
+
+## 2026-06-15 – CostModel, BaseSignal, SMACrossoverSignal
+
+### Prompt
+Please read `design_notes.md` again, focusing on Section 3.11 (Cost Model) and Section 3.6 (Signal).  
+We are continuing Phase 1. The codebase already contains Instrument, DataFeed, CsvBackend, EquityPriceProvider, BasePricer, EquityPricer, StrategyStructure, and Trade.
+
+**Task: Build the FixedCostModel, BaseSignal abstract class, and SMACrossoverSignal example signal.**  
+Write unit tests for all three. Follow the design notes exactly.
+
+Details:
+
+1. **CostModel (abstract) and FixedCostModel** (`backtester/cost_model.py`)  
+   - An abstract `CostModel` class with a method: `compute_costs(trades: list[Trade]) -> dict[str, pd.Series]`  
+   - `FixedCostModel` inherits from `CostModel`. Constructor takes a dictionary of basis‑point fees per asset class (e.g., `{'equity': 2.0}`).  
+   - Implementation: walk every trade, every structure, every event log entry. For each cost‑bearing event (not cost‑free), compute cost as `notional * bps / 10000`. Return a dictionary mapping `leg_id` → `pd.Series` of daily costs.
+
+2. **BaseSignal** (`backtester/signals/base_signal.py`)  
+   - An abstract class with class attributes `requires_portfolio_state: bool = False`, `requires_trade_history: bool = False`.  
+   - Abstract method `generate_signals(current_date, portfolio_state=None, trade_history_snapshot=None) -> list[dict]`.
+
+3. **SMACrossoverSignal** (`backtester/signals/sma_crossover.py`)  
+   - Inherits from `BaseSignal`. Constructor takes `short_window`, `long_window`, `ticker`, `size`, and a `DataFeed`.  
+   - `requires_portfolio_state = True`. Stateless: reads PortfolioState snapshot to check position, uses DataFeed for SMA computation.
+
+4. **Unit tests**  
+   - `tests/test_cost_model.py` and `tests/test_signal.py`.  
+   - Test FixedCostModel with mock structures/events, verify per-leg Series output.  
+   - Test SMACrossoverSignal with mocked DataFeed and mock PortfolioState snapshots.
+
+### Agent output summary
+Source files:
+- backtester/cost_model.py — CostModel(ABC) with abstract compute_costs; FixedCostModel walks trade.structure_history, extracts cost_exposure/total_notional from event_log, applies bps/10000 per asset class, returns dict[leg_id -> pd.Series]
+- backtester/signals/base_signal.py — BaseSignal(ABC) with class attributes requires_portfolio_state/requires_trade_history and abstract generate_signals method
+- backtester/signals/sma_crossover.py — SMACrossoverSignal with DataFeed, SMA computation, portfolio state inspection via mock dataclass snapshot traversal
+
+Tests (22 new across 2 files):
+- tests/test_cost_model.py — 9 tests: abstract instantiation, single trade cost, multiple events, different asset classes, unknown asset class (zero bps), partial unwind, empty trades, missing/empty leg_id skip, same-day cost aggregation
+- tests/test_signal.py — 13 tests: BaseSignal abstract/partial instantiation, default flags, flag override; SMACrossoverSignal NEW/UNWIND/empty orders, insufficient data, not enough points, different ticker in portfolio, requires_flags
+
+Bug fixes during testing:
+- FixedCostModel: changed `leg_id is None` check to `not leg_id` to also skip empty string leg_ids
+- SMACrossoverSignal tests: adjusted price series to properly produce short>long (rising) and short<long (falling) SMA relationships
+
+### Manual changes
+- None
+
+### Commit
+`git commit -m "Add CostModel, BaseSignal, and SMACrossoverSignal"`
