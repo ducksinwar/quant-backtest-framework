@@ -46,10 +46,64 @@ Tests (34 across 4 files):
 - tests/test_equity_price_provider.py — 5 tests for price retrieval, missing date/ticker, known value, HK ticker
 
 ### Manual changes
-- [List any fixes you made, e.g., "Fixed type hint in Instrument.currency" or "None"]
+- None
 
 ### Key configuration fix
 - Corrected `opencode.json` to use DeepSeek provider with proper model mapping (see `~/.config/opencode/opencode.json` for the working config)
 
 ### Commit
 `git commit -m "Add Instrument, DataFeed, CsvBackend, EquityPriceProvider"`
+
+## 2026-06-15 – Pricers (BasePricer + EquityPricer)
+
+### Prompt
+Please read the file `design_notes.md` again, focusing on Section 3.5 (Pricer).  
+We are continuing Phase 1 of the framework. The previous session created Instrument, DataFeed, CsvBackend, and EquityPriceProvider.
+
+**Task: Build the BasePricer abstract class and the EquityPricer concrete implementation.**  
+Write unit tests for both. All code must follow the specifications in the design notes exactly.
+
+Details:
+
+1. **BasePricer** (`backtester/pricers/base_pricer.py`)  
+   - An abstract class with four abstract methods:
+     - `price(instrument, date: str) -> float | None`
+     - `valuation_data(instrument, date: str, measures: list[str]) -> dict[str, float] | None`
+     - `resolve_instrument(leg_dict: dict, date: str) -> dict | None`
+     - `pricing_inputs(instrument, date: str) -> dict[str, float] | None`
+   - Use Python's `abc` module (ABC, abstractmethod).
+
+2. **EquityPricer** (`backtester/pricers/equity_pricer.py`)  
+   - Inherits from `BasePricer`.
+   - Constructor takes an `EquityPriceProvider` instance (already built in `backtester/data/typed_providers/equity_price_provider.py`).
+   - Implements:
+     - `price(instrument, date)` – calls `self.provider.get_price(instrument.ticker, date)` and returns the result.
+     - `valuation_data(instrument, date, measures)` – returns an empty dict (equities have no decomposition).
+     - `resolve_instrument(leg_dict, date)` – returns the leg dict unchanged (equities need no extra parameters).
+     - `pricing_inputs(instrument, date)` – returns an empty dict.
+   - The pricer does NOT need caching in Phase 1 (equity prices are simple lookups).
+
+3. **Unit tests**  
+   - Create `tests/test_pricers.py`.
+   - Test `EquityPricer` with a mock `EquityPriceProvider`:
+     - Verify `price()` returns the value from the provider.
+     - Verify `valuation_data()` returns an empty dict.
+     - Verify `resolve_instrument()` passes through the leg dict.
+     - Verify `pricing_inputs()` returns an empty dict.
+   - Test that `BasePricer` cannot be instantiated directly (abstract class).
+
+Use the existing project structure. After writing all files, run `pytest` from the project root and confirm everything passes. Only proceed once tests pass.
+
+### Agent output summary
+Source files:
+- backtester/pricers/base_pricer.py — BasePricer(ABC) with four @abstractmethods: price, valuation_data, resolve_instrument, pricing_inputs
+- backtester/pricers/equity_pricer.py — EquityPricer(BasePricer) that takes an EquityPriceProvider, delegates price() to provider.get_price(), returns empty dicts for valuation_data/pricing_inputs, and passes through resolve_instrument unchanged
+Tests (10 new in tests/test_pricers.py):
+- TestBasePricer: verifies abstract class cannot be instantiated (2 tests)
+- TestEquityPricer: verifies price delegation, None propagation, empty dict returns, leg dict pass-through, and isinstance check against BasePricer (8 tests)
+
+### Manual changes
+- None
+
+### Commit
+`git commit -m "Add BasePricer and EquityPricer"`
