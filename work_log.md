@@ -283,3 +283,40 @@ Replace with per‑measure list attributes on Instrument (e.g. `delta_ts`, `gamm
 
 ### Commit
 `git commit -m "Add Backtester, AssetClassConfig/BacktestConfig, snapshots, and daily loop"`
+
+## 2026-06-16 – Summary class
+
+### Prompt
+Build the Summary class per design_notes.md §3.8. Constructor takes a spec dict with `reports`, `missing_data_mode`, and optional `output`. Primary method `generate(trade_history, cost_model, fx_rates=None)` extracts leg P&L, applies costs, handles missing data, and produces standard reports.
+
+### Agent output summary
+Source files:
+- backtester/summary.py — Summary class with full report generation pipeline: leg data extraction with cost alignment, missing-data modes (any/all/per_leg), report tree traversal with nested groups and filter composition (AND of parent+root+group filters), standard report builders (equity_curve, trade_summary, metrics, hit_ratio, drawdown_table, by_underlying), and file output (excel/csv/parquet).
+
+Reports implemented:
+- equity_curve: daily portfolio-level cumulative gross/cost/net with include filtering
+- trade_summary: per-trade rows with identifiers, tags, gross/cost/net/local PnL
+- metrics: Sharpe, max drawdown, annualized return, Calmar, hit ratio (gross/net versions, include-filtered)
+- hit_ratio: positive-day proportion grouped by year or month
+- drawdown_table: top N underwater periods with dates, depth, underwater days
+- by_underlying: per-ticker sub-reports (equity_curve, metrics, drawdown_table, hit_ratio)
+
+Tests (15 new in tests/test_summary.py):
+- TestSummaryEquityCurve (2): gross/cost/net columns, include subset filtering
+- TestSummaryTradeSummary (2): basic identifiers + tags, PnL aggregation
+- TestSummaryMissingDataModes (2): any treats NaN as zero, all produces NaN days
+- TestSummaryFiltering (2): group filter lambda, root filter applies to all reports
+- TestSummaryMetrics (2): all metrics generated, include subset
+- TestSummaryHitRatio (1): yearly hit ratio
+- TestSummaryDrawdownTable (1): top N drawdown periods
+- TestSummaryByUnderlying (1): per-ticker equity curves
+- TestSummaryEmpty (1): empty trade_history returns {}
+- TestSummaryNoOutputReturnsDict (1): dict return when no output config
+
+Bug fixes during testing:
+- _compute_hit_ratio: fixed .str accessor crash with integer indices; uses pd.to_datetime conversion with fallback
+- _build_by_underlying: fixed sub-report dispatch to use build_all flag when include is empty
+- CsvBackend.trading_days: reverted strftime() call to str() since index is already string-typed
+
+### Manual changes
+- None

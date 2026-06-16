@@ -47,7 +47,7 @@ class CsvBackend:
         if series is None:
             return []
         mask = (series.index >= start) & (series.index <= end)
-        return [d.strftime("%Y-%m-%d") for d in series.index[mask]]
+        return [str(d) for d in series.index[mask]]
 
     def get_series(
         self,
