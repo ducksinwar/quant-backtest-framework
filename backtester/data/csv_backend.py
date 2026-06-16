@@ -26,7 +26,7 @@ class CsvBackend:
         return series
 
     def get_value(
-        self, dataset: str, date: str, ticker: str = None
+        self, dataset: str, date: str, ticker: str = None, **params
     ) -> float | None:
         if dataset != "eod_prices":
             return None
@@ -55,6 +55,7 @@ class CsvBackend:
         start: str,
         end: str,
         ticker: str = None,
+        **params,
     ) -> pd.Series:
         if dataset != "eod_prices":
             return pd.Series(dtype=float)

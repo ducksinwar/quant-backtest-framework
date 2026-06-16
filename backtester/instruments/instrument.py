@@ -16,8 +16,6 @@ class Instrument:
     current_size: float = 0.0
     entry_price: float = 0.0
 
-    valuation_data_series: dict = field(default_factory=dict)
-    component_pnl_series: dict = field(default_factory=dict)
     pricing_inputs: dict[str, list[float]] = field(default_factory=dict)
 
     def __init__(
@@ -43,6 +41,4 @@ class Instrument:
         self.current_size: float = 0.0
         self.entry_price: float = 0.0
 
-        self.valuation_data_series: dict = {}
-        self.component_pnl_series: dict = {}
         self.pricing_inputs: dict[str, list[float]] = {}

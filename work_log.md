@@ -340,3 +340,24 @@ Console output shows:
 
 ### Manual changes
 - None
+
+## 2026-06-17 – Code review fixes: Instrument and DataFeed
+
+### Prompt
+Act as a code reviewer. Read `design_notes.md` (§3.1, §3.4, §8.1) and review the backtester package. Fix confirmed issues in Instrument and DataFeed.
+
+### Review findings
+- **Instrument** (`instrument.py`): `valuation_data_series` and `component_pnl_series` dicts were dead fields — design notes specify per-measure list attributes (e.g. `delta_ts`) created dynamically by the backtester, not a catch-all dict. Removed both.
+- **DataFeed** (`data_feed.py`): `get_value()` and `get_series()` lacked `**params` forwarding, contrary to §3.4/§8.1 spec showing `get_value(self, dataset, date, ticker=None, **params)`. Added `**params` to both methods.
+- **CsvBackend** (`csv_backend.py`): Added `**params` to `get_value` and `get_series` for signature compatibility with DataFeed delegation.
+- **Tests** (`test_instrument.py`): Removed two test methods referencing deleted fields, removed stale assertions from `test_default_values`.
+
+### Other findings (not yet fixed)
+- **CRITICAL**: `summary.py:43-49` — Cost alignment broken. Gross PnL Series uses integer RangeIndex while cost Series has date-string index, so `net == gross` in all reports.
+- **MINOR**: `backtest_engine.py` — `record_pricing_inputs` flag never checked; temp-object hack in `_check_data_available`; `LegSnapshot` doesn't populate `component_pnls`/`risk_measures` from leg.
+
+### Manual changes
+- None
+
+### Commit
+`git commit -m "Fix Instrument dead fields and add **params forwarding to DataFeed/CsvBackend"`

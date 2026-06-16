@@ -16,8 +16,6 @@ class TestInstrument:
         assert inst.current_price == 0.0
         assert inst.current_size == 0.0
         assert inst.entry_price == 0.0
-        assert inst.valuation_data_series == {}
-        assert inst.component_pnl_series == {}
         assert inst.pricing_inputs == {}
 
     def test_custom_values(self):
@@ -64,16 +62,6 @@ class TestInstrument:
         inst.pricing_inputs.setdefault("implied_vol", []).append(22.5)
         inst.pricing_inputs.setdefault("implied_vol", []).append(23.0)
         assert inst.pricing_inputs["implied_vol"] == [22.5, 23.0]
-
-    def test_valuation_data_series_usage(self):
-        inst = Instrument(ticker="SPY", asset_class="equity")
-        inst.valuation_data_series["delta_ts"] = [0.5, 0.6]
-        assert inst.valuation_data_series["delta_ts"] == [0.5, 0.6]
-
-    def test_component_pnl_series_usage(self):
-        inst = Instrument(ticker="SPY", asset_class="equity")
-        inst.component_pnl_series["delta_pnl"] = [10.0, -5.0]
-        assert inst.component_pnl_series["delta_pnl"] == [10.0, -5.0]
 
     def test_params_default_factory_isolates_instances(self):
         inst1 = Instrument(ticker="A", asset_class="equity")
