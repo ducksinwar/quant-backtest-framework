@@ -200,3 +200,86 @@ Bug fixes during testing:
 
 ### Commit
 `git commit -m "Add CostModel, BaseSignal, and SMACrossoverSignal"`
+
+## 2026-06-16 – Backtester, Snapshots, and DataFeed.trading_days
+
+### Prompt
+Please read `design_notes.md` again, focusing on Section 3.7 (Backtester) and the PortfolioState / TradeRecord descriptions in Section 3.6.  
+We are continuing Phase 1. All other modules are built.
+
+**Task: Build the Backtester and the snapshot dataclasses it needs.**  
+Write unit tests. Follow the design notes exactly.
+
+Details:
+
+1. **Snapshot dataclasses** (new file `backtester/snapshots.py`) — LegSnapshot, StructureSnapshot, TradeSnapshot, PortfolioState, TradeRecord (all frozen dataclasses).
+2. **Backtester** (`backtester/backtest_engine.py`) — BacktestConfig + AssetClassConfig dataclasses, Backtester with daily loop: PnL computation, snapshot building, order execution (NEW, UNWIND; ROLL stubbed).
+3. **Unit tests** — tests/test_backtester.py covering snapshots, open/close cycle, PnL accumulation, missing price NaN, portfolio state/trade history snapshot passing, unknown asset class error, ROLL NotImplementedError.
+
+### Agent output summary
+Source files:
+- backtester/snapshots.py — 5 frozen dataclasses: LegSnapshot, StructureSnapshot, TradeSnapshot, PortfolioState, TradeRecord
+- backtester/backtest_engine.py — BacktestConfig, AssetClassConfig, Backtester with full daily loop: compute PnL (with NaN on missing), build PortfolioState/TradeHistorySnapshot (conditional on signal flags), execute NEW (new trade + add-to-existing), UNWIND (full/partial), data availability check, instrument resolution and UUID leg_id assignment, ROLL (NotImplementedError)
+- backtester/data/csv_backend.py — added trading_days(ticker, start, end) method
+- backtester/data/data_feed.py — added trading_days(ticker, start, end) delegation method
+
+Tests (15 new in tests/test_backtester.py):
+- TestSnapshots (4): frozen immutability, PortfolioState construction, TradeRecord open/closed flags
+- TestBacktesterBasic (3): open-and-close cycle, empty history, entry/exit_date verification
+- TestBacktesterPnl (3): PnL accumulation, multiplier-aware PnL, NaN on missing price (current_price preserved)
+- TestBacktesterPortfolioState (3): PortfolioState passed when flag True, TradeHistorySnapshot passed, None when flags False
+- TestBacktesterUnknownAssetClass (1): raises ValueError
+- TestBacktesterRoll (1): raises NotImplementedError
+
+Bug fixes during testing:
+- Added numpy import to test file for np.isnan usage
+- Backtester._execute_unwind: added support for trade_id=None (closes all active trades, Phase 1 convenience)
+- CsvBackend.trading_days: correctly filters by start/end and returns sorted list
+
+### Manual changes
+- None
+
+## 2026-06-16 – Fix look-ahead bias, data availability check, and loop reorder
+
+### Prompt
+Please fix the daily loop in `backtester/backtest_engine.py` and the `trading_days` method in `backtester/data/csv_backend.py` to match `design_notes.md` §3.7 exactly.  
+The current implementation has a look‑ahead bias, missing fields, and a date‑format mismatch.
+
+### Agent output summary
+Changes made:
+
+1. **Reordered `run()` daily loop** (removed look-ahead bias):
+   - Old: PnL for next_day computed after executing orders, snapshots built from already-advanced prices.
+   - New: For each trading day T: (a) build snapshots from current T-1 state, (b) compute PnL for T (advances prices), (c) call signal with T-1 snapshots, (d) execute orders, (e) compute risk for T (post-trade).
+   - Removed the early `_compute_pnl_for_date(first_date)` call before the loop.
+
+2. **Explicit `entry_date`/`exit_date` setting** in `_execute_new_trade` and `_execute_unwind` — set `trade.entry_date = date` and `trade.exit_date = date` directly rather than relying solely on delegated methods.
+
+3. **Added `_check_data_available(order, date)`** — for NEW orders, resolves each leg and checks `pricer.price()` is non‑None; for UNWIND, checks all instruments in affected trade. Raises `ValueError` for unknown asset classes (per spec). Orders that fail are rejected with a warning.
+
+4. **Added `_compute_risk_for_date(T)` stub** — iterates active trades, calls `pricer.valuation_data()` when `risk_measures` is non‑empty, stores results on `Instrument.component_pnl_series`.
+
+5. **Fixed `trading_days` in `csv_backend.py`** — added explicit `str(d)` conversion in return list to guarantee string dates.
+
+6. **New tests** (4 added, 19 total in backtester suite):
+   - `TestBacktesterDataAvailability`: NEW order rejected when price is None (warns), UNWIND proceeds when price available.
+   - `TestBacktesterSnapshotSemantics`: verifies snapshots contain T-1 state (positions visible after open).
+   - `TestTradingDaysStrings`: verifies trading_days returns `str` instances.
+
+### Manual changes
+- None
+## 2026-06-16 – Fix _compute_risk_for_date valuation data storage
+
+### Prompt
+Fix the `_compute_risk_for_date` method in `backtester/backtest_engine.py`.  
+It currently references a non‑existent `leg.component_pnl_series` dictionary, which will crash when risk measures are enabled.  
+Replace with per‑measure list attributes on Instrument (e.g. `delta_ts`, `gamma_ts`) following design notes §3.1 and §3.7.
+
+### Agent output summary
+- `backtester/backtest_engine.py:112-120`: replaced `leg.component_pnl_series.setdefault(key, []).append(val)` with dynamic attribute creation pattern using `f"{key}_ts"` as attribute name, `getattr`/`setattr` for lazy initialization per §3.1 valuation data storage.
+
+### Manual changes
+- Update trade_days return format
+
+### Commit
+`git commit -m "Add Backtester, AssetClassConfig/BacktestConfig, snapshots, and daily loop"`

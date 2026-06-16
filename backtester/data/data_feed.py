@@ -18,3 +18,6 @@ class DataFeed:
         ticker: str = None,
     ) -> pd.Series:
         return self._backend.get_series(dataset, start, end, ticker)
+
+    def trading_days(self, ticker: str, start: str, end: str) -> list[str]:
+        return self._backend.trading_days(ticker, start, end)
