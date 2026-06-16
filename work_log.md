@@ -320,3 +320,23 @@ Bug fixes during testing:
 
 ### Manual changes
 - None
+
+### Commit
+`git commit -m "Add Summary class with standard reports and group filtering"`
+
+## 2026-06-16 – End-to-end example script
+
+### Prompt
+Create `examples/sma_crossover_example.py` that wires together all Phase 1 modules: CsvBackend → DataFeed → EquityPriceProvider → EquityPricer → SMACrossoverSignal → Backtester → FixedCostModel → Summary. Runs SMA crossover (50/200) on SPY from 2020-01-01 to 2022-12-31, prints metrics/equity curve/trade summary, and writes CSV output.
+
+### Agent output summary
+- examples/sma_crossover_example.py — full Phase 1 integration: loads SPY_eod.csv, creates all components, runs backtest (2 trades generated), computes costs ($0.08 total across both trades), generates equity curve + metrics + trade summary reports, prints to console, and writes CSV files to results/ folder (fallback from Excel since openpyxl not installed).
+
+Console output shows:
+- 2 trades: first lost ~$7,062 (entered 2020-01-02, exited 2020-04-01), second gained ~$12,637 (entered 2020-07-07, exited 2022-03-17)
+- Net gross profit: ~$5,575
+- Equity curve has NaN tail due to missing data days after final signal execution
+- Results written as CSV: equity_curve.csv, metrics.csv, trade_summary.csv
+
+### Manual changes
+- None

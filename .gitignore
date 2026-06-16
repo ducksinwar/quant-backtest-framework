@@ -178,3 +178,4 @@ market_data/*.csv
 *.egg-info
 nul
 fetch_data.py
+results/
