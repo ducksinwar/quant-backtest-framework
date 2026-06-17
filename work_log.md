@@ -361,3 +361,35 @@ Act as a code reviewer. Read `design_notes.md` (§3.1, §3.4, §8.1) and review 
 
 ### Commit
 `git commit -m "Fix Instrument dead fields and add **params forwarding to DataFeed/CsvBackend"`
+
+## 2026-06-17 – Design notes refactored: asset-agnostic cost-exposure flow
+
+### Prompt
+Refactor the cost-exposure flow in `design_notes.md` so that the core framework (StrategyStructure, Trade, Backtester) is completely agnostic to any asset class. Adding a new instrument type should require only asset-specific classes (pricer, AssetPnlCalculator, cost calculator) with zero changes to the framework core.
+
+### Changes applied to design_notes.md
+**10-point update across §3.1, §3.2, §3.3, §3.5, §3.7, §3.11:**
+
+1. **§3.1** — Added `"cost_leg"` to common/infrastructure keys that are never placed in `Instrument.params`.
+2. **§3.2** — StrategyStructure becomes a **pure event recorder**. `get_cost_exposure()` removed. Lifecycle methods now accept `cost_exposures: dict[str, dict] | None = None`. Event log key becomes `"cost_exposures"` (nested, per leg) storing **per-unit** metrics. `cost_leg_ids` attribute added. Old `cost_leg_id` field retained for readability.
+3. **§3.3** — Trade's `add_structure`, `add_to_structure`, `unwind_structure`, `roll_structure` all accept optional `cost_exposures` parameter and forward it to StrategyStructure. Documented that the backtester must compute exposure before calling `unwind_structure` (pre-unwind sizes needed).
+4. **§3.5** — New abstract method `compute_cost_exposure(instrument, date) -> dict[str, float] | None` on `BasePricer`. Returns **per-unit** metrics (e.g. `notional_per_unit`, `vega_per_contract`). No default implementation. Called only at order-execution time. Pricer cache shared between this and `valuation_data`.
+5. **§3.5** — `resolve_instrument` may add `"cost_leg": true` to each leg dict; backtester uses this for `cost_leg_ids`.
+6. **§3.7** — Backtester's `_resolve_and_price_leg` now filters `"cost_leg"`, `"structure_id"`, `"leg_id"` from params.
+7. **§3.7** — Instrument construction now includes `cost_leg_ids` population from resolved leg dicts.
+8. **§3.7** — New subsection: Cost-exposure computation during order execution. Backtester calls `pricer.compute_cost_exposure` for each cost-bearing leg before size changes, collects into `{leg_id: per_unit_dict}`, passes through Trade to structure. If exposure returns `None`, leg treated as cost-free for that event with a warning.
+9. **§3.11** — Complete rewrite. Introduces `BaseCostCalculator` abstract class with `compute_cost(leg_id, event, data_feed=None) -> float`. `CostModel` holds a registry `{asset_class: BaseCostCalculator}`. `EquityCostCalculator` replaces `FixedCostModel`. New asset classes add calculators with zero core changes.
+10. **Partial events and multi-leg support** woven throughout — per-unit metrics × unit_size_change ensures correct partial-unwind charging; straddle entries contain two cost_exposures entries; swap far-leg-only uses single entry.
+
+### Key design principles achieved
+- **Zero core changes for new asset classes** — only pricer + cost calculator needed.
+- **Correct partial unwinds** — per-unit metrics prevent overcharging.
+- **Framework never interprets cost metrics** — purely moves data from pricer to event log to calculator.
+- **Pricer cache sharing** — `compute_cost_exposure` reuses greeks from `valuation_data`, zero redundant computation.
+- **Backward compatible** — `EquityCostCalculator` provides same fixed-bps behavior as old `FixedCostModel`.
+
+### Manual changes
+- None
+
+### Commit
+`docs: refactor cost-exposure flow to be fully asset-agnostic`
