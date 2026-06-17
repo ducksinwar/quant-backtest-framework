@@ -9,15 +9,17 @@
   - [3.2 Strategy Structure](#32-strategy-structure-atomic-leg-grouping)
   - [3.3 Trade](#33-trade)
   - [3.4 MarketData & Data Providers](#34-marketdata--data-providers-phase-1--csv-phase-2--sql--multisource)
-  - [3.5 Pricer](#35-pricer-basepricer--concrete-implementations)
-  - [3.6 Signal](#36-signal-abstract-and-example)
-  - [3.7 Backtester](#37-backtester)
-  - [3.8 Summary](#38-summary)
-  - [3.9 Data Extractor](#39-data-extractor)
-  - [3.10 PnL Attribution](#310-pnl-attribution-extensible-breakdown)
-  - [3.11 Cost Model](#311-cost-model-transaction-cost-handling)
-  - [3.12 Persistence of Backtest Results](#312-persistence-of-backtest-results)
-  - [3.13 Architecture summary (informal)](#313-architecture-summary-informal)
+  - [3.5 CalendarProvider](#35-calendarprovider)
+  - [3.6 Pricer](#36-pricer-basepricer--concrete-implementations)
+  - [3.7 Signal](#37-signal-abstract-and-example)
+  - [3.8 OrderGenerator](#38-ordergenerator)
+  - [3.9 Backtester](#39-backtester)
+  - [3.10 Summary](#310-summary)
+  - [3.11 Data Extractor](#311-data-extractor)
+  - [3.12 PnL Attribution](#312-pnl-attribution-extensible-breakdown)
+  - [3.13 Cost Model](#313-cost-model-transaction-cost-handling)
+  - [3.14 Persistence of Backtest Results](#314-persistence-of-backtest-results)
+  - [3.15 Architecture summary (informal)](#315-architecture-summary-informal)
 - [4. Validation framework](#4-validation-framework-to-be-built-after-core-backtester)
   - [4.1 Walk‑forward cross‑validation](#41-walkforward-crossvalidation)
   - [4.2 Nested parameter selection](#42-nested-parameter-selection-within-each-training-window)
@@ -101,7 +103,7 @@ design_notes.md                         # This file
   - `multiplier: float` (default 1.0)
   - `currency: str` (default `'USD'`) – the currency in which the instrument’s P&L is computed.  
     For USD‑cross FX products this is always `'USD'`, even if the notional is in a foreign currency.  
-    This field is used by the summary module to decide whether FX conversion is needed (see Section 3.8).
+    This field is used by the summary module to decide whether FX conversion is needed (see Section 3.10).
   - `tags: list[str]` (optional)
   - `leg_id: str` – a globally unique identifier for this leg instance, assigned by the backtester at creation. Used to match cost series and risk data across different parts of the system (e.g., `CostModel` output to `Summary`).
   - `params: dict` – a dictionary of **asset‑specific parameters** needed for pricing and risk. The backtester never inspects this dictionary; it is opaque to the backtester and only interpreted by the pricer.
@@ -116,7 +118,7 @@ design_notes.md                         # This file
   - `ticker`, `size`, `multiplier`, `currency`, `asset_class`, `tags` – standard instrument‑level fields.
   - `structure_id`, `leg_id`, `cost_leg` – internal identifiers and flags used by the backtester; they are consumed during trade construction and discarded from the final `Instrument`.
   All other keys from the leg dict are automatically stored in `params`.
-- The Instrument is a **pure data holder** for leg‑level P&L and risk. All P&L calculations are performed by the backtester (see Section 3.7). The pricer reads `params` to know what it is pricing.
+- The Instrument is a **pure data holder** for leg‑level P&L and risk. All P&L calculations are performed by the backtester (see Section 3.9). The pricer reads `params` to know what it is pricing.
 
 - **Internal P&L tracking (populated by the backtester):**
   - `daily_total_pnl: list[float]` – a time series of the daily total P&L changes for this leg, recorded each day the leg is alive.  
@@ -221,7 +223,7 @@ It mirrors the backtester’s two‑list pattern: `active_structures` for curren
   - `tags` – an optional list of user‑defined string tags (e.g., `['EM_Asia', 'carry', 'live']`).  
     Tags are assigned when the trade is created (copied from the `TargetTrade`). They serve two purposes:
     - **Post‑backtest analysis:** The summary module can filter, group, and recombine trades by tag without re‑running the backtest.
-    - **Signal/hedging logic:** Tags are included in the `PortfolioState` snapshot (see Section 3.6), so signals can read them to make state‑dependent decisions (e.g., identifying which structures are hedges vs. alpha legs).
+    - **Signal/hedging logic:** Tags are included in the `PortfolioState` snapshot (see Section 3.7), so signals can read them to make state‑dependent decisions (e.g., identifying which structures are hedges vs. alpha legs).
     Tags have no effect on the core backtester loop or the cost model.
   - `entry_date: str` – the date the trade was first opened (its first structure was added).  
     Set once when the trade is created; never changes.
@@ -246,7 +248,7 @@ It mirrors the backtester’s two‑list pattern: `active_structures` for curren
   The authoritative P&L and risk data lives at the leg level. The `Trade` object does not store or compute aggregated values; it only holds the structures and their event logs. The `Summary` and `PortfolioState` consumers work directly from leg‑level data.
 
 - **No cost deduction inside Trade.**  
-  Cost calculation is entirely deferred to the `CostModel`, which consumes the event logs stored on each `StrategyStructure` (see Section 3.11).
+  Cost calculation is entirely deferred to the `CostModel`, which consumes the event logs stored on each `StrategyStructure` (see Section 3.13).
 
 **Phase 1 simplification:**  
 In Phase 1, every trade contains exactly one `StrategyStructure` with a single equity instrument leg. All structure‑management methods work identically, making the upgrade to multi‑structure, multi‑leg trades purely additive.
@@ -305,7 +307,38 @@ All objects are created once and reused across the entire backtest and any valid
 
 See Section 8 for the full evolution plan, including SQL migration, typed providers, point‑in‑time data, and the long‑term vision.
 
-### 3.5 Pricer (BasePricer + concrete implementations)
+### 3.5 CalendarProvider
+
+The CalendarProvider is a shared service that provides trading‑day calendars to the backtester, OrderGenerator (§3.8), and pricers. It is not part of the DataFeed, because calendars are a cross‑cutting concern that spans multiple components.
+
+**Holiday calendar model:**
+- Calendars are defined by holiday codes (e.g. Bloomberg‑style `"US"`, `"HK"`).
+- Each instrument may depend on multiple codes: trading calendar, settlement calendar, fixing calendar.
+- The provider maps these codes to lists of non‑trading dates.
+
+**Default calendar:**
+- If no holiday codes are specified, the provider returns all business days (Monday–Friday).
+- A special code `"all"` returns every calendar day.
+
+**Multi‑asset handling:**
+- Supports **union** (for the simulation loop) and **intersection** (for order execution).
+- For multi‑leg orders, the OrderGenerator uses intersection to verify all legs' markets are open.
+
+**Core methods:**
+- `trading_days(holiday_codes, start, end) -> list[str]` — union calendar for simulation.
+- `is_trading_day(holiday_code, date) -> bool` — used for order‑execution checks.
+- `next_trading_day(holiday_code, date) -> str` — used by pricers (settlement, fixing) and the backtester (futures rolls).
+
+**Signal data scoping:**
+Before requesting price data from the DataFeed, the signal's data‑scoping layer (part of the OrderGenerator) uses the CalendarProvider to find the last valid trading day for each instrument. This ensures indicators are computed only on actual trading days.
+
+**Phase 2 implementation:**
+The CalendarProvider will be built first in Phase 2. It will initially load holiday lists from simple CSV files (one per calendar code) and support union/intersection logic. Point‑in‑time holiday data is deferred.
+
+**Phase 1 status:**
+Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary surrogate that will be replaced by a CalendarProvider instance in Phase 2.
+
+### 3.6 Pricer (BasePricer + concrete implementations)
 
 - **BasePricer** is an abstract class that defines the core interface:
   - `price(instrument, date) -> float | None` – the mark‑to‑market price of the instrument on that date. Returns `None` if a required market data input is missing (beyond the forward‑fill limit).
@@ -350,7 +383,7 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
 
 - The backtester never needs to know *how* the pricer obtains the building blocks; it only calls the methods and uses the returned numbers.
 
-### 3.6 Signal (abstract and example)
+### 3.7 Signal (abstract and example)
 
 - **BaseSignal** is an abstract class with a method:
   `generate_signals(current_date, portfolio_state: PortfolioState | None = None, trade_history_snapshot: tuple[TradeRecord, ...] | None = None) -> list[dict]`
@@ -410,7 +443,7 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
   The backtester does **not** validate or interpret these parameters; it simply passes them through. Only the pricer (and later, the execution module) knows what to do with them.
 
 - **Instrument resolution:**  
-  The leg dictionary may omit instrument‑specific parameters that are not known at signal‑generation time (e.g., the exact strike of an OTC option, the forward rate of an FX forward, or the absolute maturity date when only a tenor is given). The pricer’s `resolve_instrument` method (Section 3.5) is responsible for filling in any missing fields at execution time. The backtester simply passes the leg dictionary to the pricer and uses the completed result.
+  The leg dictionary may omit instrument‑specific parameters that are not known at signal‑generation time (e.g., the exact strike of an OTC option, the forward rate of an FX forward, or the absolute maturity date when only a tenor is given). The pricer’s `resolve_instrument` method (Section 3.6) is responsible for filling in any missing fields at execution time. The backtester simply passes the leg dictionary to the pricer and uses the completed result.
 
 - The signal is **stateless**: it does not retain any internal memory that cannot be reconstructed from the data passed to it at each call. It uses market data available *up to* `current_date - 1` (i.e., yesterday’s close, or earlier) and, optionally, the current `portfolio_state` snapshot and/or the `trade_history_snapshot`, to produce orders for `current_date`.  
 
@@ -453,14 +486,42 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
   ```
 
 - **Separation of alpha and execution:**  
-  The `BaseSignal.generate_signals()` method is responsible for producing the final list of `TargetTrade` orders. To keep alpha logic clean, the signal may delegate **mechanical operations** (scaling in/out, delta hedging, dynamic hedge rebalancing, contract rolling) to separate, reusable modules.  
-  - These modules operate on the portfolio snapshot and the raw alpha intent, and they return `TargetTrade` dictionaries.  
-  - The signal then combines the alpha‑driven orders and the mechanical adjustment orders and returns them to the backtester.  
-  - This keeps the backtester a pure executor, and allows hedging/scaling logic to be developed, tested, and swapped independently of the alpha strategy.
-  - Examples of such modules: `ScalingModule`, `DeltaHedgeModule`, `RollModule`.  
-  These modules are not required in Phase 1 but are planned for later phases.
+  **In Phase 1**, `BaseSignal.generate_signals()` directly produces `TargetTrade` dictionaries for simplicity. The signal may delegate mechanical operations (scaling, hedging, rolling) to separate helper modules that also emit `TargetTrade` dicts.
 
-### 3.7 Backtester
+  **In Phase 2**, the design separates alpha from execution:
+  - Alpha signals produce **pure intent dicts** (e.g. `{"action": "BUY", "ticker": "SPY", "target_size": 200}`) — no mechanical concerns.
+  - A separate **OrderGenerator** (§3.8) transforms these intents into executable `TargetTrade` orders by applying a chain of swappable `OrderRule` instances (scaling, hedging, rolling, calendar validation, scheduling).
+  - The alpha signal remains stateless and calendar‑unaware.
+  - Existing helper modules (`ScalingModule`, `DeltaHedgeModule`, `RollModule`) will be migrated into `OrderRule` implementations within the OrderGenerator.
+  These modules are not required in Phase 1 but are planned for Phase 2.
+
+### 3.8 OrderGenerator
+
+The OrderGenerator is a stateless component that sits between the alpha signal and the backtester. It transforms a pure **alpha intent dict** into executable `TargetTrade` orders by applying a chain of swappable **OrderRule** instances.
+
+**Alpha intent format (example):**
+```python
+{"action": "BUY", "ticker": "SPY", "target_size": 200}
+```
+
+**Initialization and execution:**
+- The OrderGenerator is initialized with a list of `OrderRule` instances, following the same registry pattern as the CostModel's `BaseCostCalculator` (§3.13).
+- On each call it receives: the intent, current date, portfolio state, trade history snapshot, and the CalendarProvider.
+- It runs each rule in sequence; the final rule emits the `TargetTrade` dicts (or an empty list if the order is discarded).
+
+**Stateless:** No internal queues. Orders that cannot be executed are discarded and may be regenerated by the signal on the next trading day.
+
+**Phase 2 implementation plan:**
+The first rule to be built is **CalendarValidationRule**, which uses the CalendarProvider (§3.5) to reject orders when any leg's market is closed. Later, additional rules will be added: `ScalingRule`, `DeltaHedgeRule`, `RollRule`, and `TradingSchedule`.
+
+**CalendarValidationRule:**
+- Checks each leg's holiday calendar(s) to determine if its market is open on the execution date.
+- If any leg is on holiday, the entire order is **rejected** (discarded) — no partial trade is allowed.
+- It does **not** postpone; the signal will naturally re‑evaluate on the next open day.
+
+**TradingSchedule (future):** Adjusts a fixed‑frequency schedule (e.g., "every Monday") by recomputing the first fully open day of the week using the CalendarProvider, remaining stateless.
+
+### 3.9 Backtester
 
 - The backtester is initialised with a single configuration object (`BacktestConfig`) that bundles all settings:
   - `signal` – the `BaseSignal` instance that generates trading orders.
@@ -469,7 +530,7 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
     An `AssetClassConfig` contains:
     - `pricer` – the `BasePricer` instance responsible for pricing all instruments of this asset class.
     - `risk_measures` – a list of PnL decomposition/risk measures to compute for all instruments of this type (e.g., `['mtm','carry']` for FX forwards, `['delta','gamma','vega']` for options). An empty list means no decomposition.
-    - `pnl_calculator` – an **optional** instance of `AssetPnlCalculator` (see Section 3.10). Required when `risk_measures` is non‑empty; the backtester delegates to this calculator for all component‑PnL computations. If `None` or absent, no decomposition is performed.
+    - `pnl_calculator` – an **optional** instance of `AssetPnlCalculator` (see Section 3.12). Required when `risk_measures` is non‑empty; the backtester delegates to this calculator for all component‑PnL computations. If `None` or absent, no decomposition is performed.
     - `record_pricing_inputs` – an optional boolean (default `False`). If `True`, the pricer is instructed to return the raw pricing inputs (e.g., implied vol, forward price) that were used on each date. These are stored on `Instrument.pricing_inputs`.
 
 - **No pre‑defined instrument universe.** The backtester does not hold a list of instruments ahead of time.  
@@ -508,7 +569,8 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
              If the result is not `None`, append its keys and values to the leg’s `pricing_inputs` dictionary time series; if the price had been `None`, append `NaN` for each key to keep the series aligned.
 
   2. **Request and execute today’s orders:**  
-     - **Portfolio state snapshot (conditional):**  
+      *(Phase 1:* calls `signal.generate_signals()` directly. *Phase 2:* calls signal to get alpha intents, then passes them through the OrderGenerator (§3.8) to obtain `TargetTrade` orders.*)
+      - **Portfolio state snapshot (conditional):**
        If `signal.requires_portfolio_state` is `True`, the backtester has already created a `PortfolioState` from `active_trades` at the end of day T‑1 (after all T‑1 processing). This snapshot is passed as `portfolio_state`.  
        If the flag is `False` (default), `portfolio_state` is `None`.
      - **Trade history snapshot (conditional):**  
@@ -581,7 +643,7 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
 
   4. **Move to next day.**
 
-- After the backtest loop, the backtester returns the `trade_history` list (and optionally the `active_trades` for any open positions). This raw output is completely independent of the backtester, pricers, and data providers. The caller then passes it to a `Summary` object (Section 3.8) together with a `CostModel` and any desired FX rates to produce performance metrics.
+- After the backtest loop, the backtester returns the `trade_history` list (and optionally the `active_trades` for any open positions). This raw output is completely independent of the backtester, pricers, and data providers. The caller then passes it to a `Summary` object (Section 3.10) together with a `CostModel` and any desired FX rates to produce performance metrics.
 
 - **No cost or summary logic inside the backtester.** Cost events are recorded on structures but not evaluated; the `Summary` and `CostModel` are entirely external. This allows changing cost assumptions, FX rates, metric specs, or filtering rules without re‑running the simulation.
 
@@ -606,9 +668,9 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
   - **Daily live out‑of‑sample comparison** – after deploying a strategy, run the backtester forward by one day (or any number of days since the last run) to produce the theoretical P&L, which can be compared against actual broker‑filled trades to monitor slippage. The resulting theoretical equity curve provides a pure, AUM‑independent view of strategy performance, serving as the benchmark against which actual realised P&L is compared.
   - **General continuation** – a `run_continuation(new_end_date)` method will reload a saved state, accept updated market data for the new dates, and run the daily loop from the last processed date to `new_end_date`. The signal is re‑instantiated from its type and parameters; any positional state is recovered from the initial `PortfolioState` (or `trade_history_snapshot`). The signal does not need to be serialized.
 
-### 3.8 Summary
+### 3.10 Summary
 
-The `Summary` class provides standard reports – predefined templates for common analyses. For raw data extraction, see Section 3.9 (Data Extractor).
+The `Summary` class provides standard reports – predefined templates for common analyses. For raw data extraction, see Section 3.11 (Data Extractor).
 
 **Summary specification (`SummarySpec`):**
 
@@ -796,10 +858,10 @@ summary = Summary(spec)
 
 **Extending the Summary module:**
 
-- Add new standard reports by writing a new method on the `Summary` class. For raw data extraction, extend the `DataExtractor` class instead (Section 3.9).
+- Add new standard reports by writing a new method on the `Summary` class. For raw data extraction, extend the `DataExtractor` class instead (Section 3.11).
 - The `Summary` class is a plain Python object; you can subclass it or compose it with your own analysis functions.
 
-### 3.9 Data Extractor
+### 3.11 Data Extractor
 
 The `DataExtractor` class provides a flexible, lightweight pipeline for extracting raw data from the `trade_history`. It performs **no** aggregation, grouping, metric computation, or cost application. It simply returns the exact attributes you request, leaving all further processing to you.
 
@@ -976,7 +1038,7 @@ print(jan_pnl_by_underlying)
 ```
 No new functions are needed—`extract()` and `inspect()` cover the full workflow. This example can be adapted to any date range, any filter, and any level of granularity.
 
-### 3.10 PnL Attribution (extensible breakdown)
+### 3.12 PnL Attribution (extensible breakdown)
 
 The framework supports decomposing daily PnL into user‑specified risk factors (carry, mark‑to‑market, delta, vega, etc.) without altering the core backtester loop.
 
@@ -1012,7 +1074,7 @@ The framework supports decomposing daily PnL into user‑specified risk factors 
 - To add a new decomposition (e.g., a new risk factor), you only need to update the calculator for that asset class and extend the `risk_measures` list in the configuration. The backtester and the Instrument’s storage remain unchanged.
 - For asset classes with no decomposition (Phase 1 equities), the `pnl_calculator` is `None` and no extra work is performed.
 
-### 3.11 Cost Model (transaction cost handling)
+### 3.13 Cost Model (transaction cost handling)
 
 Transaction costs are fully decoupled from the backtester’s daily P&L loop.  
 The backtester records cost‑relevant events at the **structure** level: each `StrategyStructure` logs events (open, partial add, partial/full unwind, roll) together with the structure’s per‑unit risk exposure at that moment.  
@@ -1120,7 +1182,7 @@ costs = cost_model.compute_costs(trade_history)
 
 This replaces the old `FixedCostModel`; no functionality is lost. To add a new asset class (e.g., equity options), write an `EquityOptionCostCalculator` implementing `compute_cost` with vega‑based pricing, and register it under `"equity_option"` in the calculators dict. No core backtester, Trade, StrategyStructure, Summary, or CostModel code changes.
 
-### 3.12 Persistence of Backtest Results
+### 3.14 Persistence of Backtest Results
 
 - After the backtest completes, the entire `trade_history` list (together with any `CostModel` and `Summary` outputs) can be **serialized to disk** (e.g., via `pickle`, `joblib`, or custom JSON/Parquet writers).
 - This saved state is completely independent of the backtester, pricers, and data providers. It contains:
@@ -1130,7 +1192,7 @@ This replaces the old `FixedCostModel`; no functionality is lost. To add a new a
 - Once reloaded, a new `Summary` instance (with a different spec, filters, or FX rates) can be applied to the saved `trade_history` without re‑running the backtest.
 - This enables a workflow where a heavy backtest is executed once, and subsequent analysis, filtering, and reporting are performed interactively or at a later time, without duplicating computation.
 
-### 3.13 Architecture summary (informal)
+### 3.15 Architecture summary (informal)
 ```markdown
 Backtester
 ├── active_trades: list[Trade]
@@ -1163,7 +1225,7 @@ Instrument
   When open positions are carried from the training window into the validation window, the first few days of validation may be distorted by legacy trades that were entered on training data. A `burn_in_days` parameter discards the P&L from the earliest part of the validation window, allowing those legacy positions to be closed by their own exit signals (or to roll off naturally) while new OOS‑driven positions are established.  
   - For **scaling‑in strategies**, the burn‑in lets the portfolio reach its intended size.
   - For **signal‑in/signal‑out strategies**, the burn‑in flushes out positions that originated on training data, leaving a clean state where all open trades reflect OOS decisions.
-  Implementation is runner‑level only; the `Backtester` already supports initialisation from a pre‑existing state (see Section 3.7).
+  Implementation is runner‑level only; the `Backtester` already supports initialisation from a pre‑existing state (see Section 3.9).
 
 - **Combinatorial Purged Cross‑Validation (CPCV) – future extension:**  
   - For each test window, the `FoldGenerator` can produce multiple training windows of different lengths (e.g., 2, 3, and 4 years) that all end at the test start date. Running the backtester on each combination yields an **ensemble of out‑of‑sample paths** for the same test period.  
@@ -1246,7 +1308,7 @@ Both tests are purely runner‑level: they use the existing `Backtester`, `Summa
 ### 4.5 Deployment
 
 - Once a strategy passes DSR (and, where applicable, the appropriate randomisation test), we deploy it with parameters re‑estimated on all available data (the entire historical dataset, using the same nested selection procedure). This provides the best estimate of parameters for live trading.
-- Live performance should be monitored by running the backtester in incremental mode (see Section 3.7, “Future extension – incremental backtesting”), producing a theoretical P&L each day that can be compared against actual broker‑filled trades to track slippage and strategy drift.
+- Live performance should be monitored by running the backtester in incremental mode (see Section 3.9, “Future extension – incremental backtesting”), producing a theoretical P&L each day that can be compared against actual broker‑filled trades to track slippage and strategy drift.
 - The incremental theoretical P&L produced by the backtester each day is the **cleanest measure of the strategy’s ongoing performance**. Unlike actual realised P&L, which can be affected by fluctuating AUM, capital allocations, and execution timing, the theoretical OOS series reflects exactly what the strategy’s logic would produce under ideal, unconfounded conditions. This makes it the primary diagnostic for detecting strategy drift or degradation, independent of operational factors.
 - Periodic refitting (e.g., monthly) follows the same walk‑forward logic, extending the training window as new data arrives.
 
@@ -1260,7 +1322,7 @@ Build the following in order, each tested before moving on:
 3. **EquityPricer** – implements `price()`, `valuation_data()` (empty for equities), `resolve_instrument()` (pass‑through for equities), and `pricing_inputs()` (returns an empty dict).
 4. **StrategyStructure** – a standalone class with `legs` (list of `Instrument`, always one leg in Phase 1), an event log for cost, and lifecycle methods `open(date)`, `unwind(date, fraction=1.0)`, and `roll(new_structure, date)` (stubbed – raises `NotImplementedError` in Phase 1). Building this as a real class from day one avoids any refactoring of `Trade`, the backtester, or signals when multi‑leg support is added later.
 5. **Trade** – with `active_structures` / `structure_history`, lifecycle methods (`add_structure`, `unwind_structure`), tags, and cost‑event recording. In Phase 1 every trade contains exactly one structure with one leg. `roll_structure` may be implemented as a stub; it is not exercised by the SMA example.
-6. **CostModel** – `FixedCostModel` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.11).
+6. **CostModel** – `FixedCostModel` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.13).
 7. **BaseSignal** and **SMACrossoverSignal** – signal returns `TargetTrade` dictionaries with `NEW` / `UNWIND` actions; one‑day lag handled internally.
 8. **Backtester** – full daily loop with P&L computation, instrument resolution, data‑availability checks, and order execution (`NEW` and `UNWIND`). `ROLL` handling can be stubbed; it is not required for the SMA example.
 9. **Summary** – accepts `SummarySpec`, produces standard reports (equity curve, trade summary, metrics, hit ratio, drawdown table), and calls `CostModel.compute_costs()`.
@@ -1272,9 +1334,12 @@ Build the following in order, each tested before moving on:
 11. **Unit tests** – for Instrument, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.
 
 ### Phase 2: Validation
-1. Implement `FoldGenerator` with purge/embargo.
-2. Implement nested parameter selection: walk‑forward loop that, per fold, does grid search using a sub‑training/sub‑validation split within the train window, then evaluates best params on validation.
-3. Extend Summary to aggregate out‑of‑sample trades across folds.
+1. **CalendarProvider** (§3.5): Implement with CSV holiday files, union/intersection logic, and core methods (`trading_days`, `is_trading_day`, `next_trading_day`). Replace `BacktestConfig.calendar_ticker` with a CalendarProvider instance.
+2. **OrderGenerator** (§3.8): Build the rule‑chain infrastructure. Implement **CalendarValidationRule** as the first `OrderRule`, using CalendarProvider to reject orders on holidays. Migrate any existing scaling/hedging logic into additional rules as needed.
+3. **Backtester pipeline update:** Modify the daily loop to use the new signal → OrderGenerator → execution pipeline (§3.9).
+4. Implement `FoldGenerator` with purge/embargo.
+5. Implement nested parameter selection: walk‑forward loop that, per fold, does grid search using a sub‑training/sub‑validation split within the train window, then evaluates best params on validation.
+6. Extend Summary to aggregate out‑of‑sample trades across folds.
 
 ### Phase 3: Statistical rigor
 1. Implement Deflated Sharpe Ratio calculation.
@@ -1404,8 +1469,9 @@ This separation ensures that the research engine never depends on the schemas of
 - **Phase 2 (SQL integration):**  
   A separate ETL (Extract‑Transform‑Load) pipeline is built to pull, clean, and store data in a SQL database. The database schema supports `source` and `observation_time` columns from the start.  
   A `SQLDataFeed` is implemented, fulfilling all the same dataset names as the CSV version. The `CSVDataFeed` is swapped out for the `SQLDataFeed` via configuration—the entire research framework remains untouched.  
+  - **Calendar system:** Introduce the `CalendarProvider` (§3.5). Replace the temporary `calendar_ticker` with a calendar configuration. The provider will initially load holiday lists from simple CSV files and support union/intersection logic. Point‑in‑time holiday data will be added when the SQL data pipeline supports versioned calendars.
   **Holiday calendars** (per currency, exchange, or instrument) are stored in the database and made available through the `DataFeed`. These serve two purposes:
-    - **Pricing input:** required for computing cash‑flow schedules (swaps), converting tenors to absolute maturity dates (forwards, options), and determining settlement dates. The Pricer’s `resolve_instrument` method (Section 3.5) consumes these calendars.
+    - **Pricing input:** required for computing cash‑flow schedules (swaps), converting tenors to absolute maturity dates (forwards, options), and determining settlement dates. The Pricer’s `resolve_instrument` method (Section 3.6) consumes these calendars.
     - **Liquidity masking:** for OTC instruments where data may exist on local holidays but liquidity is questionable, the `DataFeed` can use a holiday calendar to treat those dates as having no valid data, even if raw quotes exist. This ensures that pricing and P&L are only computed on days with genuine market liquidity.
 
 - **Phase 3 (typed providers for complex instruments):**  
