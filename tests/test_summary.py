@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from backtester.cost_model import FixedCostModel
+from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.instruments.instrument import Instrument
 from backtester.structures.strategy_structure import StrategyStructure
 from backtester.summary import Summary
@@ -15,7 +15,9 @@ def _make_trade(trade_id, entry_date, exit_date, leg_id, pnl_list, tags=None):
     leg.entry_price = 450.0
     leg.current_price = 455.0
 
-    structure = StrategyStructure(structure_id=f"s_{trade_id}", legs=[leg])
+    structure = StrategyStructure(
+        structure_id=f"s_{trade_id}", legs=[leg], cost_leg_ids=[leg_id],
+    )
     structure.original_entry_date = entry_date
     structure.open(entry_date)
     if exit_date:
@@ -37,7 +39,7 @@ class TestSummaryEquityCurve:
             leg_id, [10.0, -5.0, 20.0, -10.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -57,7 +59,7 @@ class TestSummaryEquityCurve:
             leg_id, [10.0, -5.0, 20.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": {"include": ["gross", "net"]}}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -77,7 +79,7 @@ class TestSummaryTradeSummary:
             tags=["alpha", "momentum"],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -96,7 +98,7 @@ class TestSummaryTradeSummary:
             leg_id, [100.0, -50.0, 30.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -114,7 +116,7 @@ class TestSummaryMissingDataModes:
             leg_id, [10.0, float("nan"), 20.0, -5.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}, "missing_data_mode": "any"}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -129,7 +131,7 @@ class TestSummaryMissingDataModes:
         t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, -5.0, 20.0])
         t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, float("nan"), 15.0])
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}, "missing_data_mode": "all"}
         summary = Summary(spec)
         result = summary.generate([t1, t2], cost_model)
@@ -146,7 +148,7 @@ class TestSummaryFiltering:
         t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, 20.0], tags=["alpha"])
         t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 15.0], tags=["beta"])
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {
             "reports": {
                 "alpha_group": {
@@ -172,7 +174,7 @@ class TestSummaryFiltering:
         t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0], tags=["live"])
         t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0], tags=["dead"])
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {
             "reports": {
                 "filter": lambda t: t.tags and "live" in t.tags,
@@ -195,7 +197,7 @@ class TestSummaryMetrics:
             leg_id, [10.0, -5.0, 20.0, 15.0, -10.0, 8.0, 12.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"metrics": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -213,7 +215,7 @@ class TestSummaryMetrics:
             leg_id, [10.0, -5.0, 20.0, 15.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"metrics": {"include": ["sharpe_gross"]}}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -231,7 +233,7 @@ class TestSummaryHitRatio:
             leg_id, [10.0, -5.0, 20.0, -10.0, 5.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"hit_ratio": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -250,7 +252,7 @@ class TestSummaryDrawdownTable:
             leg_id, [10.0, -5.0, -8.0, 3.0, 6.0, -2.0, 4.0],
         )
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"drawdown_table": {"top_n": 3}}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)
@@ -271,7 +273,7 @@ class TestSummaryByUnderlying:
         t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 10.0, -3.0])
         # SPY is default
 
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"by_underlying": True}}
         summary = Summary(spec)
         result = summary.generate([t1, t2], cost_model)
@@ -282,7 +284,7 @@ class TestSummaryByUnderlying:
 
 class TestSummaryEmpty:
     def test_empty_trade_history(self):
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
         result = summary.generate([], cost_model)
@@ -295,7 +297,7 @@ class TestSummaryNoOutputReturnsDict:
         trade, leg = _make_trade(
             "t1", "2024-01-02", None, leg_id, [10.0],
         )
-        cost_model = FixedCostModel(fees={"equity": 2.0})
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}}
         summary = Summary(spec)
         result = summary.generate([trade], cost_model)

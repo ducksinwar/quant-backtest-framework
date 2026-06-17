@@ -496,6 +496,9 @@ class TestBacktesterDataAvailability:
             def pricing_inputs(self, instrument, date):
                 return {}
 
+            def compute_cost_exposure(self, instrument, date):
+                return {"notional_per_unit": instrument.current_price}
+
         pricer = GappyPricer()
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
 
@@ -645,3 +648,210 @@ class TestTradingDaysStrings:
         assert len(days) > 0
         assert all(isinstance(d, str) for d in days)
         assert all("-" in d for d in days)
+
+
+class TestBacktesterCostExposure:
+    def test_cost_exposures_passed_to_trade_on_new(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        history = bt.run()
+
+        assert len(history) == 1
+        structure = history[0].structure_history[0]
+        assert len(structure.event_log) >= 1
+        open_event = structure.event_log[0]
+        assert open_event["event_type"] == "open"
+        assert "cost_exposures" in open_event
+        assert len(open_event["cost_exposures"]) == 1
+        leg_id = list(open_event["cost_exposures"].keys())[0]
+        assert "notional_per_unit" in open_event["cost_exposures"][leg_id]
+
+    def test_cost_leg_ids_populated(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        history = bt.run()
+
+        assert len(history) == 1
+        structure = history[0].structure_history[0]
+        assert len(structure.cost_leg_ids) == 1
+        assert structure.cost_leg_ids[0] == structure.legs[0].leg_id
+
+    def test_cost_exposures_on_unwind(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "2024-01-05": [
+                {"Action": "UNWIND", "trade_id": None, "info": []}
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-09",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        history = bt.run()
+
+        assert len(history) == 1
+        structure = history[0].structure_history[0]
+        assert len(structure.event_log) >= 2
+        close_event = structure.event_log[-1]
+        assert close_event["event_type"] == "full close"
+        assert "cost_exposures" in close_event
+        assert len(close_event["cost_exposures"]) == 1
+
+
+class TestBacktesterRecordPricingInputs:
+    def test_pricing_inputs_not_recorded_when_flag_false(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, record_pricing_inputs=False)
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        history = bt.run()
+
+        leg = history[0].structure_history[0].legs[0]
+        assert leg.pricing_inputs == {}
+
+    def test_pricing_inputs_recorded_when_flag_true(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, record_pricing_inputs=True)
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        history = bt.run()
+
+        leg = history[0].structure_history[0].legs[0]
+        assert len(leg.daily_total_pnl) >= 1
+        assert isinstance(leg.pricing_inputs, dict)

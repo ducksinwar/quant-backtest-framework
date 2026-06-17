@@ -393,3 +393,68 @@ Refactor the cost-exposure flow in `design_notes.md` so that the core framework 
 
 ### Commit
 `docs: refactor cost-exposure flow to be fully asset-agnostic`
+
+## 2026-06-17 – Cost-exposure refactoring implementation
+
+### Prompt
+Implement the full cost-exposure refactoring across the backtester package to match the updated `design_notes.md`. Keep `daily_total_pnl` as `list[float]` (rejected the `pd.Series` migration). Defer the Summary cost-alignment fix to next session.
+
+### Changes applied
+
+**Pricers:**
+- `base_pricer.py` — Added abstract method `compute_cost_exposure(instrument, date) -> dict[str, float] | None` (5th abstract method).
+- `equity_pricer.py` — Implemented `compute_cost_exposure` returning `{"notional_per_unit": instrument.current_price}`.
+
+**StrategyStructure:**
+- Removed `get_cost_exposure()` entirely.
+- Added `cost_leg_ids` attribute (list of leg IDs) to `__init__`.
+- `open()`, `add_size()`, `unwind()` now accept `cost_exposures: dict[str, dict] | None = None`.
+- Event log key changed from `"cost_exposure"` (singular, flat) to `"cost_exposures"` (plural, nested by leg_id).
+- `cost_leg_id` derived from `cost_exposures` key set rather than hard-coded `legs[0]`.
+
+**Trade:**
+- `add_structure()`, `add_to_structure()`, `unwind_structure()`, `roll_structure()` all accept optional `cost_exposures` parameter and forward to StrategyStructure lifecycle methods.
+
+**CostModel:**
+- New `BaseCostCalculator(ABC)` with `compute_cost(leg_id, event, data_feed=None) -> float`.
+- `CostModel` is now a concrete class with `__init__(self, calculators, data_feed=None)`.
+- `compute_costs` iterates `event["cost_exposures"]` keys, dispatches to per-asset-class calculator.
+- New `EquityCostCalculator(BaseCostCalculator)` — reads `event["cost_exposures"][leg_id]["notional_per_unit"] * event["unit_size_change"] * bps / 10000`.
+- Removed `FixedCostModel`.
+- Leg lookup by `leg_id` for multi-leg structures.
+
+**Backtester:**
+- Module-level `_INFRA_KEYS` constant: `{"ticker", "size", "multiplier", "currency", "asset_class", "tags", "structure_id", "leg_id", "cost_leg"}`.
+- `_resolve_and_price_leg` now returns `tuple[Instrument | None, dict | None]` (instrument + resolved dict for cost_leg inspection).
+- `_build_structure_from_info` now calls `_collect_cost_leg_ids()` to populate `structure.cost_leg_ids`.
+- `_collect_cost_leg_ids` — if `"cost_leg": true` in any resolved dict, collects those leg_ids; single-leg default if none marked.
+- New `_compute_cost_exposures(structure, date) -> dict[str, dict]` — iterates `structure.cost_leg_ids`, calls `pricer.compute_cost_exposure(leg, date)`. Warns on `None` return, skips leg.
+- `_execute_new_trade` — computes `cost_exposures` for each structure, passes to `trade.add_structure()`.
+- `_execute_add_to_existing` — both new-structure and partial-add paths compute `cost_exposures` before calling Trade.
+- `_execute_unwind` — all three paths (full-all, full-specific, partial) compute `cost_exposures` BEFORE size reduction.
+- `_compute_pnl_for_date` — added `record_pricing_inputs` block calling `pricer.pricing_inputs()` and appending to leg's dict time series. NaN appended on missing-price days.
+- `_check_data_available` — replaced `type("_Temp")` hack with proper `Instrument()` using `_INFRA_KEYS` filtering.
+
+**Example:**
+- `sma_crossover_example.py` — replaced `FixedCostModel(fees={...})` with `CostModel(calculators={"equity": EquityCostCalculator(bps=2.0)})`.
+
+**Tests:**
+- `test_pricers.py` — added `test_compute_cost_exposure_returns_notional_per_unit`.
+- `test_strategy_structure.py` — full rewrite for new signatures and `cost_exposures` keys; removed `test_get_cost_exposure_returns_notional`; added `test_cost_leg_ids` tests.
+- `test_cost_model.py` — full rewrite: `TestBaseCostCalculator`, `TestEquityCostCalculator`, `TestCostModel` (8 tests).
+- `test_summary.py` — updated imports and `_make_trade` to use new CostModel API and `cost_leg_ids`.
+- `test_backtester.py` — added `TestBacktesterCostExposure` (3 tests: NEW, cost_leg_ids, UNWIND) and `TestBacktesterRecordPricingInputs` (2 tests); fixed `GappyPricer` mock.
+- `test_trade.py` — unchanged (existing tests pass with default `cost_exposures=None`).
+- `test_instrument.py` — unchanged.
+
+All 140 tests pass.
+
+### Deferred
+- Summary cost alignment (`summary.py:43-49` — index mismatch). Fix in next session.
+- `valuation_data` fetch during PnL step (Phase 1 never enables decomposition).
+
+### Manual changes
+- None
+
+### Commit
+`feat: implement asset-agnostic cost-exposure flow across all core modules`

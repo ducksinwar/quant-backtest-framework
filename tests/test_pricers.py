@@ -31,7 +31,9 @@ class TestEquityPricer:
 
     @pytest.fixture
     def instrument(self):
-        return Instrument(ticker="SPY", asset_class="equity")
+        inst = Instrument(ticker="SPY", asset_class="equity")
+        inst.current_price = 450.75
+        return inst
 
     def test_price_delegates_to_provider(self, pricer, mock_provider, instrument):
         mock_provider.get_price.return_value = 450.75
@@ -75,6 +77,10 @@ class TestEquityPricer:
     def test_pricing_inputs_returns_empty_dict(self, pricer, instrument):
         result = pricer.pricing_inputs(instrument, "2024-01-15")
         assert result == {}
+
+    def test_compute_cost_exposure_returns_notional_per_unit(self, pricer, instrument):
+        result = pricer.compute_cost_exposure(instrument, "2024-01-15")
+        assert result == {"notional_per_unit": 450.75}
 
     def test_equity_pricer_is_instance_of_base_pricer(self, mock_provider):
         pricer = EquityPricer(mock_provider)

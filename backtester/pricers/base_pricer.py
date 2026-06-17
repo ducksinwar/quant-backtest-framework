@@ -19,3 +19,9 @@ class BasePricer(ABC):
     @abstractmethod
     def pricing_inputs(self, instrument, date: str) -> dict[str, float] | None:
         ...
+
+    @abstractmethod
+    def compute_cost_exposure(
+        self, instrument, date: str
+    ) -> dict[str, float] | None:
+        ...

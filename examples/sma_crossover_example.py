@@ -4,7 +4,7 @@ import sys
 import pandas as pd
 
 from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester
-from backtester.cost_model import FixedCostModel
+from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
 from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider
@@ -61,7 +61,7 @@ def main():
         return
 
     # 6. Compute costs
-    cost_model = FixedCostModel({"equity": 2.0})
+    cost_model = CostModel(calculators={"equity": EquityCostCalculator(bps=2.0)})
     costs = cost_model.compute_costs(trade_history)
     total_cost = sum(s.sum() for s in costs.values())
     print(f"Total transaction cost: ${total_cost:,.2f}")

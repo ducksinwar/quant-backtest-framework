@@ -18,3 +18,8 @@ class EquityPricer(BasePricer):
 
     def pricing_inputs(self, instrument, date: str) -> dict[str, float] | None:
         return {}
+
+    def compute_cost_exposure(
+        self, instrument, date: str
+    ) -> dict[str, float]:
+        return {"notional_per_unit": instrument.current_price}

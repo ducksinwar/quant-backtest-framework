@@ -16,6 +16,19 @@ from backtester.structures.strategy_structure import StrategyStructure
 from backtester.trades.trade import Trade
 
 
+_INFRA_KEYS = {
+    "ticker",
+    "size",
+    "multiplier",
+    "currency",
+    "asset_class",
+    "tags",
+    "structure_id",
+    "leg_id",
+    "cost_leg",
+}
+
+
 @dataclass
 class AssetClassConfig:
     pricer: object
@@ -84,6 +97,8 @@ class Backtester:
                     price_today = pricer.price(leg, date)
                     if price_today is None:
                         leg.daily_total_pnl.append(float("nan"))
+                        if cfg.record_pricing_inputs:
+                            self._record_pricing_inputs_nan(leg, pricer, date, cfg)
                         continue
 
                     if leg.current_price != 0.0:
@@ -97,6 +112,20 @@ class Backtester:
                         leg.daily_total_pnl.append(0.0)
 
                     leg.current_price = price_today
+
+                    if cfg.record_pricing_inputs:
+                        pi = pricer.pricing_inputs(leg, date)
+                        if pi is not None:
+                            for key, val in pi.items():
+                                series = leg.pricing_inputs.setdefault(key, [])
+                                series.append(val)
+
+    def _record_pricing_inputs_nan(self, leg, pricer, date, cfg):
+        pi = pricer.pricing_inputs(leg, date)
+        if pi is not None:
+            for key in pi:
+                series = leg.pricing_inputs.setdefault(key, [])
+                series.append(float("nan"))
 
     def _compute_risk_for_date(self, date: str):
         for trade in self.active_trades:
@@ -138,8 +167,19 @@ class Backtester:
                     resolved = pricer.resolve_instrument(leg_dict, date)
                     if resolved is None:
                         return False
-                    ticker = resolved.get("ticker")
-                    temp = type("_Temp", (), {"ticker": ticker})()
+                    ticker = resolved.get("ticker", "")
+                    params = {
+                        k: v
+                        for k, v in resolved.items()
+                        if k not in _INFRA_KEYS
+                    }
+                    temp = Instrument(
+                        ticker=ticker,
+                        asset_class=resolved.get("asset_class", asset_class),
+                        multiplier=resolved.get("multiplier", 1.0),
+                        currency=resolved.get("currency", "USD"),
+                        params=params,
+                    )
                     if pricer.price(temp, date) is None:
                         return False
             return True
@@ -223,6 +263,40 @@ class Backtester:
             )
         return tuple(records)
 
+    # ─── cost‑exposure helper ──────────────────────────────────────
+
+    def _compute_cost_exposures(
+        self, structure: StrategyStructure, date: str
+    ) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        if not structure.cost_leg_ids or not structure.legs:
+            return result
+
+        asset_class = structure.legs[0].asset_class
+        cfg = self._config.asset_class_configs.get(asset_class)
+        if cfg is None:
+            return result
+        pricer = cfg.pricer
+
+        leg_by_id = {leg.leg_id: leg for leg in structure.legs}
+
+        for leg_id in structure.cost_leg_ids:
+            leg = leg_by_id.get(leg_id)
+            if leg is None:
+                continue
+            exposure = pricer.compute_cost_exposure(leg, date)
+            if exposure is None:
+                warnings.warn(
+                    f"compute_cost_exposure returned None for leg {leg_id}"
+                    f" on {date}; treating as cost‑free for this event."
+                )
+                continue
+            result[leg_id] = exposure
+
+        return result
+
+    # ─── order dispatch ────────────────────────────────────────────
+
     def _execute_order(self, order: dict, date: str):
         if not self._check_data_available(order, date):
             warnings.warn(
@@ -262,7 +336,8 @@ class Backtester:
         trade = Trade(trade_id=str(uuid.uuid4()))
         trade.entry_date = date
         for structure in structures:
-            trade.add_structure(structure, date)
+            cost_exposures = self._compute_cost_exposures(structure, date)
+            trade.add_structure(structure, date, cost_exposures)
 
         self.active_trades.append(trade)
         self.trade_history.append(trade)
@@ -279,11 +354,19 @@ class Backtester:
             if structure_id is not None and size_key is not None:
                 structure = self._find_structure_in_trade(trade, structure_id)
                 if structure is not None:
-                    trade.add_to_structure(structure, date, size_key)
+                    cost_exposures = self._compute_cost_exposures(
+                        structure, date,
+                    )
+                    trade.add_to_structure(
+                        structure, date, size_key, cost_exposures,
+                    )
             else:
                 structure = self._build_structure_from_info(info, date)
                 if structure is not None:
-                    trade.add_structure(structure, date)
+                    cost_exposures = self._compute_cost_exposures(
+                        structure, date,
+                    )
+                    trade.add_structure(structure, date, cost_exposures)
 
     def _execute_unwind(self, order: dict, date: str):
         trade_id = order.get("trade_id")
@@ -294,7 +377,13 @@ class Backtester:
                 for trade in list(self.active_trades):
                     trade.exit_date = date
                     for structure in list(trade.active_structures):
-                        trade.unwind_structure(structure, date, fraction=1.0)
+                        cost_exposures = self._compute_cost_exposures(
+                            structure, date,
+                        )
+                        trade.unwind_structure(
+                            structure, date, fraction=1.0,
+                            cost_exposures=cost_exposures,
+                        )
                     self.active_trades = [
                         t for t in self.active_trades if t is not trade
                     ]
@@ -307,7 +396,13 @@ class Backtester:
         if not infos:
             trade.exit_date = date
             for structure in list(trade.active_structures):
-                trade.unwind_structure(structure, date, fraction=1.0)
+                cost_exposures = self._compute_cost_exposures(
+                    structure, date,
+                )
+                trade.unwind_structure(
+                    structure, date, fraction=1.0,
+                    cost_exposures=cost_exposures,
+                )
             if not trade.active_structures:
                 self.active_trades = [
                     t for t in self.active_trades if t is not trade
@@ -325,17 +420,35 @@ class Backtester:
                     continue
 
                 if size_key is not None:
-                    total_size = sum(leg.current_size for leg in structure.legs)
-                    fraction = size_key / total_size if total_size > 0 else 0.0
-                    trade.unwind_structure(structure, date, fraction=fraction)
+                    total_size = sum(
+                        leg.current_size for leg in structure.legs
+                    )
+                    fraction = (
+                        size_key / total_size if total_size > 0 else 0.0
+                    )
+                    cost_exposures = self._compute_cost_exposures(
+                        structure, date,
+                    )
+                    trade.unwind_structure(
+                        structure, date, fraction=fraction,
+                        cost_exposures=cost_exposures,
+                    )
                 else:
-                    trade.unwind_structure(structure, date, fraction=1.0)
+                    cost_exposures = self._compute_cost_exposures(
+                        structure, date,
+                    )
+                    trade.unwind_structure(
+                        structure, date, fraction=1.0,
+                        cost_exposures=cost_exposures,
+                    )
 
             if not trade.active_structures:
                 trade.exit_date = date
                 self.active_trades = [
                     t for t in self.active_trades if t is not trade
                 ]
+
+    # ─── structure / leg construction ──────────────────────────────
 
     def _build_structure_from_info(
         self, info: dict, date: str
@@ -344,20 +457,40 @@ class Backtester:
         structure_id = info.get("structure_id") or str(uuid.uuid4())
 
         legs = []
+        resolved_dicts = []
         for leg_dict in leg_dicts:
-            instrument = self._resolve_and_price_leg(leg_dict, date)
+            instrument, resolved = self._resolve_and_price_leg(leg_dict, date)
             if instrument is None:
                 return None
             legs.append(instrument)
+            resolved_dicts.append(resolved)
 
         if not legs:
             return None
 
-        return StrategyStructure(structure_id=structure_id, legs=legs)
+        cost_leg_ids = self._collect_cost_leg_ids(resolved_dicts, legs)
+
+        return StrategyStructure(
+            structure_id=structure_id,
+            legs=legs,
+            cost_leg_ids=cost_leg_ids,
+        )
+
+    @staticmethod
+    def _collect_cost_leg_ids(
+        resolved_dicts: list[dict], legs: list[Instrument],
+    ) -> list[str]:
+        ids = []
+        for resolved, leg in zip(resolved_dicts, legs):
+            if resolved.get("cost_leg"):
+                ids.append(leg.leg_id)
+        if not ids and len(legs) == 1:
+            ids.append(legs[0].leg_id)
+        return ids
 
     def _resolve_and_price_leg(
         self, leg_dict: dict, date: str
-    ) -> Instrument | None:
+    ) -> tuple[Instrument | None, dict | None]:
         ticker = leg_dict.get("ticker")
         asset_class = leg_dict.get("asset_class", "equity")
         if asset_class not in self._config.asset_class_configs:
@@ -368,13 +501,10 @@ class Backtester:
 
         resolved = pricer.resolve_instrument(leg_dict, date)
         if resolved is None:
-            return None
+            return None, None
 
         leg_id = str(uuid.uuid4())
-        common_keys = {
-            "ticker", "size", "multiplier", "currency", "asset_class", "tags",
-        }
-        params = {k: v for k, v in resolved.items() if k not in common_keys}
+        params = {k: v for k, v in resolved.items() if k not in _INFRA_KEYS}
 
         size = resolved.get("size", 0)
 
@@ -391,12 +521,14 @@ class Backtester:
 
         entry_price = pricer.price(instrument, date)
         if entry_price is None:
-            return None
+            return None, None
 
         instrument.entry_price = entry_price
         instrument.current_price = entry_price
 
-        return instrument
+        return instrument, resolved
+
+    # ─── lookups ───────────────────────────────────────────────────
 
     def _find_active_trade(self, trade_id: str) -> Trade | None:
         for trade in self.active_trades:
