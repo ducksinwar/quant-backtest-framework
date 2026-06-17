@@ -76,7 +76,10 @@ def main():
     }
 
     summary = Summary(spec)
-    results = summary.generate(trade_history, cost_model)
+    results = summary.generate(
+        trade_history, cost_model,
+        trading_days=bt.trading_days,
+    )
 
     if results is not None:
         # Print metrics

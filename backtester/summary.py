@@ -16,10 +16,11 @@ class Summary:
         trade_history: list,
         cost_model,
         fx_rates: dict[str, pd.Series] | None = None,
+        trading_days: list[str] | None = None,
     ) -> dict | None:
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
-        leg_data = self._extract_leg_data(trade_history, cost_map)
+        leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
 
         results: dict[str, pd.DataFrame] = {}
         self._generate_report_tree(
@@ -34,19 +35,27 @@ class Summary:
         return results
 
     def _extract_leg_data(
-        self, trade_history: list, cost_map: dict
+        self, trade_history: list, cost_map: dict,
+        trading_days: list[str] | None = None,
     ) -> list[dict]:
         rows = []
         for trade in trade_history:
             for structure in trade.structure_history:
                 for leg in structure.legs:
-                    gross = pd.Series(leg.daily_total_pnl, dtype=float)
+                    pnl_list = leg.daily_total_pnl
+                    if trading_days is not None and len(pnl_list) > 0:
+                        gross = pd.Series(
+                            pnl_list,
+                            index=trading_days[:len(pnl_list)],
+                            dtype=float,
+                        )
+                    else:
+                        gross = pd.Series(pnl_list, dtype=float)
 
                     cost_series = cost_map.get(leg.leg_id, pd.Series(dtype=float))
-                    cost_aligned = pd.Series(0.0, index=gross.index)
-                    for i, (idx, c) in enumerate(cost_series.items()):
-                        if idx in gross.index:
-                            cost_aligned.loc[idx] = cost_aligned.loc.get(idx, 0.0) + c
+                    cost_aligned = cost_series.reindex(
+                        gross.index, fill_value=0.0,
+                    )
 
                     net = gross - cost_aligned
 

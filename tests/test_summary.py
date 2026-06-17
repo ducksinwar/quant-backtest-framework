@@ -42,7 +42,8 @@ class TestSummaryEquityCurve:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        trading_days = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+        result = summary.generate([trade], cost_model, trading_days=trading_days)
 
         assert result is not None
         assert "equity_curve" in result
@@ -51,6 +52,33 @@ class TestSummaryEquityCurve:
         assert "cost" in df.columns
         assert "net" in df.columns
         assert len(df) == 4
+        # With trading_days, gross is date-indexed and cost aligns
+        assert list(df.index) == trading_days
+
+    def test_cost_subtracted_from_net(self):
+        leg_id = "leg_001"
+        trade, leg = _make_trade(
+            "t1", "2024-01-02", "2024-01-05",
+            leg_id, [100.0, -50.0, 30.0],
+        )
+        # Inject cost_exposures into the open event so CostModel finds it
+        structure = trade.structure_history[0]
+        structure.event_log[0]["cost_exposures"] = {
+            leg_id: {"notional_per_unit": 450.0},
+        }
+
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        spec = {"reports": {"equity_curve": True}}
+        summary = Summary(spec)
+        trading_days = ["2024-01-02", "2024-01-03", "2024-01-05"]
+        result = summary.generate([trade], cost_model, trading_days=trading_days)
+
+        df = result["equity_curve"]
+        # Costs exist on 2024-01-02 (open event), net < gross
+        assert df.loc["2024-01-02", "net"] < df.loc["2024-01-02", "gross"]
+        # 450 * 100 * 2 / 10000 = 9.0
+        assert df.loc["2024-01-02", "cost"] == pytest.approx(9.0)
+        assert df.loc["2024-01-02", "net"] == pytest.approx(100.0 - 9.0)
 
     def test_equity_curve_include_subset(self):
         leg_id = "leg_001"

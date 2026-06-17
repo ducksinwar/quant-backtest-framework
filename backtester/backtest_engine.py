@@ -52,18 +52,19 @@ class Backtester:
         self._data_feed = data_feed
         self.active_trades: list[Trade] = []
         self.trade_history: list[Trade] = []
+        self.trading_days: list[str] = []
 
     def run(self) -> list[Trade]:
-        trading_days = self._data_feed.trading_days(
+        self.trading_days = self._data_feed.trading_days(
             self._config.calendar_ticker,
             self._config.start_date,
             self._config.end_date,
         )
 
-        if not trading_days:
+        if not self.trading_days:
             return self.trade_history
 
-        for T in trading_days:
+        for T in self.trading_days:
             portfolio_state = self._build_portfolio_state(T)
             trade_history_snapshot = self._build_trade_history_snapshot()
 

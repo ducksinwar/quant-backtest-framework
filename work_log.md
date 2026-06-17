@@ -458,3 +458,34 @@ All 140 tests pass.
 
 ### Commit
 `feat: implement asset-agnostic cost-exposure flow across all core modules`
+
+## 2026-06-17 – Fix Summary cost alignment (date-indexed gross PnL)
+
+### Prompt
+The Summary had a critical bug where `_extract_leg_data` built gross PnL as `pd.Series(leg.daily_total_pnl)` with an integer RangeIndex, while the CostModel returns date-string-indexed cost Series. The alignment check `date_str in RangeIndex` never matched, so costs were silently dropped and `net == gross` in all reports.
+
+### Changes applied
+
+**Backtester:**
+- `backtest_engine.py` — `trading_days` is now stored as `self.trading_days: list[str] = []` (initialized in `__init__`, assigned at start of `run()`). This exposes the full trading calendar for downstream consumers.
+
+**Summary:**
+- `summary.py` — `generate()` now accepts optional `trading_days: list[str] | None = None`.
+- `_extract_leg_data` — when `trading_days` is provided, constructs `pd.Series(pnl_list, index=trading_days[:len(pnl_list)], dtype=float)`, giving the gross PnL a date-string index.
+- Cost alignment simplified: `cost_series.reindex(gross.index, fill_value=0.0)` replaces the old broken loop (`for i, (idx, c) in enumerate(cost_series.items()): if idx in gross.index: ...`).
+- When `trading_days` is `None` (backward-compatible), falls back to integer-indexed Series as before.
+
+**Example:**
+- `sma_crossover_example.py` — passes `trading_days=bt.trading_days` to `summary.generate()`.
+
+**Tests:**
+- `test_summary.py` — added `test_cost_subtracted_from_net`: verifies that when `cost_exposures` are present in event log, the cost column is non-zero and `net = gross - cost`. Confirms the alignment fix works end-to-end.
+- Updated existing equity-curve test to pass `trading_days` and assert date index.
+
+All 141 tests pass.
+
+### Manual changes
+- None
+
+### Commit
+`fix: align Summary gross PnL with cost series via date-indexed trading_days`
