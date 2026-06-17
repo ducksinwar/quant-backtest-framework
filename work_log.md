@@ -1,3 +1,28 @@
+# Phase 1 Work Log
+
+**Start:** 2026‑06‑14 &nbsp;|&nbsp; **End:** 2026‑06‑17 &nbsp;|&nbsp; **Final review:** PASS &nbsp;|&nbsp; **Tests:** 141/141
+
+## Table of Contents
+
+| Step | Date | Topic | Section |
+|------|------|-------|---------|
+| 1 | 06‑14 | Foundation: Instrument, DataFeed, CsvBackend, EquityPriceProvider | [§ Foundation](#2026-06-14--foundation-classes-instrument-datafeed-csvbackend-equitypriceprovider) |
+| 2 | 06‑15 | Pricers: BasePricer + EquityPricer | [§ Pricers](#2026-06-15--pricers-basepricer--equitypricer) |
+| 3 | 06‑15 | StrategyStructure + Trade | [§ Structures & Trades](#2026-06-15--strategystructure-and-trade) |
+| 4 | 06‑15 | CostModel, BaseSignal, SMACrossoverSignal | [§ Costs & Signals](#2026-06-15--costmodel-basesignal-smacrossoversignal) |
+| 5 | 06‑16 | Backtester, Snapshots, trading_days | [§ Backtester](#2026-06-16--backtester-snapshots-and-datafeedtrading_days) |
+| 6 | 06‑16 | Fix look‑ahead bias, data check, loop reorder | [§ Loop fix](#2026-06-16--fix-look-ahead-bias-data-availability-check-and-loop-reorder) |
+| 7 | 06‑16 | Fix `_compute_risk_for_date` valuation storage | [§ Risk fix](#2026-06-16--fix-_compute_risk_for_date-valuation-data-storage) |
+| 8 | 06‑16 | Summary class (all standard reports) | [§ Summary](#2026-06-16--summary-class) |
+| 9 | 06‑16 | End‑to‑end example script | [§ Example](#2026-06-16--end-to-end-example-script) |
+| 10 | 06‑17 | Code review fixes: Instrument + DataFeed | [§ Review fixes](#2026-06-17--code-review-fixes-instrument-and-datafeed) |
+| 11 | 06‑17 | Design notes refactored (cost‑exposure flow) | [§ Design refactor](#2026-06-17--design-notes-refactored-asset-agnostic-cost-exposure-flow) |
+| 12 | 06‑17 | Cost‑exposure implementation (all modules) | [§ Cost impl](#2026-06-17--cost-exposure-refactoring-implementation) |
+| 13 | 06‑17 | Fix Summary cost alignment | [§ Cost fix](#2026-06-17--fix-summary-cost-alignment-date-indexed-gross-pnl) |
+| 14 | 06‑17 | **Final end‑to‑end code review** | [§ Final review](#2026-06-17--final-phase1-endtoend-code-review) |
+
+---
+
 ## 2026-06-14 – Foundation classes (Instrument, DataFeed, CsvBackend, EquityPriceProvider)
 
 ### Prompt
@@ -489,3 +514,42 @@ All 141 tests pass.
 
 ### Commit
 `fix: align Summary gross PnL with cost series via date-indexed trading_days`
+
+## 2026-06-17 – Final Phase 1 End‑to‑End Code Review
+
+### Prompt
+Act as a senior quant developer performing a final, end‑to‑end code review of Phase 1. Review **every module** against the current `design_notes.md` and check 12 specific items: Instrument fields, DataFeed/CsvBackend params, Pricers abstract methods, StrategyStructure cost_exposures, Trade cost forwarding, CostModel registry, Backtester daily loop order/_INFRA_KEYS/cost_leg_ids/cost exposure timing/record_pricing_inputs/entry_exit_dates, Summary cost alignment, Snapshots frozen, Signals unchanged, Example script correctness, and Tests.
+
+### Review findings (all PASS)
+
+| # | Check | Module(s) | Result |
+|---|-------|-----------|--------|
+| 1 | All fields present, dead `valuation_data_series`/`component_pnl_series` removed, `pricing_inputs` correctly init'd, `daily_total_pnl` is `list[float]` | Instrument | PASS |
+| 2 | `**params` pass through in `get_value`/`get_series`; `trading_days` returns date strings | DataFeed, CsvBackend | PASS |
+| 3 | `BasePricer` has 5 abstract methods (`price`, `valuation_data`, `resolve_instrument`, `pricing_inputs`, `compute_cost_exposure`); `EquityPricer.compute_cost_exposure` returns `{"notional_per_unit": instrument.current_price}` | BasePricer, EquityPricer | PASS |
+| 4 | `get_cost_exposure()` removed; `cost_leg_ids` present; lifecycle methods accept/store `cost_exposures`; event log key is `"cost_exposures"` (plural) | StrategyStructure | PASS |
+| 5 | All lifecycle methods (`add_structure`, `add_to_structure`, `unwind_structure`, `roll_structure`) accept and forward `cost_exposures` | Trade | PASS |
+| 6 | `FixedCostModel` fully removed; `BaseCostCalculator` (abstract), `EquityCostCalculator`, `CostModel` with registry pattern; `compute_costs` produces date-indexed per-leg Series correctly | CostModel | PASS |
+| 7a | Daily loop order: snapshot(T-1) → PnL(T-1→T) → orders → risk(T) correct | Backtester | PASS |
+| 7b | `_INFRA_KEYS` includes `"cost_leg"`, `"structure_id"`, `"leg_id"`; used to filter params in `_resolve_and_price_leg` and `_check_data_available` | Backtester | PASS |
+| 7c | `cost_leg_ids` populated via `_collect_cost_leg_ids` in `_build_structure_from_info` | Backtester | PASS |
+| 7d | `_compute_cost_exposures` called before every Trade lifecycle call (NEW, partial-add, unwind all variants) | Backtester | PASS |
+| 7e | For unwind, cost exposure computed **before** `structure.unwind()` reduces sizes | Backtester | PASS |
+| 7f | `record_pricing_inputs` checked correctly; pricing inputs stored on valid days, NaN padded on missing | Backtester | PASS |
+| 7g | `entry_date` set on `_execute_new_trade`/`Trade.add_structure`; `exit_date` set on all unwind paths when last structure closes | Backtester | PASS |
+| 8 | Cost alignment: `cost_series.reindex(gross.index, fill_value=0.0)` fixes index mismatch; `net = gross - cost_aligned`; all standard reports reflect net P&L | Summary | PASS |
+| 9 | All 5 snapshot classes frozen (`@dataclass(frozen=True)`); no live references; immutability tested | Snapshots | PASS |
+| 10 | `BaseSignal` interface unchanged; `SMACrossoverSignal` passes all 9 tests | Signals | PASS |
+| 11 | Uses `EquityCostCalculator` + `CostModel(calculators={...})`; passes `trading_days=bt.trading_days`; runs without errors | Example | PASS |
+| 12 | 141 tests pass (0 failures, 1 expected warning); cost-exposure flow tested at unit and integration level | Tests | PASS |
+
+### Minor gaps (non-blocking)
+- No test for the warning path when `compute_cost_exposure()` returns `None` (`backtest_engine.py:290-293`).
+- No explicit integration test verifying cost exposure computed before sizes change in partial unwind (unit tests cover mechanics independently).
+- `design_notes.md:1263` and `README.md:105` still mention old `FixedCostModel` name (historical references only).
+
+### Verdict
+**No deviations, regressions, or blocking issues found.** The codebase matches `design_notes.md` on all 12 review points. Phase 1 is complete and production-ready.
+
+### Manual changes
+- None
