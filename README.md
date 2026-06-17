@@ -4,7 +4,7 @@ A rigorous, production‑grade backtesting and validation engine for systematic 
 
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Phase](https://img.shields.io/badge/phase-1%20core%20skeleton-yellow)
+![Phase](https://img.shields.io/badge/phase-1%20manual%20review-yellow)
 
 ## Motivation
 
@@ -57,6 +57,7 @@ backtester/
         sma_crossover.py        # SMA crossover example
     trades/
         trade.py                # Trade class
+    snapshots.py                # Frozen snapshot dataclasses
     backtest_engine.py          # Daily loop orchestrator
     summary.py                  # Performance reports
     cost_model.py               # Transaction cost computation
@@ -102,7 +103,7 @@ If you don’t have a `market_data/` folder yet, create one and place your CSV i
    - `EquityPricer`
    - Your `Signal`
    - `Backtester` with the signal and asset class config
-   - `FixedCostModel` (or your own)
+   - `CostModel(calculators={"equity": EquityCostCalculator(bps=2.0)})`
 4. Run `backtester.run()` and pass the resulting `trade_history` to `Summary` for reports.
 
 See `examples/sma_crossover_example.py` for a complete, working template.
@@ -118,7 +119,7 @@ See `examples/sma_crossover_example.py` for a complete, working template.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Core skeleton – daily loop, equities, SMA example, summary reports, cost model | ⬜ In Progress |
+| 1 | Core skeleton – daily loop, equities, SMA example, summary reports, cost model | 🔄 Manual Review |
 | 2 | Purged walk‑forward cross‑validation with nested parameter selection | ⬜ Planned |
 | 3 | Deflated Sharpe Ratio, Strategy Graveyard, multiple testing correction | ⬜ Planned |
 | 4 | Multi‑leg trades, options, partial unwinds, advanced pricers | ⬜ Planned |
@@ -132,7 +133,7 @@ If you’re evaluating this project as a hiring manager, that file will give you
 ```bash
 pytest
 ```
-Unit tests cover `Instrument`, `DataFeed`, `Trade`, `CostModel`, and the backtester loop. More tests are added as the framework grows.
+141 unit tests cover `Instrument`, `DataFeed`, `Pricers`, `Trade`, `StrategyStructure`, `CostModel`, `Backtester`, `Summary`, and `Signals`.
 
 ## Contributing
 
