@@ -31,21 +31,6 @@ class Trade:
         additional_size: float,
         cost_exposures: dict[str, dict] | None = None,
     ):
-        total_size = sum(leg.current_size for leg in structure.legs)
-        for leg in structure.legs:
-            scale = (
-                leg.current_size / total_size
-                if total_size > 0
-                else 1.0 / len(structure.legs)
-            )
-            new_total = leg.current_size + scale * additional_size
-            leg.entry_price = (
-                (
-                    leg.entry_price * leg.current_size
-                    + leg.current_price * scale * additional_size
-                )
-                / new_total
-            )
         structure.add_size(date, additional_size, cost_exposures)
 
     def unwind_structure(

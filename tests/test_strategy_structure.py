@@ -61,9 +61,12 @@ class TestStrategyStructure:
         assert event["cost_exposures"] == add_exposure
 
     def test_add_size_scales_legs(self, structure):
+        structure.legs[0].entry_price = 440.0
+        structure.legs[0].current_price = 450.0
         structure.open("2024-01-15")
         structure.add_size("2024-01-20", 50.0)
         assert structure.legs[0].current_size == 150.0
+        assert structure.legs[0].entry_price == pytest.approx(443.3333333333333)
 
     def test_unwind_full_close_records_event(self, structure):
         structure.open("2024-01-15")
@@ -108,6 +111,16 @@ class TestStrategyStructure:
     def test_tags_default_none(self, leg):
         structure = StrategyStructure(structure_id="struct_1", legs=[leg])
         assert structure.tags is None
+
+    def test_original_entry_date_unchanged_by_add_unwind(self, structure):
+        structure.legs[0].entry_price = 440.0
+        structure.legs[0].current_price = 450.0
+        structure.open("2024-01-15")
+        assert structure.original_entry_date == "2024-01-15"
+        structure.add_size("2024-01-20", 50.0)
+        assert structure.original_entry_date == "2024-01-15"
+        structure.unwind("2024-01-22", fraction=0.3)
+        assert structure.original_entry_date == "2024-01-15"
 
     def test_multiple_events_in_log(self, structure):
         structure.open("2024-01-02")

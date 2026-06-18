@@ -553,3 +553,40 @@ Act as a senior quant developer performing a final, end‑to‑end code review o
 
 ### Manual changes
 - None
+
+## 2026-06-19 – Design note clarifications, add_to_structure fix, and additional test coverage
+
+### Prompt
+Read design_notes.md and codebase. Three-part task:
+1. Clarify multi-leg cost exposure in design notes and fix bug in Trade.add_to_structure.
+2. Review test coverage and add unit tests for untested Phase 1 behaviors.
+3. Update work log.
+
+### Changes applied
+
+**Design notes (design_notes.md):**
+- §3.2: Added paragraph after cost_exposures description explaining that for multi-leg structures, the transacted size of each leg is derived from total `unit_size_change` and the leg's fixed proportion.
+- §3.2 Lifecycle methods: Updated `add_size` description to include entry-price weighted-average update.
+- §3.3 Lifecycle methods: Updated `add_to_structure` description to reflect thin-passthrough role.
+
+**Bug fix – `add_to_structure` sizing ownership (strategy_structure.py + trade.py):**
+- **Problem:** `Trade.add_to_structure` computed leg size updates and entry prices but failed to assign `leg.current_size = new_total`. Entry price used old size in both numerator and denominator, yielding correct entry price by coincidence, but `leg.current_size` was never updated.
+- **Fix:** Moved all leg‑size scaling and entry‑price weighted‑average computation into `StrategyStructure.add_size`. `Trade.add_to_structure` reduced to a thin passthrough: `structure.add_size(date, additional_size, cost_exposures)`. The structure now owns its legs' mutations end-to-end.
+- `add_size` uses `old_size` in the entry‑price weighted‑average formula to preserve correctness before size is updated.
+
+**Test updates:**
+- `test_add_size_scales_legs` — enhanced to set `entry_price`/`current_price` on the leg before calling `add_size`, then asserts `entry_price == 443.33…` (verifying weighted‑average formula moved into `add_size` correctly).
+
+**New tests (4 added):**
+1. `test_original_entry_date_unchanged_by_add_unwind` (test_strategy_structure.py) — verifies `original_entry_date` is preserved after `add_size` and `unwind`.
+2. `test_order_rejection_emits_warning` (test_backtester.py) — mock pricer returns `None`; asserts `pytest.warns(UserWarning)` with matching message.
+3. `test_trade_history_snapshot_reflects_open_and_closed` (test_backtester.py) — runs backtest with open-then-close; verifies `TradeRecord` with `is_open=False` and `exit_date` set appears after close.
+4. Enhanced `test_snapshot_contains_t_minus_1_prices` — added assertion that snapshot `current_price` equals T‑1 close price (100.0), confirming snapshot is built before PnL update.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+fix: move sizing/entry-price logic into StrategyStructure.add_size; clarify design notes; add 4 tests
+```

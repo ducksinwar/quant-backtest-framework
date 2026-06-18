@@ -194,9 +194,11 @@ It is the natural entity for cost quotation, execution, and rolling.
   - An event can be marked as **cost‑free** (e.g., the `open` event of a structure created by a roll); the `CostModel` skips such events entirely.  
   - The dictionary key itself is the leg’s `leg_id`, so the `CostModel` can attribute the cost directly to that leg’s local P&L. The previous `cost_leg_id` field is retained for readability but is now redundant (it appears inside the `cost_exposures` key set).
 
+  For multi‑leg structures, the transacted size of each leg is derived from the structure's total `unit_size_change` and the leg's fixed proportion. The `CostModel` multiplies the per‑unit risk metric for each leg by that leg's transacted size. No separate per‑leg `unit_size_change` is required inside `cost_exposures`.
+
 - **Lifecycle methods:**  
   - `open(date, cost_exposures=None)` – records the opening event with initial unit sizes for all legs and the provided `cost_exposures` (if any).  
-  - `add_size(date, amount, cost_exposures=None)` – records a partial add event. Leg sizes are increased proportionally; the `cost_exposures` reflect the pre‑add state (the metrics are per‑unit, so the cost calculator will multiply by `amount` to get the transacted exposure).  
+  - `add_size(date, amount, cost_exposures=None)` – records a partial add event. Leg sizes are increased proportionally and the entry price is updated to a weighted average. The `cost_exposures` reflect the pre‑add state (the metrics are per‑unit, so the cost calculator will multiply by `amount` to get the transacted exposure).  
   - `unwind(date, fraction=1.0, cost_exposures=None)` – records a partial or full unwind event. **The `cost_exposures` must reflect the pre‑unwind state** (computed before leg sizes are reduced).  
   - `roll(new_structure, date)` – records a single `roll` event (unit size and cost exposure) on the old structure, closes it, and opens the new structure with a cost‑free `open`. The new structure inherits the old structure’s `original_entry_date`. The new structure also inherits the old structure’s tags, unless the `new_structure` dict explicitly provides a `'tags'` key (which then replaces the inherited tags).
 
@@ -232,7 +234,7 @@ It mirrors the backtester’s two‑list pattern: `active_structures` for curren
 
 - **Lifecycle methods:**
   - `add_structure(structure, date, cost_exposures=None)` – adds a new `StrategyStructure` to the trade. Used both when a trade is first created and later when a signal scales into a position. The structure is appended to `active_structures` and `structure_history`, and the `cost_exposures` (if provided) are forwarded to `structure.open(date, cost_exposures)`.  
-  - `add_to_structure(structure, date, additional_size, cost_exposures=None)` – increases the size of an existing structure by a given number of units. The structure’s leg sizes are increased proportionally, and the entry price is updated to a weighted average. The `cost_exposures` (reflecting the pre‑add state) are forwarded to `structure.add_size(date, additional_size, cost_exposures)`. This method is intended for **risk‑management adjustments** (e.g., increasing a hedge position).  
+  - `add_to_structure(structure, date, additional_size, cost_exposures=None)` – a thin passthrough that delegates directly to `structure.add_size(date, additional_size, cost_exposures)`. The structure handles all leg-size scaling and entry-price updates internally, recording the event in its log. This method is intended for **risk‑management adjustments** (e.g., increasing a hedge position).  
   - `unwind_structure(structure, date, fraction=1.0, cost_exposures=None)` – reduces or fully closes a structure.  
     - If `fraction == 1.0`, the structure is removed from `active_structures` (it stays in `structure_history`). The `cost_exposures` (reflecting the pre‑unwind state) are forwarded to `structure.unwind(date, fraction, cost_exposures)`.  
     - If `0 < fraction < 1`, the structure remains in `active_structures` with its size reduced proportionally; the unwound portion records a closing cost event.  

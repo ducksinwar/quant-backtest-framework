@@ -638,6 +638,14 @@ class TestBacktesterSnapshotSemantics:
                     found_position = True
                     assert leg.ticker == "TEST"
                     assert leg.size == 100.0
+                    # On entry day (2024-01-02), the snapshot for that day
+                    # is built BEFORE PnL, so current_price should be the
+                    # entry price (100.0), not the next day's close.
+                    if date_str == "2024-01-03" or date_str == "2024-01-02":
+                        assert leg.current_price == 100.0, (
+                            f"Snapshot on {date_str} should show T-1 close "
+                            f"(100.0), got {leg.current_price}"
+                        )
         assert found_position, "PortfolioState should contain the opened position"
 
 
@@ -855,3 +863,130 @@ class TestBacktesterRecordPricingInputs:
         leg = history[0].structure_history[0].legs[0]
         assert len(leg.daily_total_pnl) >= 1
         assert isinstance(leg.pricing_inputs, dict)
+
+
+class TestBacktesterOrderRejectionWarning:
+    def test_order_rejection_emits_warning(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+
+        class GappyPricer:
+            def resolve_instrument(self, leg_dict, date):
+                return leg_dict
+
+            def price(self, instrument, date):
+                if date == "2024-01-03":
+                    return None
+                return 100.0
+
+            def valuation_data(self, instrument, date, measures):
+                return {}
+
+            def pricing_inputs(self, instrument, date):
+                return {}
+
+            def compute_cost_exposure(self, instrument, date):
+                return {"notional_per_unit": instrument.current_price}
+
+        pricer = GappyPricer()
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-03": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        with pytest.warns(UserWarning, match="data not available"):
+            bt.run()
+
+
+class TestBacktesterTradeHistorySnapshot:
+    def test_trade_history_snapshot_reflects_open_and_closed(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        captured_snapshots = []
+
+        def capture_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
+            if trade_history_snapshot is not None:
+                captured_snapshots.append((current_date, trade_history_snapshot))
+            return []
+
+        signal = _make_mock_signal(requires_portfolio=False, requires_history=True)
+        signal.generate_signals.side_effect = capture_side_effect
+
+        call_count = [0]
+
+        def step_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
+            if trade_history_snapshot is not None:
+                captured_snapshots.append((current_date, trade_history_snapshot))
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return [
+                    {
+                        "Action": "NEW",
+                        "trade_id": None,
+                        "info": [
+                            {
+                                "structure_id": None,
+                                "legs": [
+                                    {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            elif call_count[0] == 2:
+                return [
+                    {"Action": "UNWIND", "trade_id": None, "info": []}
+                ]
+            return []
+
+        signal.generate_signals.side_effect = step_side_effect
+
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-05",
+            asset_class_configs={"equity": config},
+            calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        bt.run()
+
+        assert len(captured_snapshots) >= 3
+
+        open_found = False
+        closed_found = False
+        for date_str, snapshot in captured_snapshots:
+            for record in snapshot:
+                if record.is_open and record.exit_date is None:
+                    open_found = True
+                if not record.is_open and record.exit_date is not None:
+                    closed_found = True
+
+        assert open_found, "TradeRecord with is_open=True should appear before close"
+        assert closed_found, "TradeRecord with is_open=False, exit_date set should appear after close"

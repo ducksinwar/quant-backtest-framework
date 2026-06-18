@@ -56,7 +56,13 @@ class StrategyStructure:
                 if total_size > 0
                 else 1.0 / len(self.legs)
             )
-            leg.current_size += scale * amount
+            old_size = leg.current_size
+            new_total = old_size + scale * amount
+            leg.current_size = new_total
+            leg.entry_price = (
+                (leg.entry_price * old_size + leg.current_price * scale * amount)
+                / new_total
+            )
 
         event = {
             "event_type": "partial add",
