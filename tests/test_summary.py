@@ -36,7 +36,7 @@ class TestSummaryEquityCurve:
         leg_id = "leg_001"
         trade, leg = _make_trade(
             "t1", "2024-01-02", "2024-01-05",
-            leg_id, [10.0, -5.0, 20.0, -10.0],
+            leg_id, [10.0, -5.0, 20.0],
         )
 
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
@@ -52,14 +52,15 @@ class TestSummaryEquityCurve:
         assert "cost" in df.columns
         assert "net" in df.columns
         assert len(df) == 4
-        # With trading_days, gross is date-indexed and cost aligns
-        assert list(df.index) == trading_days
+        # PnL on 01-03, 01-04, 01-05; entry_date 01-02 prepended with 0
+        expected_dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+        assert list(df.index) == expected_dates
 
     def test_cost_subtracted_from_net(self):
         leg_id = "leg_001"
         trade, leg = _make_trade(
             "t1", "2024-01-02", "2024-01-05",
-            leg_id, [100.0, -50.0, 30.0],
+            leg_id, [100.0, -50.0],
         )
         # Inject cost_exposures into the open event so CostModel finds it
         structure = trade.structure_history[0]
@@ -74,11 +75,14 @@ class TestSummaryEquityCurve:
         result = summary.generate([trade], cost_model, trading_days=trading_days)
 
         df = result["equity_curve"]
-        # Costs exist on 2024-01-02 (open event), net < gross
+        # Entry date 01-02 prepended with PnL=0; cost on 01-02 makes net negative
         assert df.loc["2024-01-02", "net"] < df.loc["2024-01-02", "gross"]
-        # 450 * 100 * 2 / 10000 = 9.0
+        # 450 * 100 * 2 / 10000 = 9.0 on entry date
         assert df.loc["2024-01-02", "cost"] == pytest.approx(9.0)
-        assert df.loc["2024-01-02", "net"] == pytest.approx(100.0 - 9.0)
+        assert df.loc["2024-01-02", "net"] == pytest.approx(0.0 - 9.0)
+        # PnL on 2024-01-03: gross=100, cost column is cumulative (9.0)
+        assert df.loc["2024-01-03", "gross"] == pytest.approx(100.0)
+        assert df.loc["2024-01-03", "net"] == pytest.approx(100.0 - 9.0)
 
     def test_equity_curve_include_subset(self):
         leg_id = "leg_001"

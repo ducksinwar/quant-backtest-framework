@@ -44,11 +44,26 @@ class Summary:
                 for leg in structure.legs:
                     pnl_list = leg.daily_total_pnl
                     if trading_days is not None and len(pnl_list) > 0:
-                        gross = pd.Series(
-                            pnl_list,
-                            index=trading_days[:len(pnl_list)],
-                            dtype=float,
-                        )
+                        entry_idx = trading_days.index(trade.entry_date or "")
+                        pnl_start = entry_idx + 1
+
+                        if trade.exit_date is not None:
+                            pnl_end = trading_days.index(trade.exit_date)
+                        else:
+                            pnl_end = len(trading_days) - 1
+
+                        pnl_dates = trading_days[pnl_start:pnl_end + 1]
+
+                        if len(pnl_dates) == len(pnl_list):
+                            gross = pd.Series(pnl_list, index=pnl_dates, dtype=float)
+                        else:
+                            gross = pd.Series(pnl_list, index=trading_days[:len(pnl_list)], dtype=float)
+
+                        if trade.entry_date and trade.entry_date not in gross.index:
+                            gross = pd.concat([
+                                pd.Series(0.0, index=[trade.entry_date], dtype=float),
+                                gross,
+                            ])
                     else:
                         gross = pd.Series(pnl_list, dtype=float)
 

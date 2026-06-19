@@ -590,3 +590,37 @@ Read design_notes.md and codebase. Three-part task:
 ```
 fix: move sizing/entry-price logic into StrategyStructure.add_size; clarify design notes; add 4 tests
 ```
+
+## 2026-06-20 – Fix Summary PnL/cost date alignment
+
+### Problem
+`_extract_leg_data` aligned leg PnL using `trading_days[:len(pnl_list)]`, assigning PnL values to the first N simulation days regardless of when the trade was actually alive. This caused costs to appear on wrong dates for trades that opened or closed mid-simulation.
+
+### Root cause
+The backtester records PnL as follows: on the entry day, the trade is created after PnL computation (no PnL entry appended). The first PnL entry corresponds to the trading day immediately after `entry_date`. The last PnL entry corresponds to `exit_date` itself (the leg is still in `active_trades` when `_compute_pnl_for_date` runs on exit day). Therefore the correct date slice is `trading_days[entry_idx+1 : exit_idx+1]`.
+
+### Changes applied
+
+**`backtester/summary.py` — `_extract_leg_data`:**
+- Replaced `trading_days[:len(pnl_list)]` alignment with proper entry/exit date logic:
+  - `entry_idx = trading_days.index(trade.entry_date or "")`
+  - `pnl_start = entry_idx + 1`
+  - `pnl_end = trading_days.index(trade.exit_date)` (inclusive) or `len(trading_days) - 1`
+  - PnL dates = `trading_days[pnl_start:pnl_end + 1]`
+- Prepend `entry_date` with PnL=0 so that entry-day costs align (costs happen at entry, not at first PnL date).
+- Fallback to old behavior when PnL length doesn't match the computed date range (legacy test data).
+
+**`tests/test_summary.py`:**
+- `test_equity_curve_gross_cost_net`: PnL reduced from 4 → 3 entries (matching actual backtester output), updated expected dates.
+- `test_cost_subtracted_from_net`: PnL reduced from 3 → 2 entries, updated assertions for entry-date prepended zero with cost subtraction.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+fix: align Summary PnL dates with actual trade entry/exit dates
+```
