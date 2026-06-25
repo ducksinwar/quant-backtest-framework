@@ -18,6 +18,7 @@ class Summary:
         fx_rates: dict[str, pd.Series] | None = None,
         trading_days: list[str] | None = None,
     ) -> dict | None:
+        self._trading_days = trading_days
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
         leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
@@ -160,6 +161,30 @@ class Summary:
     ) -> pd.Series:
         if not leg_data:
             return pd.Series(dtype=float)
+
+        trading_days = self._trading_days
+        if trading_days is not None and self._missing_mode != "per_leg":
+            td_index = pd.Index(trading_days, dtype=object)
+
+            filled_series = []
+            nan_masks = []
+            for d in leg_data:
+                s = d[key]
+                s_filled = s.reindex(td_index, fill_value=0.0)
+                filled_series.append(s_filled)
+
+                if self._missing_mode == "all":
+                    alive_nan = s.isna()                     # vectorized, same result as the loop
+                    nan_mask = alive_nan.reindex(td_index, fill_value=False)
+                    nan_masks.append(nan_mask)
+
+            result = sum(filled_series)
+
+            if self._missing_mode == "all" and nan_masks:
+                any_nan = pd.concat(nan_masks, axis=1).any(axis=1)
+                result[any_nan] = np.nan
+
+            return result
 
         series_list = []
         for d in leg_data:

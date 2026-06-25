@@ -645,7 +645,12 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
 
   4. **Move to next day.**
 
-- After the backtest loop, the backtester returns the `trade_history` list (and optionally the `active_trades` for any open positions). This raw output is completely independent of the backtester, pricers, and data providers. The caller then passes it to a `Summary` object (Section 3.10) together with a `CostModel` and any desired FX rates to produce performance metrics.
+- After the backtest loop, `run()` returns a **`BacktestResult`** — a frozen dataclass containing:
+  - `trade_history: tuple[Trade, ...]` — every trade ever opened (immutable).
+  - `trading_days: tuple[str, ...]` — the full simulation calendar (date strings).
+  - `active_trades: tuple[Trade, ...]` — any trades still open at simulation end.
+  - `last_processed_date: str` — the final date processed (empty string if no trading days).
+  This single object serves as the durable, self‑contained output for both the `Summary` module and for resuming a continuation run. The caller passes `result.trade_history` and `result.trading_days` to `Summary.generate(...)`. The backtester itself has no dependency on the `Summary` or `CostModel`.
 
 - **No cost or summary logic inside the backtester.** Cost events are recorded on structures but not evaluated; the `Summary` and `CostModel` are entirely external. This allows changing cost assumptions, FX rates, metric specs, or filtering rules without re‑running the simulation.
 
@@ -665,10 +670,13 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
   In later phases, a `'on_missing'` field could be added to `TargetTrade` dictionaries (values `'reject'` or `'retry'`). Retried orders would be held in a pending queue and executed on the first subsequent day with valid data, mimicking real‑world execution disruptions. This is not needed for Phase 1 daily‑frequency equities.
 
 - **Future extension – incremental backtesting (burn‑in, live OOS, slippage comparison):**  
-  The backtester’s complete state (active trades, trade history, leg time series) can be serialised at any point. In future phases, the backtester will accept an optional initial state so that a new instance can be created with pre‑loaded active trades and history. This enables three important workflows:
+  The backtester’s complete state (active trades, trade history, leg time series) can be serialised at any point via `BacktestResult`. In future phases, the backtester will accept an optional `BacktestResult` as initial state, copying its tuples back into mutable internal lists and then running the daily loop normally from `last_processed_date` to a new `end_date`. The resulting `BacktestResult` is independent of the initial one. This enables three important workflows:
   - **Burn‑in periods in walk‑forward validation** – after training, carry open positions into the validation window, run a burn‑in phase, then continue into the evaluation phase without resetting state.
   - **Daily live out‑of‑sample comparison** – after deploying a strategy, run the backtester forward by one day (or any number of days since the last run) to produce the theoretical P&L, which can be compared against actual broker‑filled trades to monitor slippage. The resulting theoretical equity curve provides a pure, AUM‑independent view of strategy performance, serving as the benchmark against which actual realised P&L is compared.
-  - **General continuation** – a `run_continuation(new_end_date)` method will reload a saved state, accept updated market data for the new dates, and run the daily loop from the last processed date to `new_end_date`. The signal is re‑instantiated from its type and parameters; any positional state is recovered from the initial `PortfolioState` (or `trade_history_snapshot`). The signal does not need to be serialized.
+  - **General continuation** – a `run_continuation(new_end_date)` method will accept a previously saved `BacktestResult`, copy its state into the backtester, and run the daily loop to `new_end_date`. The signal is re‑instantiated from its type and parameters; any positional state is recovered from the initial `PortfolioState` (or `trade_history_snapshot`). The signal does not need to be serialized.  
+  **The `Summary` does not need to change** — it simply consumes `trade_history` and `trading_days` from any `BacktestResult`, whether from a fresh run or a continuation.
+
+- **Immutability:** `BacktestResult` uses tuples to prevent accidental addition/removal of items after a run. The individual `Trade`, `StrategyStructure`, and `Instrument` objects are not yet recursively frozen. In Phase 2, a full freeze/re‑initialisation protocol will make these objects recursively immutable after the run (e.g., replacing mutable lists with tuples). When the deep‑freeze is added, the `Summary` will not require any changes because it only reads data.
 
 ### 3.10 Summary
 
@@ -852,6 +860,8 @@ summary = Summary(spec)
      The FX spot rate used for each conversion is included in the equity curve DataFrame (as an additional column, e.g., `fx_USDJPY`), so that the user can distinguish FX‑driven P&L from underlying‑driven P&L.
 
      If `fx_rates` is `None`, no cross‑currency aggregation is performed. Local‑currency series are kept separate, and any report that inherently requires a single‑currency portfolio (e.g., `'equity_curve'`, `'metrics'`, `'drawdown_table'`) will either be omitted or produced in a per‑underlying/currency breakdown.
+
+     **Phase 1:** This conversion logic is deferred to Phase 2, when multi‑currency instruments are added. In Phase 1, all legs are USD‑denominated, so no conversion is required. The `_aggregate_series` function accepts an `fx_rates` parameter but does not yet use it.
 
   5. **Report generation:**  
      - Standard reports are built using predefined logic. Filters from the root `reports` dict and from any containing groups are applied. Reports do not have their own `'filter'`; all filtering is handled by the root and group levels. The data is then aggregated according to the report’s `include` spec.

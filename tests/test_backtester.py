@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, PropertyMock
 import numpy as np
 import pandas as pd
 import pytest
-from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester
+from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester, BacktestResult
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
 from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider
@@ -137,7 +137,8 @@ class TestBacktesterBasic:
         )
 
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         assert len(history) == 1
         trade = history[0]
@@ -161,7 +162,8 @@ class TestBacktesterBasic:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
         assert history == []
 
     def test_entry_and_exit_dates_set(self, simple_csv):
@@ -201,7 +203,8 @@ class TestBacktesterBasic:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         assert len(history) == 1
         trade = history[0]
@@ -240,7 +243,8 @@ class TestBacktesterPnl:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         trade = history[0]
         leg = trade.structure_history[0].legs[0]
@@ -285,7 +289,8 @@ class TestBacktesterPnl:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         trade = history[0]
         leg = trade.structure_history[0].legs[0]
@@ -332,7 +337,8 @@ class TestBacktesterPnl:
             calendar_ticker="X",
         )
         bt = Backtester(bt_config, FakeDataFeed())
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         leg = history[0].structure_history[0].legs[0]
         assert len(leg.daily_total_pnl) >= 2
@@ -527,7 +533,8 @@ class TestBacktesterDataAvailability:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
         assert history == []
 
     def test_unwind_order_not_rejected_when_price_available(self, simple_csv):
@@ -565,7 +572,8 @@ class TestBacktesterDataAvailability:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
         assert len(history) == 1
         assert history[0].exit_date is not None
 
@@ -691,7 +699,8 @@ class TestBacktesterCostExposure:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         assert len(history) == 1
         structure = history[0].structure_history[0]
@@ -735,7 +744,8 @@ class TestBacktesterCostExposure:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         assert len(history) == 1
         structure = history[0].structure_history[0]
@@ -777,7 +787,8 @@ class TestBacktesterCostExposure:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         assert len(history) == 1
         structure = history[0].structure_history[0]
@@ -821,7 +832,8 @@ class TestBacktesterRecordPricingInputs:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         leg = history[0].structure_history[0].legs[0]
         assert leg.pricing_inputs == {}
@@ -858,7 +870,8 @@ class TestBacktesterRecordPricingInputs:
             calendar_ticker="TEST",
         )
         bt = Backtester(bt_config, data_feed)
-        history = bt.run()
+        result = bt.run()
+        history = list(result.trade_history)
 
         leg = history[0].structure_history[0].legs[0]
         assert len(leg.daily_total_pnl) >= 1

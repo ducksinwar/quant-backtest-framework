@@ -1,6 +1,7 @@
 import uuid
 import warnings
 from dataclasses import dataclass, field
+from typing import Tuple
 
 import numpy as np
 
@@ -46,6 +47,14 @@ class BacktestConfig:
     calendar_ticker: str = "SPY"
 
 
+@dataclass(frozen=True)
+class BacktestResult:
+    trade_history: Tuple[Trade, ...]
+    trading_days: Tuple[str, ...]
+    active_trades: Tuple[Trade, ...]
+    last_processed_date: str
+
+
 class Backtester:
     def __init__(self, config: BacktestConfig, data_feed):
         self._config = config
@@ -54,7 +63,7 @@ class Backtester:
         self.trade_history: list[Trade] = []
         self.trading_days: list[str] = []
 
-    def run(self) -> list[Trade]:
+    def run(self) -> BacktestResult:
         self.trading_days = self._data_feed.trading_days(
             self._config.calendar_ticker,
             self._config.start_date,
@@ -62,7 +71,12 @@ class Backtester:
         )
 
         if not self.trading_days:
-            return self.trade_history
+            return BacktestResult(
+                trade_history=(),
+                trading_days=(),
+                active_trades=(),
+                last_processed_date="",
+            )
 
         for T in self.trading_days:
             portfolio_state = self._build_portfolio_state(T)
@@ -81,7 +95,12 @@ class Backtester:
 
             self._compute_risk_for_date(T)
 
-        return self.trade_history
+        return BacktestResult(
+            trade_history=tuple(self.trade_history),
+            trading_days=tuple(self.trading_days),
+            active_trades=tuple(self.active_trades),
+            last_processed_date=self.trading_days[-1],
+        )
 
     def _compute_pnl_for_date(self, date: str):
         for trade in self.active_trades:

@@ -624,3 +624,52 @@ The backtester records PnL as follows: on the entry day, the trade is created af
 ```
 fix: align Summary PnL dates with actual trade entry/exit dates
 ```
+
+## 2026-06-26 – BacktestResult, aggregation fix, design note updates
+
+### Prompt
+1. Create a `BacktestResult` frozen dataclass packaging trade_history, trading_days, active_trades, and last_processed_date.
+2. Modify `Backtester.run()` to return `BacktestResult` instead of a plain list.
+3. Update the example script and all tests to unpack `BacktestResult`.
+4. Fix `_aggregate_series` to correctly handle non‑overlapping trade lifetimes by reindexing each leg's series to the full `trading_days` index before aggregation.
+5. Update design notes for BacktestResult, continuation runs, immutability, and FX deferral.
+
+### Changes applied
+
+**`backtester/backtest_engine.py`:**
+- Added `BacktestResult` frozen dataclass with fields: `trade_history: Tuple[Trade, ...]`, `trading_days: Tuple[str, ...]`, `active_trades: Tuple[Trade, ...]`, `last_processed_date: str`.
+- `Backtester.run()` now returns `BacktestResult`. Early return when no trading days returns empty tuples.
+
+**`examples/sma_crossover_example.py`:**
+- Updated to unpack `result = bt.run()`, then `result.trade_history` and `result.trading_days`.
+
+**`tests/test_backtester.py`:**
+- Added `BacktestResult` import.
+- All 13 occurrences of `history = bt.run()` replaced with `result = bt.run()` + `history = list(result.trade_history)` — preserving existing assertions on the list form.
+
+**`backtester/summary.py` — `_aggregate_series`:**
+- Now stores `trading_days` in `self._trading_days` from `generate()`.
+- For `'any'` and `'all'` modes: reindexes each leg's series to the full `trading_days` index with `fill_value=0.0`. This zero-fills dates where the leg was not alive (before entry / after exit), and converts genuine missing-data NaN to 0.0.
+- For `'all'` mode: builds a per-leg NaN mask only on dates where the leg WAS alive AND had NaN. Reindexes the mask to `trading_days` with `fill_value=False`, so non-alive dates are never masked. Combines masks via logical OR and applies to the aggregate.
+- `'per_leg'` mode unchanged.
+- `fx_rates` parameter retained in signature for future use.
+
+**`design_notes.md`:**
+- §3.7: Described `BacktestResult` as the formal return type, listing all four fields.
+- §3.7 "Future extension – incremental backtesting": Updated to reference `BacktestResult` for continuation runs; noted that `Summary` consumes `BacktestResult` unchanged.
+- §3.7: Added immutability paragraph — `BacktestResult` uses tuples now; Phase 2 will add recursive freeze.
+- §3.10 step 4: Added note that FX conversion is deferred to Phase 2; all Phase 1 legs are USD.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- vectorized a nan_mask computation for self._missing_mode == "all"
+
+### End‑to‑end verification
+Example runs correctly — equity curve shows proper date-indexed data, costs appear on correct dates, Sharpe ratio and max drawdown computed correctly.
+
+### Suggested commit message
+```
+feat: add BacktestResult dataclass, fix aggregation for non-overlapping trades
+```

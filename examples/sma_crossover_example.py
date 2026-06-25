@@ -3,7 +3,7 @@ import sys
 
 import pandas as pd
 
-from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester
+from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester, BacktestResult
 from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
@@ -53,7 +53,8 @@ def main():
 
     # 5. Run backtest
     bt = Backtester(config, data_feed)
-    trade_history = bt.run()
+    result = bt.run()
+    trade_history = list(result.trade_history)
     print(f"Backtest complete. {len(trade_history)} trade(s) executed.")
 
     if not trade_history:
@@ -78,7 +79,7 @@ def main():
     summary = Summary(spec)
     results = summary.generate(
         trade_history, cost_model,
-        trading_days=bt.trading_days,
+        trading_days=list(result.trading_days),
     )
 
     if results is not None:
