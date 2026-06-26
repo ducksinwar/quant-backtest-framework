@@ -79,7 +79,7 @@ backtester/
         trade.py                        # (* Phase 1 *) Trade class
     backtest_engine.py                  # (* Phase 1 *) Backtester daily loop
     summary.py                          # (* Phase 1 *) Summary (standard reports)
-    cost_model.py                       # (* Phase 1 *) CostModel (includes FixedCostModel)
+    cost_model.py                       # (* Phase 1 *) CostModel (includes EquityCostCalculator)
     data_extractor.py                   # DataExtractor (raw data extraction)
     pnl_calculator.py                   # AssetPnlCalculator (PnL decomposition)
 examples/
@@ -723,6 +723,7 @@ Once risk measures and component P&L are implemented, the equity curve can inclu
 These series are controlled by the standard `include` mechanism.
 
 | `'by_underlying'` | One sheet per underlying instrument. | `include` | `'include'` is a **dictionary** mapping metric groups to their sub‑report configs. Supported keys and their sub‑configs:<br>• `'equity_curve'`: `{'include': ['gross','cost','net','decomposition']}`<br>• `'risk'`: `{'include': ['greeks']}`<br>• `'drawdown_table'`: `{'include': ['gross','net'], 'top_n': <int>}`<br>• `'hit_ratio'`: `{'include': ['gross','net'], 'timeframe': 'yearly'\|'monthly'}`<br>• `'metrics'`: `{'include': ['sharpe_gross', …], 'annualization': <int>}`<br>`'by_underlying'` does **not** accept a `'filter'` key directly. Wrap it in a report group to filter. |
+
 | `'trade_summary'` | One row per trade with key attributes and P&L. | `include` | `'tags'`, `'gross_pnl'`, `'cost'`, `'net_pnl'`, `'underlying'` (comma‑separated tickers), `'holding_days'` (trading days alive, business days only). Trade ID, entry date, and exit date are always included regardless of `include`. If `include` is omitted, all groups are shown. |
 
 **`trade_breakdown` (Phase 2+)**  
@@ -1055,7 +1056,7 @@ leg_ids = legs_info['trade_id'].index.tolist()
 ```
 **3. Drill into each leg of that trade with `inspect()`.**
 ```python
-cost_model = FixedCostModel(...)   # from Phase 1
+cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})   # from Phase 1
 fx_rates = price_provider.get_fx_series(['USDJPY', 'USDHKD'])  # example
 
 for leg_id in leg_ids:
@@ -1210,7 +1211,7 @@ class CostModel:
 
 **Phase 1 default:**
 
-`EquityCostCalculator` (replaces the old `FixedCostModel`):
+`EquityCostCalculator`:
 ```python
 class EquityCostCalculator(BaseCostCalculator):
     """Charges a constant bps fee on transacted notional."""
@@ -1232,7 +1233,7 @@ cost_model = CostModel(calculators)
 costs = cost_model.compute_costs(trade_history)
 ```
 
-This replaces the old `FixedCostModel`; no functionality is lost. To add a new asset class (e.g., equity options), write an `EquityOptionCostCalculator` implementing `compute_cost` with vega‑based pricing, and register it under `"equity_option"` in the calculators dict. No core backtester, Trade, StrategyStructure, Summary, or CostModel code changes.
+No functionality is lost. To add a new asset class (e.g., equity options), write an `EquityOptionCostCalculator` implementing `compute_cost` with vega‑based pricing, and register it under `"equity_option"` in the calculators dict. No core backtester, Trade, StrategyStructure, Summary, or CostModel code changes.
 
 ### 3.14 Persistence of Backtest Results
 
@@ -1374,13 +1375,13 @@ Build the following in order, each tested before moving on:
 3. **EquityPricer** – implements `price()`, `valuation_data()` (empty for equities), `resolve_instrument()` (pass‑through for equities), and `pricing_inputs()` (returns an empty dict).
 4. **StrategyStructure** – a standalone class with `legs` (list of `Instrument`, always one leg in Phase 1), an event log for cost, and lifecycle methods `open(date)`, `unwind(date, fraction=1.0)`, and `roll(new_structure, date)` (stubbed – raises `NotImplementedError` in Phase 1). Building this as a real class from day one avoids any refactoring of `Trade`, the backtester, or signals when multi‑leg support is added later.
 5. **Trade** – with `active_structures` / `structure_history`, lifecycle methods (`add_structure`, `unwind_structure`), tags, and cost‑event recording. In Phase 1 every trade contains exactly one structure with one leg. `roll_structure` may be implemented as a stub; it is not exercised by the SMA example.
-6. **CostModel** – `FixedCostModel` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.13).
+6. **CostModel** – `CostModel` with `EquityCostCalculator` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.13).
 7. **BaseSignal** and **SMACrossoverSignal** – signal returns `TargetTrade` dictionaries with `NEW` / `UNWIND` actions; one‑day lag handled internally.
 8. **Backtester** – full daily loop with P&L computation, instrument resolution, data‑availability checks, and order execution (`NEW` and `UNWIND`). `ROLL` handling can be stubbed; it is not required for the SMA example.
 9. **Summary** – accepts `SummarySpec`, produces standard reports (equity curve, trade summary, metrics, hit ratio, drawdown table), and calls `CostModel.compute_costs()`.
 10. **Example script** – `examples/sma_crossover_example.py` that:
     - Loads a CSV of SPY daily data (date, close) from a local file.
-    - Creates a `DataFeed` with a `CsvBackend`, an `EquityPriceProvider`, `EquityPricer`, `FixedCostModel`, `SMACrossoverSignal`, `Backtester`, and `Summary`.
+    - Creates a `DataFeed` with a `CsvBackend`, an `EquityPriceProvider`, `EquityPricer`, a `CostModel` with `EquityCostCalculator`, `SMACrossoverSignal`, `Backtester`, and `Summary`.
     - Runs the backtest from 2020-01-01 to 2022-12-31.
     - Prints the equity curve and standard metrics.
 11. **Unit tests** – for Instrument, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.

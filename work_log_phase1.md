@@ -749,3 +749,20 @@ docs: clarify component P&L is net-only; add portfolio-level risk note to equity
 ```
 docs: update trade_summary table to reflect mandatory identifiers
 ```
+
+## 2026-06-27 – Fix outdated FixedCostModel references in design notes
+
+### Changes applied
+
+**`design_notes.md`:**
+- §5 step 6: replaced `FixedCostModel` with `CostModel` with `EquityCostCalculator`.
+- §3.11 Data Extractor code example: replaced `cost_model = FixedCostModel(...)` with `cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})`.
+- §2 project structure: replaced `(includes FixedCostModel)` with `(includes EquityCostCalculator)`.
+- §3.13 Phase 1 default: removed `(replaces the old FixedCostModel)` parenthetical from `EquityCostCalculator` heading.
+- §3.13: removed `This replaces the old FixedCostModel;` from the extension‑point paragraph.
+- §5 step 10: replaced `FixedCostModel` with `a CostModel with EquityCostCalculator` in the example script description.
+
+### Suggested commit message
+```
+docs: replace all stale FixedCostModel references with EquityCostCalculator
+```
