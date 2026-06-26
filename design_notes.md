@@ -353,6 +353,10 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
     - For an OTC option, `leg_dict` contains `'delta'` and `'tenor'`; the pricer computes the strike from the vol surface and forward curve, and returns the dict with `'strike'` added and `'delta'`/`'tenor'` removed.
     - For an FX forward, `leg_dict` contains no strike; the pricer fetches the current forward rate and returns the dict with `'strike'` set to that rate. If the leg_dict contains a `'tenor'` instead of an explicit `'maturity'`, the pricer resolves it to an absolute maturity date (see the general tenor resolution rule). When the backtester subsequently calls `pricer.price(instrument, date=T)`, the entry price will be **zero** (the instrument is struck at the prevailing market rate, so its MTM value is zero).
     - **General tenor resolution:** For any instrument where a relative tenor is given (e.g., `'1M'`, `'3M'`), the pricer converts it to an absolute maturity date using the appropriate calendar and date‑rolling conventions. This includes options, forwards, swaps, and any other contract that can be specified by tenor. The resolved date is stored as `'maturity'` in the returned leg dictionary.
+
+     **Preserving the original trading intent**  
+     When `resolve_instrument` resolves a relative parameter into an absolute one, the pricer must preserve the original value alongside the resolved value in the returned dictionary. This applies to any parameter that undergoes resolution: a delta hedge specification (e.g., `"delta": 0.25`) that becomes a concrete strike, a relative tenor (e.g., `"tenor": "3M"`) that becomes an absolute maturity date, etc. The original key‑value pair must remain in the dictionary, and the resolved value is added under a new key (e.g., `"strike"`, `"maturity"`). This ensures that reports can display both the trader’s intent and the concrete contract details, both of which end up in `Instrument.params`.
+
      This single method isolates all instrument‑specific parameter resolution inside the pricer, keeping the backtester completely generic.
      - **Cost‑leg marking:** For multi‑leg structures where only some legs bear transaction cost (e.g., a swap where only the far leg incurs execution fees), the pricer may add a boolean field `"cost_leg"` to any leg dict. A value of `true` marks that leg as cost‑bearing; omitted or `false` means the leg is cost‑free.  
        For single‑leg instruments the field is typically omitted; the backtester defaults to treating the sole leg as the cost leg.
@@ -713,7 +717,34 @@ Standard reports are predefined templates that compute specific, well‑known ou
 |-------------------|-------------|---------|------------------------------|
 | `'equity_curve'` | Daily portfolio‑level equity series. | `include` | `'gross'` (cumulative gross P&L), `'cost'` (cumulative cost), `'net'` (cumulative net P&L), `'decomposition'` (daily P&L decomposition, if configured). If FX rates were supplied, the equity curve also includes the spot FX rate used for each currency conversion (e.g., `fx_USDJPY`). If `'include'` is omitted, all groups are produced. |
 | `'by_underlying'` | One sheet per underlying instrument. | `include` | `'include'` is a **dictionary** mapping metric groups to their sub‑report configs. Supported keys and their sub‑configs:<br>• `'equity_curve'`: `{'include': ['gross','cost','net','decomposition']}`<br>• `'risk'`: `{'include': ['greeks']}`<br>• `'drawdown_table'`: `{'include': ['gross','net'], 'top_n': <int>}`<br>• `'hit_ratio'`: `{'include': ['gross','net'], 'timeframe': 'yearly'\|'monthly'}`<br>• `'metrics'`: `{'include': ['sharpe_gross', …], 'annualization': <int>}`<br>`'by_underlying'` does **not** accept a `'filter'` key directly. Wrap it in a report group to filter. |
-| `'trade_summary'` | One row per trade with key attributes and P&L. | `include` | `'identifiers'` (trade ID, entry/exit dates), `'tags'`, `'gross_pnl'`, `'cost'`, `'net_pnl'`, `'local_pnl'`, `'usd_pnl'`. If omitted, all groups are included (equivalent to `'full'`). |
+| `'trade_summary'` | One row per trade with key attributes and P&L. | `include` | `'identifiers'` (trade ID, entry/exit dates), `'tags'`, `'gross_pnl'`, `'cost'`, `'net_pnl'`, `'underlying'` (comma‑separated tickers), `'holding_days'` (trading days alive, business days only). If omitted, all groups are included (equivalent to `'full'`). |
+
+**`trade_breakdown` (Phase 2+)**  
+A hierarchical report that provides a multi‑level view of a trade's performance, risk, and instrument details. It is controlled by a `detail` parameter that is a **list of level names** to include. The available levels are:
+- `"leg"` – individual instruments with full detail.
+- `"structure"` – atomic groupings of legs.
+- `"lot"` – structures grouped by a shared `lot_id` (for rolled positions).
+- `"underlying"` – sub‑totals by ticker.
+- `"trade"` – the top‑level strategy position total.
+
+Rows are output in a single table in the fixed nesting order `leg → structure → lot → underlying → trade`, but only the levels listed in `detail` appear. For example, `detail=["leg", "trade"]` shows only leg rows and the trade total; `detail=["leg"]` shows only leg rows with no aggregations.
+
+**Level details**
+- **Leg** – finest detail. Contains full P&L (in local currency and, after FX conversion, base currency), cost, component P&L (e.g., `delta_pnl`, `gamma_pnl`), risk exposures (initial/current/exit for each greek, with `_local`/`_base` variants after FX conversion), and all keys from `Instrument.params` as individual columns.
+- **Structure** – aggregates all legs belonging to the same structure. Shows combined P&L, cost, and risk measures; leg‑specific parameter columns are omitted. Since all legs within a structure share the same underlying by definition, risk measures are shown as net (signed sum) only.
+- **Lot** – aggregates all structures that share the same `lot_id`. This groups the original position and its subsequent rolls into a single continuous alpha‑intent record. All rolled structures operate on the same underlying, so risk measures are shown as net only.
+- **Underlying** – aggregates across all structures/lots with the same ticker. Risk measures are shown as net only, providing the total directional exposure to that market. P&L up to this level can still be displayed in the leg's local currency, since all legs under the same underlying share the same local currency.
+- **Trade** – top‑level total for the whole strategy position. P&L and cost are always summed in the base currency (e.g., USD) when FX conversion is active, even if the trade involves only one local currency, so that trade totals can be meaningfully added across the portfolio. Local‑currency P&L is not shown at this level. Risk measures are grouped by asset class (e.g., `delta_equity_net`). **Net risk** is always shown. **Gross risk** (absolute sum) is shown only when the trade contains more than one underlying, and it is computed by first aggregating to the underlying level (net risk per underlying), then summing the absolute values of those per‑underlying net risks. This avoids double‑counting that would occur if absolute values were taken at the leg level. If the trade has only a single underlying, gross risk is omitted.
+
+**Currency handling**
+- In Phase 1 the base currency is assumed to be USD.
+- In Phase 2, the base currency will become configurable, and column suffixes will change from `_usd` to `_base` to reflect the configured base currency.
+
+**Additional display options**
+- `include` controls which metric groups (P&L, greeks, component P&L) appear at each level.
+- After FX conversion, all monetary values and risk measures automatically receive `_local` / `_base` variants. Drawdown, max adverse, and max favourable metrics also get base‑currency variants.
+- Instrument‑specific parameters (`Instrument.params`) are automatically expanded into individual columns at the leg level, keeping the `Summary` completely asset‑agnostic.
+
 | `'hit_ratio'`     | Hit ratio over a configurable timeframe. | `timeframe` (default `'yearly'`), `include` | When `include` is specified, it controls whether the gross, cost, and net versions are computed. Examples: `'include': ['gross']` (only gross hit ratio), `'include': ['gross','net']` (gross and net of costs). If omitted, both gross and net are produced. |
 | `'drawdown_table'`| Top N drawdowns with dates and underwater days. | `top_n` (default 10), `include` | Same `include` logic as `'hit_ratio'`: controls gross vs. net drawdowns. |
 | `'metrics'`       | Standard scalar metrics (Sharpe, Calmar, annualized return, max drawdown, hit ratio). | `include`, `annualization` (default 252) | `include` specifies which metrics to compute (e.g., `['sharpe','max_drawdown']`). Each metric can be requested in `'gross'` or `'net'` form by adding a suffix (e.g., `'sharpe_gross'`, `'sharpe_net'`). If `include` is omitted, all available metrics are produced in both gross and net versions. |
@@ -1515,3 +1546,10 @@ This research framework is one of four pillars that together form a complete sys
 Each pillar is designed to be built and maintained independently, communicating through stable, well‑defined interfaces. The research framework already implements the interfaces that the other pillars will consume, so those pillars can be developed later without any changes to the backtester or summary modules.
 
 This section is a long‑term vision statement; none of the other pillars are required for Phase 1.
+
+**OMS and trade lifecycle management**  
+The same leg‑structure‑trade hierarchy used in the backtester carries through to production systems. In the Order Management System (OMS), a dedicated tab can display underlying‑level risks before execution, giving traders an immediate view of net exposures per ticker.
+
+After execution, the `OrderGenerator` (see §3.8) produces any mechanical adjustments (rolls, hedge orders, scheduled unwinds, and other scheduled future events) which are fed to the trade lifecycle management application. In that application, the `lot_id` grouping is used to visually connect rolled structures together, so a trader can see the full history of a position across contract rolls.
+
+This architectural continuity—from backtest to OMS to lifecycle monitoring—ensures that the same data structures and risk metrics are used consistently, reducing translation errors between research and production.

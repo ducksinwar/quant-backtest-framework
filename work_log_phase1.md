@@ -679,3 +679,30 @@ feat: add BacktestResult dataclass, fix aggregation for non-overlapping trades
 ### Manual changes
 - rewrite _build_equity_curve in a cleaner way
 - removing missing_mode dependency for _build_trade_summary
+
+## 2026-06-26 – trade_summary enhancements and design‑note updates
+
+### Prompt
+1. Add `underlying` and `holding_days` columns to the `trade_summary` report.
+2. Update design notes: resolution preservation rule, `trade_breakdown` spec, OMS integration paragraph, and `trade_summary` table row.
+
+### Changes applied
+
+**`backtester/summary.py` — `_build_trade_summary`:**
+- Added `underlying` column: comma‑separated sorted unique tickers across all legs of the trade.
+- Added `holding_days` column: trading days from `entry_date` to `exit_date` inclusive (or last trading day if trade still open), using `self._trading_days`. Falls back to 0 when `trading_days` is not available.
+- Both columns controlled by the existing `include` mechanism (None = show all).
+
+**`design_notes.md`:**
+- §3.8 trade_summary table row: replaced `'local_pnl'`/`'usd_pnl'` with `'underlying'` and `'holding_days'`.
+- §3.5 `resolve_instrument`: added "Preserving the original trading intent" paragraph requiring pricers to keep original key‑value pairs alongside resolved ones.
+- §3.8: added full `trade_breakdown` (Phase 2+) subsection specifying the five level hierarchy (leg → structure → lot → underlying → trade), currency handling, and display options.
+- §9: added OMS and trade lifecycle integration paragraph describing continuity from backtest to production.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+feat: add underlying/holding_days to trade_summary; update design notes for Phase 2+
+```

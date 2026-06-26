@@ -250,6 +250,28 @@ class Summary:
             )
 
             row = {}
+            if include is None or "underlying" in include:
+                tickers = sorted({d["ticker"] for d in trade_legs})
+                row["underlying"] = ",".join(tickers)
+            if include is None or "holding_days" in include:
+                if (
+                    self._trading_days
+                    and trade.entry_date
+                    and trade.entry_date in self._trading_days
+                ):
+                    end = (
+                        trade.exit_date
+                        if trade.exit_date and trade.exit_date in self._trading_days
+                        else self._trading_days[-1]
+                    )
+                    holding = (
+                        self._trading_days.index(end)
+                        - self._trading_days.index(trade.entry_date)
+                        + 1
+                    )
+                    row["holding_days"] = holding
+                else:
+                    row["holding_days"] = 0
             if include is None or "identifiers" in include:
                 row["trade_id"] = trade.trade_id
                 row["entry_date"] = trade.entry_date
