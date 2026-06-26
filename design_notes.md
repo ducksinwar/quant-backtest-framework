@@ -723,7 +723,7 @@ Once risk measures and component P&L are implemented, the equity curve can inclu
 These series are controlled by the standard `include` mechanism.
 
 | `'by_underlying'` | One sheet per underlying instrument. | `include` | `'include'` is a **dictionary** mapping metric groups to their sub‑report configs. Supported keys and their sub‑configs:<br>• `'equity_curve'`: `{'include': ['gross','cost','net','decomposition']}`<br>• `'risk'`: `{'include': ['greeks']}`<br>• `'drawdown_table'`: `{'include': ['gross','net'], 'top_n': <int>}`<br>• `'hit_ratio'`: `{'include': ['gross','net'], 'timeframe': 'yearly'\|'monthly'}`<br>• `'metrics'`: `{'include': ['sharpe_gross', …], 'annualization': <int>}`<br>`'by_underlying'` does **not** accept a `'filter'` key directly. Wrap it in a report group to filter. |
-| `'trade_summary'` | One row per trade with key attributes and P&L. | `include` | `'identifiers'` (trade ID, entry/exit dates), `'tags'`, `'gross_pnl'`, `'cost'`, `'net_pnl'`, `'underlying'` (comma‑separated tickers), `'holding_days'` (trading days alive, business days only). If omitted, all groups are included (equivalent to `'full'`). |
+| `'trade_summary'` | One row per trade with key attributes and P&L. | `include` | `'tags'`, `'gross_pnl'`, `'cost'`, `'net_pnl'`, `'underlying'` (comma‑separated tickers), `'holding_days'` (trading days alive, business days only). Trade ID, entry date, and exit date are always included regardless of `include`. If `include` is omitted, all groups are shown. |
 
 **`trade_breakdown` (Phase 2+)**  
 A hierarchical report that provides a multi‑level view of a trade's performance, risk, and instrument details. It is controlled by a `detail` parameter that is a **list of level names** to include. The available levels are:

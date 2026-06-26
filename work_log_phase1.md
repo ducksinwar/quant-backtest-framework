@@ -737,3 +737,15 @@ refactor: make trade_id/entry/exit mandatory in trade_summary; reorder columns
 ```
 docs: clarify component P&L is net-only; add portfolio-level risk note to equity_curve
 ```
+
+## 2026-06-27 – Fix trade_summary table row in design notes
+
+### Changes applied
+
+**`design_notes.md`:**
+- §3.8 trade_summary table row: removed stale `'identifiers'` include group, updated to reflect that trade ID, entry date, and exit date are always included regardless of `include`.
+
+### Suggested commit message
+```
+docs: update trade_summary table to reflect mandatory identifiers
+```
