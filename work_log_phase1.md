@@ -673,3 +673,9 @@ Example runs correctly — equity curve shows proper date-indexed data, costs ap
 ```
 feat: add BacktestResult dataclass, fix aggregation for non-overlapping trades
 ```
+
+## 2026-06-26 – Manual fixes for summary
+
+### Manual changes
+- rewrite _build_equity_curve in a cleaner way
+- removing missing_mode dependency for _build_trade_summary

@@ -210,19 +210,19 @@ class Summary:
         output_name: str, results: dict,
     ):
         cfg = self._normalize_config(config)
+        include = cfg.get("include")
 
         gross = self._aggregate_series(leg_data, "gross", fx_rates)
-        cost = self._aggregate_series(leg_data, "cost", fx_rates)
-        net = self._aggregate_series(leg_data, "net", fx_rates)
+        cost  = self._aggregate_series(leg_data, "cost",  fx_rates)
+        net   = self._aggregate_series(leg_data, "net",   fx_rates)
 
-        cols = {}
-        include = cfg.get("include")
-        if include is None or "gross" in include:
-            cols["gross"] = gross.cumsum()
-        if include is None or "cost" in include:
-            cols["cost"] = cost.cumsum()
-        if include is None or "net" in include:
-            cols["net"] = net.cumsum()
+        series_map = {"gross": gross, "cost": cost, "net": net}
+
+        cols = {
+            key: series_map[key].cumsum()
+            for key in series_map
+            if include is None or key in include
+        }
 
         df = pd.DataFrame(cols)
         if not df.empty:
@@ -240,13 +240,13 @@ class Summary:
             trade_legs = [d for d in leg_data if d["trade_id"] == trade.trade_id]
 
             gross_total = sum(
-                d["gross"].fillna(0.0 if self._missing_mode == "any" else np.nan).sum()
-                for d in trade_legs
+                d["gross"].fillna(0.0).sum() for d in trade_legs
             )
-            cost_total = sum(d["cost"].fillna(0.0).sum() for d in trade_legs)
+            cost_total = sum(
+                d["cost"].fillna(0.0).sum() for d in trade_legs
+            )
             net_total = sum(
-                d["net"].fillna(0.0 if self._missing_mode == "any" else np.nan).sum()
-                for d in trade_legs
+                d["net"].fillna(0.0).sum() for d in trade_legs
             )
 
             row = {}
