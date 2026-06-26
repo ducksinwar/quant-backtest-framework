@@ -724,3 +724,16 @@ feat: add underlying/holding_days to trade_summary; update design notes for Phas
 ```
 refactor: make trade_id/entry/exit mandatory in trade_summary; reorder columns
 ```
+
+## 2026-06-27 – Design note corrections: component P&L and equity‑curve risk
+
+### Changes applied
+
+**`design_notes.md`:**
+- §3.8 `trade_breakdown` Trade bullet: clarified that component P&L is always net (no gross component P&L), and both risk measures and component P&L are gated by `include`.
+- §3.8 equity‑curve table: added new paragraph describing portfolio‑level risk and component P&L in Phase 2, including the correct underlying‑level netting method for gross measures. Corrected "net and gross component P&L" to "net component P&L".
+
+### Suggested commit message
+```
+docs: clarify component P&L is net-only; add portfolio-level risk note to equity_curve
+```
