@@ -250,9 +250,9 @@ class Summary:
             )
 
             row = {}
-            if include is None or "underlying" in include:
-                tickers = sorted({d["ticker"] for d in trade_legs})
-                row["underlying"] = ",".join(tickers)
+            row["trade_id"] = trade.trade_id
+            row["entry_date"] = trade.entry_date
+            row["exit_date"] = trade.exit_date
             if include is None or "holding_days" in include:
                 if (
                     self._trading_days
@@ -272,20 +272,17 @@ class Summary:
                     row["holding_days"] = holding
                 else:
                     row["holding_days"] = 0
-            if include is None or "identifiers" in include:
-                row["trade_id"] = trade.trade_id
-                row["entry_date"] = trade.entry_date
-                row["exit_date"] = trade.exit_date
             if include is None or "tags" in include:
                 row["tags"] = ",".join(trade.tags) if trade.tags else ""
+            if include is None or "underlying" in include:
+                tickers = sorted({d["ticker"] for d in trade_legs})
+                row["underlying"] = ",".join(tickers)
             if include is None or "gross_pnl" in include:
                 row["gross_pnl"] = gross_total
             if include is None or "cost" in include:
                 row["cost"] = cost_total
             if include is None or "net_pnl" in include:
                 row["net_pnl"] = net_total
-            if include is None or "local_pnl" in include:
-                row["local_pnl"] = net_total
 
             rows.append(row)
 

@@ -706,3 +706,21 @@ feat: add BacktestResult dataclass, fix aggregation for non-overlapping trades
 ```
 feat: add underlying/holding_days to trade_summary; update design notes for Phase 2+
 ```
+
+## 2026-06-26 – trade_summary: mandatory identifiers, column ordering
+
+### Changes applied
+
+**`backtester/summary.py` — `_build_trade_summary`:**
+- Made `trade_id`, `entry_date`, `exit_date` mandatory — always present regardless of `include`.
+- Reordered output columns to: trade_id, entry_date, exit_date, holding_days, tags, underlying, gross_pnl, cost, net_pnl.
+- Removed the `local_pnl` block entirely.
+- `holding_days`, `tags`, `underlying`, `gross_pnl`, `cost`, `net_pnl` remain controlled by the `include` setting.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+refactor: make trade_id/entry/exit mandatory in trade_summary; reorder columns
+```
