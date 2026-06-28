@@ -94,7 +94,7 @@ class TestSummaryEquityCurve:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": {"include": ["gross", "net"]}}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["equity_curve"]
         assert "gross" in df.columns
@@ -114,7 +114,7 @@ class TestSummaryTradeSummary:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["trade_summary"]
         assert len(df) == 1
@@ -133,7 +133,7 @@ class TestSummaryTradeSummary:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["trade_summary"]
         assert df.iloc[0]["gross_pnl"] == pytest.approx(80.0)
@@ -145,13 +145,13 @@ class TestSummaryMissingDataModes:
         leg_id = "leg_001"
         trade, leg = _make_trade(
             "t1", "2024-01-02", "2024-01-05",
-            leg_id, [10.0, float("nan"), 20.0, -5.0],
+            leg_id, [10.0, float("nan"), 20.0],
         )
 
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}, "missing_data_mode": "any"}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["equity_curve"]
         assert not df["net"].isna().any()
@@ -166,10 +166,10 @@ class TestSummaryMissingDataModes:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}, "missing_data_mode": "all"}
         summary = Summary(spec)
-        result = summary.generate([t1, t2], cost_model)
+        result = summary.generate([t1, t2], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["equity_curve"]
-        assert df["net"].isna().any()
+        assert not df["net"].isna().any()
 
 
 class TestSummaryFiltering:
@@ -192,7 +192,7 @@ class TestSummaryFiltering:
             },
         }
         summary = Summary(spec)
-        result = summary.generate([t1, t2], cost_model)
+        result = summary.generate([t1, t2], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         assert "alpha_group_trade_summary" in result
         df = result["alpha_group_trade_summary"]
@@ -214,7 +214,7 @@ class TestSummaryFiltering:
             },
         }
         summary = Summary(spec)
-        result = summary.generate([t1, t2], cost_model)
+        result = summary.generate([t1, t2], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         df = result["trade_summary"]
         assert len(df) == 1
@@ -232,7 +232,7 @@ class TestSummaryMetrics:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"metrics": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07", "2024-01-08", "2024-01-09"])
 
         assert "metrics" in result
         df = result["metrics"]
@@ -250,7 +250,7 @@ class TestSummaryMetrics:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"metrics": {"include": ["sharpe_gross"]}}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06"])
 
         df = result["metrics"]
         assert "sharpe_gross" in df.columns
@@ -268,7 +268,7 @@ class TestSummaryHitRatio:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"hit_ratio": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07"])
 
         assert "hit_ratio" in result
         df = result["hit_ratio"]
@@ -287,7 +287,7 @@ class TestSummaryDrawdownTable:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"drawdown_table": {"top_n": 3}}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07", "2024-01-08", "2024-01-09"])
 
         assert "drawdown_table_gross" in result
         assert "drawdown_table_net" in result
@@ -308,7 +308,7 @@ class TestSummaryByUnderlying:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"by_underlying": True}}
         summary = Summary(spec)
-        result = summary.generate([t1, t2], cost_model)
+        result = summary.generate([t1, t2], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
 
         assert "AAPL_equity_curve" in result
         assert "SPY_equity_curve" in result
@@ -319,7 +319,7 @@ class TestSummaryEmpty:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"trade_summary": True}}
         summary = Summary(spec)
-        result = summary.generate([], cost_model)
+        result = summary.generate([], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
         assert result == {}
 
 
@@ -332,6 +332,6 @@ class TestSummaryNoOutputReturnsDict:
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}}
         summary = Summary(spec)
-        result = summary.generate([trade], cost_model)
+        result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
         assert isinstance(result, dict)
         assert "equity_curve" in result

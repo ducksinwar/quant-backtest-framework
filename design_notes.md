@@ -698,7 +698,11 @@ The `Summary` constructor takes a single dictionary with the following keys:
   
   Groups can be nested arbitrarily. A report’s effective filter is the logical AND of the root `'filter'` and the filters of all enclosing groups.
 
-- `missing_data_mode`: string, `'any'` (default), `'all'`, or `'per_leg'`. Applies to **all** reports in this run. To compare different missing‑data modes, call `generate()` again with a different value.
+ - `missing_data_mode`: string, `'any'` (default), `'all'`, or `'per_leg'`. Applies to **all** reports in this run. To compare different missing‑data modes, call `generate()` again with a different value.
+
+   - `'any'` (default): Leg NaNs in P&L series are treated as zero; the true economic P&L is preserved. Risk series (`*_ts`) are left raw — portfolio‑level risk will show NaN on any day where a constituent leg has missing risk data.
+   - `'all'`: For multi-leg trades, if any leg has genuine missing data on a day, the P&L of all legs in that trade is zeroed and deferred to the next valid trading day. This prevents one‑sided P&L moves from creating artificial drawdowns. Risk series (`*_ts`) are forward‑filled within the trade with the last known value on those days. Component P&L (`*_pnl`) follows the same deferral as the primary P&L. Legs from different trades are not affected by each other.
+   - `'per_leg'`: Unaggregated per‑leg series are used directly. Both P&L and risk series are left raw.
 
 - `output`: optional output configuration.  
   - `'format'`: `'excel'`, `'csv'`, or `'parquet'`.  
@@ -883,10 +887,10 @@ summary = Summary(spec)
 
   1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved.
 
-  2. **Aggregation and missing‑data handling:**  
-     - `'any'` (default): Leg `NaN`s are treated as zero; the true economic P&L is preserved.
-     - `'all'`: Days with any leg `NaN` are presented as `NaN` in output, but the cumulative curve remains economically correct.
-     - `'per_leg'`: Unaggregated per‑leg series are used directly.
+   2. **Aggregation and missing‑data handling:**  
+      - `'any'` (default): Leg NaNs in P&L series are treated as zero; the true economic P&L is preserved. Risk series (`*_ts`) are left raw.
+      - `'all'`: For multi-leg trades, P&L on days where any leg has missing data is zeroed across all legs of that trade and deferred to the next valid day via cumsum‑drop‑diff. Risk series are forward‑filled. Single‑leg trades are unaffected.
+      - `'per_leg'`: Unaggregated per‑leg series are used directly. Both P&L and risk series are left raw.
 
   3. **Cost application:** The `CostModel.compute_costs()` returns a dictionary mapping `leg_id` to a per‑leg daily cost series, each in the leg’s local currency. For each leg in the trade history, the `Summary` uses the leg’s `leg_id` to look up the corresponding cost series and computes its local net P&L as `net_local = gross_local - cost_local` (with missing cost treated as zero).
 
@@ -907,7 +911,14 @@ summary = Summary(spec)
   5. **Report generation:**  
      - Standard reports are built using predefined logic. Filters from the root `reports` dict and from any containing groups are applied. Reports do not have their own `'filter'`; all filtering is handled by the root and group levels. The data is then aggregated according to the report’s `include` spec.
 
-- All of this runs on the **already‑saved `trade_history`** — no backtest re‑run is needed. You can change any part of the spec and call `generate()` again immediately.
+ - All of this runs on the **already‑saved `trade_history`** — no backtest re‑run is needed. You can change any part of the spec and call `generate()` again immediately.
+
+**Extensibility for future series types**  
+The adjustment logic in `'all'` mode automatically handles any new time‑series fields stored on a leg, based on their naming convention:
+- Series ending in `_pnl` (component P&L) follow the same cumsum‑drop‑diff deferral as gross/cost/net.
+- Series ending in `_ts` (valuation‑data / risk time series) receive a forward‑fill on masked days.
+In `'any'` mode, all series are left raw.
+No changes to the `Summary` code are required when new decomposition or risk measures are added; only the pricer and backtester need to populate the new fields.
 
 **Extending the Summary module:**
 

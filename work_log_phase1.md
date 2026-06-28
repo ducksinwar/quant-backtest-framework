@@ -783,3 +783,35 @@ docs: replace all stale FixedCostModel references with EquityCostCalculator
 ```
 perf: cache _aggregate_series results to avoid redundant recomputation
 ```
+
+## 2026-06-27 – Fix 'all' missing-data mode, simplify aggregation, update design notes
+
+### Changes applied
+
+**`backtester/summary.py`:**
+- `generate()`: made `trading_days` a required parameter; added `_adjust_for_missing_legs` call in `'all'` mode.
+- `_extract_leg_data`: removed `trading_days is None` guard; `trading_days` now always available.
+- New `_adjust_for_missing_legs` method: groups legs by trade, builds a combined NaN mask from `gross` series. For P&L series (`gross`, `cost`, `net`, `*_pnl`): zeroes all legs on masked days and defers P&L to the next valid day via cumsum‑drop‑diff. For risk series (`*_ts`): forward‑fills genuine NaN within the leg's lifetime. Single‑leg trades also processed (original guard removed).
+- `_aggregate_series` simplified: removed the `trading_days is None` fallback branch (no longer needed). Added `.fillna(0.0)` before `.reindex()` to handle NaN in existing index positions (not just new ones). `'per_leg'` mode unchanged.
+
+**`tests/test_summary.py`:**
+- All 14 `generate()` call sites now pass `trading_days=` (required parameter).
+- Tests with long PnL lists and `exit_date=None` given appropriately sized `trading_days`.
+- `test_missing_any_treats_nan_as_zero`: PnL reduced from 4→3 entries to match correct date alignment.
+- `test_missing_all_produces_nan_on_nan_days`: assertion changed to expect no NaN (deferral replaces NaN with 0.0).
+
+**`design_notes.md`:**
+- §3.10 `missing_data_mode` spec: expanded bullet points with full descriptions of 'any', 'all', and 'per_leg' behavior for P&L and risk series.
+- §3.10 "Processing steps" step 2: updated missing‑data handling bullets to match new deferral logic.
+- §3.10: added "Extensibility for future series types" paragraph explaining naming‑convention‑based automatic handling of `*_pnl` and `*_ts` series.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- Add skipna=True in the cumsum part of _build_equity_curve function. This is to leave our intention explicit and avoid potential problems caused by default behavior change of cumsum function in future pandas version.
+
+### Suggested commit message
+```
+fix: implement deferral for 'all' missing-data mode; make trading_days required; simplify aggregation
+```

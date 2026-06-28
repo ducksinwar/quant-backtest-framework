@@ -15,14 +15,17 @@ class Summary:
         self,
         trade_history: list,
         cost_model,
+        trading_days: list[str],
         fx_rates: dict[str, pd.Series] | None = None,
-        trading_days: list[str] | None = None,
     ) -> dict | None:
         self._trading_days = trading_days
         self._agg_cache: dict[tuple, pd.Series] = {}
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
         leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
+
+        if self._missing_mode == "all":
+            self._adjust_for_missing_legs(leg_data, trading_days)
 
         results: dict[str, pd.DataFrame] = {}
         self._generate_report_tree(
@@ -38,14 +41,14 @@ class Summary:
 
     def _extract_leg_data(
         self, trade_history: list, cost_map: dict,
-        trading_days: list[str] | None = None,
+        trading_days: list[str],
     ) -> list[dict]:
         rows = []
         for trade in trade_history:
             for structure in trade.structure_history:
                 for leg in structure.legs:
                     pnl_list = leg.daily_total_pnl
-                    if trading_days is not None and len(pnl_list) > 0:
+                    if len(pnl_list) > 0:
                         entry_idx = trading_days.index(trade.entry_date or "")
                         pnl_start = entry_idx + 1
 
@@ -89,6 +92,54 @@ class Summary:
                         "net": net,
                     })
         return rows
+
+    def _adjust_for_missing_legs(
+        self, leg_data: list[dict], trading_days: list[str]
+    ) -> None:
+        from collections import defaultdict
+
+        td_index = pd.Index(trading_days, dtype=object)
+
+        groups = defaultdict(list)
+        for d in leg_data:
+            groups[d["trade_id"]].append(d)
+
+        for trade_id, trade_legs in groups.items():
+            combined_mask = pd.Series(False, index=td_index)
+            for d in trade_legs:
+                gross = d["gross"]
+                genuine_nan = gross.isna()
+                mask = genuine_nan.reindex(td_index, fill_value=False)
+                combined_mask = combined_mask | mask
+
+            for d in trade_legs:
+                for key, s in list(d.items()):
+                    if not isinstance(s, pd.Series):
+                        continue
+
+                    s_aligned = s.reindex(td_index, fill_value=0.0)
+
+                    if key.endswith("_ts"):
+                        s_filled_original = s.ffill()
+                        d[key] = s_filled_original.reindex(td_index, fill_value=0.0)
+                        continue
+
+                    is_pnl = (
+                        key in {"gross", "cost", "net"}
+                        or key.endswith("_pnl")
+                    )
+                    if not is_pnl:
+                        continue
+
+                    s_work = s_aligned.fillna(0.0)
+                    cs = s_work.cumsum()
+                    cs_valid = cs[~combined_mask]
+                    adjusted_daily = cs_valid.diff()
+                    if len(adjusted_daily) > 0:
+                        adjusted_daily.iloc[0] = cs_valid.iloc[0]
+                    new_s = pd.Series(0.0, index=td_index)
+                    new_s[adjusted_daily.index] = adjusted_daily
+                    d[key] = new_s
 
     def _generate_report_tree(
         self, reports_spec: dict, trade_history: list,
@@ -168,47 +219,17 @@ class Summary:
         if cached is not None:
             return cached
 
-        trading_days = self._trading_days
-        if trading_days is not None and self._missing_mode != "per_leg":
-            td_index = pd.Index(trading_days, dtype=object)
+        td_index = pd.Index(self._trading_days, dtype=object)
 
-            filled_series = []
-            nan_masks = []
-            for d in leg_data:
-                s = d[key]
-                s_filled = s.reindex(td_index, fill_value=0.0)
-                filled_series.append(s_filled)
-
-                if self._missing_mode == "all":
-                    alive_nan = s.isna()                     # vectorized, same result as the loop
-                    nan_mask = alive_nan.reindex(td_index, fill_value=False)
-                    nan_masks.append(nan_mask)
-
-            result = sum(filled_series)
-
-            if self._missing_mode == "all" and nan_masks:
-                any_nan = pd.concat(nan_masks, axis=1).any(axis=1)
-                result[any_nan] = np.nan
-
+        if self._missing_mode == "per_leg":
+            result = pd.concat(
+                [d[key].rename(d["leg_id"]) for d in leg_data], axis=1
+            )
             self._agg_cache[cache_key] = result
             return result
 
-        series_list = []
-        for d in leg_data:
-            s = d[key]
-            if self._missing_mode == "per_leg":
-                series_list.append(s.rename(d["leg_id"]))
-            else:
-                s_filled = s.fillna(0.0) if self._missing_mode == "any" else s
-                series_list.append(s_filled)
-
-        if self._missing_mode == "per_leg":
-            result = pd.concat(series_list, axis=1)
-        else:
-            result = sum(series_list)
-            if self._missing_mode == "all":
-                any_nan_mask = pd.concat([s.isna() for s in series_list], axis=1).any(axis=1)
-                result[any_nan_mask] = np.nan
+        filled = [d[key].fillna(0.0).reindex(td_index, fill_value=0.0) for d in leg_data]
+        result = sum(filled)
 
         self._agg_cache[cache_key] = result
         return result
@@ -227,7 +248,7 @@ class Summary:
         series_map = {"gross": gross, "cost": cost, "net": net}
 
         cols = {
-            key: series_map[key].cumsum()
+            key: series_map[key].cumsum(skipna=True)
             for key in series_map
             if include is None or key in include
         }
