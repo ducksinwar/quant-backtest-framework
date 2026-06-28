@@ -19,6 +19,7 @@ class Summary:
         trading_days: list[str] | None = None,
     ) -> dict | None:
         self._trading_days = trading_days
+        self._agg_cache: dict[tuple, pd.Series] = {}
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
         leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
@@ -162,6 +163,11 @@ class Summary:
         if not leg_data:
             return pd.Series(dtype=float)
 
+        cache_key = (id(leg_data), key, self._missing_mode)
+        cached = self._agg_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         trading_days = self._trading_days
         if trading_days is not None and self._missing_mode != "per_leg":
             td_index = pd.Index(trading_days, dtype=object)
@@ -184,6 +190,7 @@ class Summary:
                 any_nan = pd.concat(nan_masks, axis=1).any(axis=1)
                 result[any_nan] = np.nan
 
+            self._agg_cache[cache_key] = result
             return result
 
         series_list = []
@@ -203,6 +210,7 @@ class Summary:
                 any_nan_mask = pd.concat([s.isna() for s in series_list], axis=1).any(axis=1)
                 result[any_nan_mask] = np.nan
 
+        self._agg_cache[cache_key] = result
         return result
 
     def _build_equity_curve(

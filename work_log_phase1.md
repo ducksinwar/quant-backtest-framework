@@ -766,3 +766,20 @@ docs: update trade_summary table to reflect mandatory identifiers
 ```
 docs: replace all stale FixedCostModel references with EquityCostCalculator
 ```
+
+## 2026-06-27 – Add caching to Summary._aggregate_series
+
+### Changes applied
+
+**`backtester/summary.py`:**
+- Added `self._agg_cache = {}` in `generate()`, cleared on each call.
+- `_aggregate_series` now checks a cache key `(id(leg_data), key, self._missing_mode)` before computing. On cache hit, returns the cached `pd.Series` immediately. On miss, computes and stores the result.
+- This avoids redundant aggregation when multiple reports (equity curve, metrics, hit ratio, drawdown) request the same gross/net/cost series from the same `leg_data`.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+perf: cache _aggregate_series results to avoid redundant recomputation
+```
