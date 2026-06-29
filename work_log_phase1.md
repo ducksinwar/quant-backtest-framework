@@ -864,3 +864,28 @@ refactor: add lazy computation layer to Summary; fix hit ratio to per-trade
 ```
 refactor: consolidate _build_metrics into single lazy loop
 ```
+
+## 2026-06-29 – Lazy-evaluation verification
+
+### Verification summary
+Confirmed all 11 planned changes are present in `summary.py`:
+
+1. `generate()` initialises `self._cache = {}` — **PASS** (line 23)
+2. `_adjust_for_missing_legs` uses `_group_legs_by_trade` — **PASS** (line 112)
+3. `_group_legs_by_trade` exists — **PASS** (lines 97-105)
+4. `_aggregate_series` renamed to `_get_daily_series` everywhere — **PASS** (no remaining references)
+5. `_get_cumulative_series` exists, calls `_get_daily_series`, caches `cumsum()` — **PASS** (lines 244-254)
+6. `_get_trade_totals` exists, calls `_group_legs_by_trade`, caches totals — **PASS** (lines 256-277)
+7. `_build_equity_curve` uses `_get_cumulative_series` — **PASS** (lines 288-292)
+8. `_build_trade_summary` uses `_get_trade_totals` — **PASS** (line 305)
+9. `_build_metrics` uses single `for label in ("gross", "net"):` loop — **PASS** (line 369)
+10. `_build_drawdown_table` uses `_get_cumulative_series` + `_compute_drawdown_table_from_cum` — **PASS** (lines 456, 462, 467)
+11. `_build_hit_ratio` uses `_get_daily_series` — **PASS** (lines 420-421)
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+refactor: add lazy computation layer to Summary; fix hit ratio to per-trade
+```
