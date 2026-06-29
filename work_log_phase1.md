@@ -815,3 +815,52 @@ perf: cache _aggregate_series results to avoid redundant recomputation
 ```
 fix: implement deferral for 'all' missing-data mode; make trading_days required; simplify aggregation
 ```
+
+## 2026-06-27 – Summary refactoring: lazy computation layer and hit-ratio fix
+
+### Changes applied
+
+**`backtester/summary.py`:**
+- Added `self._cache` in `generate()` alongside `self._agg_cache`.
+- New `_group_legs_by_trade(leg_data)` static helper — shared by `_adjust_for_missing_legs` and `_get_trade_totals`.
+- Renamed `_aggregate_series` → `_get_daily_series`; kept `_aggregate_series` as backward‑compatible alias.
+- New `_get_cumulative_series(leg_data, key)` — returns `daily.fillna(0.0).cumsum()`, cached under `("cum", id(leg_data), key)`.
+- New `_get_trade_totals(leg_data)` — returns per‑trade gross/cost/net totals, cached under `("trade_totals", id(leg_data))`.
+- `_build_equity_curve`: uses `_get_cumulative_series` instead of computing daily + cumsum inline.
+- `_build_trade_summary`: uses `_get_trade_totals` instead of recomputing per‑trade sums from legs.
+- `_build_drawdown_table`: uses `_get_cumulative_series`; `_compute_drawdown_table` renamed to `_compute_drawdown_table_from_cum` (takes pre‑computed cumulative).
+- `_build_metrics`: fully rewritten — all series fetched lazily only when their metric is included. Uses per‑label loops for Sharpe, max drawdown, annualized return, Calmar, and hit ratio.
+- **Hit-ratio bug fix**: now computes per‑trade hit ratio (fraction of trades with positive P&L) via `_get_trade_totals`, instead of daily P&L proportion.
+- `_adjust_for_missing_legs`: refactored to use `_group_legs_by_trade`.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- Remove line for backward compatibility to keep code clean
+
+### Suggested commit message
+```
+refactor: add lazy computation layer to Summary; fix hit ratio to per-trade
+```
+
+## 2026-06-28 – Consolidate _build_metrics into single lazy loop
+
+### Changes applied
+
+**`backtester/summary.py` — `_build_metrics`:**
+- Consolidated from 4 separate loops (sharpe/max_drawdown, annualized_return, calmar, hit_ratio) into a single `for label in ("gross", "net"):` loop containing all five metrics.
+- Each metric fetches `_get_daily_series` / `_get_cumulative_series` / `_get_trade_totals` only when its `include` check passes (lazy).
+- Hit ratio: per-trade computation called inside the label loop; `_get_trade_totals` is cached so it computes once across all labels.
+
+### Manual changes
+- Agent keeps refusing to apply the correct update as shown in diff.  Manually updated the metric function.
+- Fix hit ratio function where agent forgot to update aggregate_series function name to get_daily_series
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+refactor: consolidate _build_metrics into single lazy loop
+```

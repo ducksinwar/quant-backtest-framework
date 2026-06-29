@@ -20,6 +20,7 @@ class Summary:
     ) -> dict | None:
         self._trading_days = trading_days
         self._agg_cache: dict[tuple, pd.Series] = {}
+        self._cache: dict[tuple, object] = {}
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
         leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
@@ -93,16 +94,22 @@ class Summary:
                     })
         return rows
 
+    @staticmethod
+    def _group_legs_by_trade(leg_data: list[dict]) -> dict[str, list[dict]]:
+        groups: dict[str, list[dict]] = {}
+        for d in leg_data:
+            tid = d["trade_id"]
+            if tid not in groups:
+                groups[tid] = []
+            groups[tid].append(d)
+        return groups
+
     def _adjust_for_missing_legs(
         self, leg_data: list[dict], trading_days: list[str]
     ) -> None:
-        from collections import defaultdict
-
         td_index = pd.Index(trading_days, dtype=object)
 
-        groups = defaultdict(list)
-        for d in leg_data:
-            groups[d["trade_id"]].append(d)
+        groups = self._group_legs_by_trade(leg_data)
 
         for trade_id, trade_legs in groups.items():
             combined_mask = pd.Series(False, index=td_index)
@@ -208,7 +215,7 @@ class Summary:
         elif report_name == "by_underlying":
             self._build_by_underlying(config, trades, leg_data, fx_rates, output_name, results)
 
-    def _aggregate_series(
+    def _get_daily_series(
         self, leg_data: list[dict], key: str, fx_rates: dict | None = None,
     ) -> pd.Series:
         if not leg_data:
@@ -234,6 +241,41 @@ class Summary:
         self._agg_cache[cache_key] = result
         return result
 
+    def _get_cumulative_series(
+        self, leg_data: list[dict], key: str
+    ) -> pd.Series:
+        cache_key = ("cum", id(leg_data), key)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        daily = self._get_daily_series(leg_data, key)
+        result = daily.fillna(0.0).cumsum()
+        self._cache[cache_key] = result
+        return result
+
+    def _get_trade_totals(
+        self, leg_data: list[dict]
+    ) -> dict[str, dict[str, float]]:
+        cache_key = ("trade_totals", id(leg_data))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        groups = self._group_legs_by_trade(leg_data)
+        result: dict[str, dict[str, float]] = {}
+        for trade_id, legs in groups.items():
+            gross_total = sum(d["gross"].fillna(0.0).sum() for d in legs)
+            cost_total = sum(d["cost"].fillna(0.0).sum() for d in legs)
+            net_total = sum(d["net"].fillna(0.0).sum() for d in legs)
+            result[trade_id] = {
+                "gross": gross_total,
+                "cost": cost_total,
+                "net": net_total,
+            }
+
+        self._cache[cache_key] = result
+        return result
+
     def _build_equity_curve(
         self, config, leg_data: list[dict], fx_rates: dict | None,
         output_name: str, results: dict,
@@ -241,17 +283,13 @@ class Summary:
         cfg = self._normalize_config(config)
         include = cfg.get("include")
 
-        gross = self._aggregate_series(leg_data, "gross", fx_rates)
-        cost  = self._aggregate_series(leg_data, "cost",  fx_rates)
-        net   = self._aggregate_series(leg_data, "net",   fx_rates)
-
-        series_map = {"gross": gross, "cost": cost, "net": net}
-
-        cols = {
-            key: series_map[key].cumsum(skipna=True)
-            for key in series_map
-            if include is None or key in include
-        }
+        cols = {}
+        if include is None or "gross" in include:
+            cols["gross"] = self._get_cumulative_series(leg_data, "gross")
+        if include is None or "cost" in include:
+            cols["cost"] = self._get_cumulative_series(leg_data, "cost")
+        if include is None or "net" in include:
+            cols["net"] = self._get_cumulative_series(leg_data, "net")
 
         df = pd.DataFrame(cols)
         if not df.empty:
@@ -264,19 +302,16 @@ class Summary:
         cfg = self._normalize_config(config)
         include = cfg.get("include")
 
+        totals = self._get_trade_totals(leg_data)
+
         rows = []
         for trade in trades:
-            trade_legs = [d for d in leg_data if d["trade_id"] == trade.trade_id]
+            tt = totals.get(trade.trade_id, {"gross": 0.0, "cost": 0.0, "net": 0.0})
+            gross_total = tt["gross"]
+            cost_total = tt["cost"]
+            net_total = tt["net"]
 
-            gross_total = sum(
-                d["gross"].fillna(0.0).sum() for d in trade_legs
-            )
-            cost_total = sum(
-                d["cost"].fillna(0.0).sum() for d in trade_legs
-            )
-            net_total = sum(
-                d["net"].fillna(0.0).sum() for d in trade_legs
-            )
+            trade_legs = [d for d in leg_data if d["trade_id"] == trade.trade_id]
 
             row = {}
             row["trade_id"] = trade.trade_id
@@ -328,50 +363,48 @@ class Summary:
         if isinstance(annualization, bool):
             annualization = 252
 
-        gross = self._aggregate_series(leg_data, "gross", fx_rates)
-        net = self._aggregate_series(leg_data, "net", fx_rates)
-
         want_all = include is None
 
         metrics = {}
-        for label, series in [("gross", gross), ("net", net)]:
+        for label in ("gross", "net"):
+            # --- sharpe ---
             if want_all or f"sharpe_{label}" in (include or []):
-                ann_ret = series.mean() * annualization
-                ann_vol = series.std() * np.sqrt(annualization)
+                s = self._get_daily_series(leg_data, label)
+                ann_ret = s.mean() * annualization
+                ann_vol = s.std() * np.sqrt(annualization)
                 metrics[f"sharpe_{label}"] = ann_ret / ann_vol if ann_vol > 0 else 0.0
 
+            # --- max_drawdown ---
             if want_all or f"max_drawdown_{label}" in (include or []):
-                cumulative = series.fillna(0.0).cumsum()
-                running_max = cumulative.cummax()
-                drawdown = cumulative - running_max
+                cum = self._get_cumulative_series(leg_data, label)
+                running_max = cum.cummax()
+                drawdown = cum - running_max
                 metrics[f"max_drawdown_{label}"] = drawdown.min()
 
-        if want_all or any("annualized_return" in (i or "") for i in (include or [])):
-            ann_ret_gross = gross.mean() * annualization
-            metrics["annualized_return_gross"] = ann_ret_gross
-            ann_ret_net = net.mean() * annualization
-            metrics["annualized_return_net"] = ann_ret_net
+            # --- annualized_return ---
+            if want_all or f"annualized_return_{label}" in (include or []):
+                s = self._get_daily_series(leg_data, label)
+                metrics[f"annualized_return_{label}"] = s.mean() * annualization
 
-        if want_all or any("calmar" in (i or "").lower() for i in (include or [])):
-            cumulative = gross.fillna(0.0).cumsum()
-            running_max = cumulative.cummax()
-            dd = cumulative - running_max
-            mdd = dd.min()
-            ann_ret = gross.mean() * annualization
-            metrics["calmar_gross"] = ann_ret / abs(mdd) if mdd != 0 else 0.0
+            # --- calmar ---
+            if want_all or f"calmar_{label}" in (include or []):
+                s = self._get_daily_series(leg_data, label)
+                cum = self._get_cumulative_series(leg_data, label)
+                running_max = cum.cummax()
+                dd = cum - running_max
+                mdd = dd.min()
+                ann_ret = s.mean() * annualization
+                metrics[f"calmar_{label}"] = ann_ret / abs(mdd) if mdd != 0 else 0.0
 
-            cumulative_n = net.fillna(0.0).cumsum()
-            running_max_n = cumulative_n.cummax()
-            dd_n = cumulative_n - running_max_n
-            mdd_n = dd_n.min()
-            ann_ret_n = net.mean() * annualization
-            metrics["calmar_net"] = ann_ret_n / abs(mdd_n) if mdd_n != 0 else 0.0
-
-        if want_all or any("hit_ratio" in (i or "") for i in (include or [])):
-            pos_gross = (gross.fillna(0.0) > 0).mean()
-            pos_net = (net.fillna(0.0) > 0).mean()
-            metrics["hit_ratio_gross"] = pos_gross
-            metrics["hit_ratio_net"] = pos_net
+            # --- hit_ratio ---
+            if want_all or f"hit_ratio_{label}" in (include or []):
+                totals = self._get_trade_totals(leg_data)
+                tlist = list(totals.values())
+                if tlist:
+                    pos = sum(1 for t in tlist if t[label] > 0) / len(tlist)
+                else:
+                    pos = 0.0
+                metrics[f"hit_ratio_{label}"] = pos
 
         if metrics:
             results[output_name] = pd.DataFrame([metrics])
@@ -384,8 +417,8 @@ class Summary:
         timeframe = cfg.get("timeframe", "yearly")
         include = cfg.get("include")
 
-        gross = self._aggregate_series(leg_data, "gross", fx_rates)
-        net = self._aggregate_series(leg_data, "net", fx_rates)
+        gross = self._get_daily_series(leg_data, "gross")
+        net = self._get_daily_series(leg_data, "net")
 
         cols = {}
         if include is None or "gross" in include:
@@ -419,23 +452,21 @@ class Summary:
         top_n = cfg.get("top_n", 10)
         include = cfg.get("include")
 
-        gross = self._aggregate_series(leg_data, "gross", fx_rates)
-        net = self._aggregate_series(leg_data, "net", fx_rates)
-
         if include is None or "gross" in include:
-            dd_df = self._compute_drawdown_table(gross, top_n)
+            gross_cum = self._get_cumulative_series(leg_data, "gross")
+            dd_df = self._compute_drawdown_table_from_cum(gross_cum, top_n)
             if dd_df is not None:
                 results[f"{output_name}_gross"] = dd_df
 
         if include is None or "net" in include:
-            dd_df = self._compute_drawdown_table(net, top_n)
+            net_cum = self._get_cumulative_series(leg_data, "net")
+            dd_df = self._compute_drawdown_table_from_cum(net_cum, top_n)
             if dd_df is not None:
                 results[f"{output_name}_net"] = dd_df
 
-    def _compute_drawdown_table(
-        self, series: pd.Series, top_n: int
+    def _compute_drawdown_table_from_cum(
+        self, cumulative: pd.Series, top_n: int
     ) -> pd.DataFrame | None:
-        cumulative = series.fillna(0.0).cumsum()
         running_max = cumulative.cummax()
         drawdown = cumulative - running_max
 
