@@ -210,6 +210,8 @@ class Summary:
             self._build_trade_summary(config, trades, leg_data, fx_rates, output_name, results)
         elif report_name == "metrics":
             self._build_metrics(config, leg_data, fx_rates, output_name, results)
+        elif report_name == "periodic_metrics":
+            self._build_periodic_metrics(config, leg_data, fx_rates, output_name, results)
         elif report_name == "hit_ratio":
             self._build_hit_ratio(config, leg_data, fx_rates, output_name, results)
         elif report_name == "drawdown_table":
@@ -359,6 +361,16 @@ class Summary:
         self, config, leg_data: list[dict], fx_rates: dict | None,
         output_name: str, results: dict,
     ):
+        from backtester.metrics_calculators import (
+            compute_annualized_return,
+            compute_calmar,
+            compute_max_drawdown,
+            compute_max_drawdown_pct,
+            compute_return,
+            compute_return_pct,
+            compute_sharpe,
+        )
+
         cfg = self._normalize_config(config)
         include = cfg.get("include")
         annualization = cfg.get("annualization", 252)
@@ -370,58 +382,47 @@ class Summary:
 
         metrics = {}
         for label in ("gross", "net"):
-            # --- sharpe ---
             if want_all or f"sharpe_{label}" in (include or []):
                 s = self._get_daily_series(leg_data, label)
-                ann_ret = s.mean() * annualization
-                ann_vol = s.std() * np.sqrt(annualization)
-                metrics[f"sharpe_{label}"] = ann_ret / ann_vol if ann_vol > 0 else 0.0
+                metrics[f"sharpe_{label}"] = compute_sharpe(s, annualization)
 
-            # --- max_drawdown ---
             want_mdd = want_all or f"max_drawdown_{label}" in (include or [])
-            want_mdd_pct = has_capital and (want_all or f"max_drawdown_{label}_pct" in (include or []))
-            mdd_val = 0.0
+            want_mdd_pct = has_capital and (
+                want_all or f"max_drawdown_{label}_pct" in (include or [])
+            )
             if want_mdd or want_mdd_pct:
                 cum = self._get_cumulative_series(leg_data, label)
-                running_max = cum.cummax()
-                drawdown = cum - running_max
-                mdd_val = drawdown.min()
-            if want_mdd:
-                metrics[f"max_drawdown_{label}"] = mdd_val
+                mdd_val = compute_max_drawdown(cum)
+                if want_mdd:
+                    metrics[f"max_drawdown_{label}"] = mdd_val
+                if want_mdd_pct:
+                    metrics[f"max_drawdown_{label}_pct"] = compute_max_drawdown_pct(
+                        cum, self._capital, mdd=mdd_val
+                    )
 
-            # --- return (total absolute P&L) ---
             if want_all or f"return_{label}" in (include or []):
                 s = self._get_daily_series(leg_data, label)
-                ret_val = s.sum()
-                metrics[f"return_{label}"] = ret_val
+                metrics[f"return_{label}"] = compute_return(s)
 
-            # --- capital-based percentage metrics ---
             if has_capital:
                 if want_all or f"annualized_return_{label}" in (include or []):
                     s = self._get_daily_series(leg_data, label)
                     metrics[f"annualized_return_{label}"] = (
-                        s.mean() * annualization / self._capital * 100
+                        compute_annualized_return(s, annualization, self._capital)
                     )
                 if want_all or f"return_{label}_pct" in (include or []):
                     s = self._get_daily_series(leg_data, label)
-                    ret_val = s.sum()
-                    metrics[f"return_{label}_pct"] = ret_val / self._capital * 100
-                if want_mdd_pct:
-                    metrics[f"max_drawdown_{label}_pct"] = (
-                        mdd_val / self._capital * 100
+                    metrics[f"return_{label}_pct"] = compute_return_pct(
+                        s, self._capital
                     )
 
-            # --- calmar ---
             if want_all or f"calmar_{label}" in (include or []):
                 s = self._get_daily_series(leg_data, label)
                 cum = self._get_cumulative_series(leg_data, label)
-                running_max = cum.cummax()
-                dd = cum - running_max
-                mdd = dd.min()
-                ann_ret = s.mean() * annualization
-                metrics[f"calmar_{label}"] = ann_ret / abs(mdd) if mdd != 0 else 0.0
+                metrics[f"calmar_{label}"] = compute_calmar(
+                    s, cum, annualization
+                )
 
-            # --- hit_ratio ---
             if want_all or f"hit_ratio_{label}" in (include or []):
                 totals = self._get_trade_totals(leg_data)
                 tlist = list(totals.values())
@@ -433,6 +434,190 @@ class Summary:
 
         if metrics:
             results[output_name] = pd.DataFrame([metrics])
+
+    def _build_periodic_metrics(
+        self, config, leg_data: list[dict], fx_rates: dict | None,
+        output_name: str, results: dict,
+    ):
+        from backtester.metrics_calculators import (
+            compute_annualized_return,
+            compute_calmar,
+            compute_max_drawdown,
+            compute_max_drawdown_pct,
+            compute_return,
+            compute_return_pct,
+            compute_sharpe,
+        )
+
+        cfg = self._normalize_config(config)
+        include = cfg.get("include")
+        timeframe = cfg.get("timeframe", "yearly")
+        annualization = cfg.get("annualization", 252)
+        if isinstance(annualization, bool):
+            annualization = 252
+
+        want_all = include is None
+        has_capital = self._capital is not None and self._capital > 0
+
+        want = {}
+        needs_daily = {}
+        needs_cum = {}
+        for label in ("gross", "net"):
+            w_sharpe = want_all or f"sharpe_{label}" in (include or [])
+            w_return = want_all or f"return_{label}" in (include or [])
+            w_mdd = want_all or f"max_drawdown_{label}" in (include or [])
+            w_calmar = want_all or f"calmar_{label}" in (include or [])
+            w_return_pct = has_capital and (
+                want_all or f"return_{label}_pct" in (include or [])
+            )
+            w_annret = has_capital and (
+                want_all or f"annualized_return_{label}" in (include or [])
+            )
+            w_mdd_pct = has_capital and (
+                want_all or f"max_drawdown_{label}_pct" in (include or [])
+            )
+
+            want[f"sharpe_{label}"] = w_sharpe
+            want[f"return_{label}"] = w_return
+            want[f"max_drawdown_{label}"] = w_mdd
+            want[f"calmar_{label}"] = w_calmar
+            want[f"return_{label}_pct"] = w_return_pct
+            want[f"annualized_return_{label}"] = w_annret
+            want[f"max_drawdown_{label}_pct"] = w_mdd_pct
+
+            needs_daily[label] = (
+                w_sharpe or w_return or w_return_pct or w_annret or w_calmar
+            )
+            needs_cum[label] = w_mdd or w_mdd_pct or w_calmar
+
+        if not self._trading_days:
+            return
+
+        td_dates = pd.to_datetime(pd.Index(self._trading_days), errors="coerce")
+        if timeframe == "monthly":
+            labels = td_dates.strftime("%Y-%m")
+        else:
+            labels = td_dates.year.astype(str)
+
+        unique_periods = list(dict.fromkeys(labels))
+
+        rows = []
+        for period in unique_periods:
+            period_mask = labels == period
+            period_dates_arr = [
+                d for d, m in zip(self._trading_days, period_mask) if m
+            ]
+            period_idx = pd.Index(period_dates_arr)
+
+            row = {}
+            for label in ("gross", "net"):
+                nd = needs_daily[label]
+                nc = needs_cum[label]
+                if not nd and not nc:
+                    continue
+
+                daily_period = None
+                cum_period = None
+
+                if nd:
+                    daily_full = self._get_daily_series(leg_data, label)
+                    if daily_full.empty:
+                        continue
+                    daily_period = daily_full.reindex(period_idx, fill_value=0.0)
+                if nc:
+                    cum_full = self._get_cumulative_series(leg_data, label)
+                    if cum_full.empty:
+                        continue
+                    cum_period = (
+                        cum_full.reindex(period_idx, fill_value=0.0)
+                        .ffill()
+                        .fillna(0.0)
+                    )
+
+                if want[f"sharpe_{label}"]:
+                    row[f"sharpe_{label}"] = compute_sharpe(
+                        daily_period, annualization
+                    )
+
+                if want[f"max_drawdown_{label}"] or want[f"max_drawdown_{label}_pct"]:
+                    mdd = compute_max_drawdown(cum_period)
+                    if want[f"max_drawdown_{label}"]:
+                        row[f"max_drawdown_{label}"] = mdd
+                    if want[f"max_drawdown_{label}_pct"]:
+                        row[f"max_drawdown_{label}_pct"] = compute_max_drawdown_pct(
+                            cum_period, self._capital, mdd=mdd
+                        )
+
+                if want[f"return_{label}"]:
+                    row[f"return_{label}"] = compute_return(daily_period)
+
+                if has_capital:
+                    if want[f"return_{label}_pct"]:
+                        row[f"return_{label}_pct"] = compute_return_pct(
+                            daily_period, self._capital
+                        )
+                    if want[f"annualized_return_{label}"]:
+                        row[f"annualized_return_{label}"] = (
+                            compute_annualized_return(
+                                daily_period, annualization, self._capital
+                            )
+                        )
+
+                if want[f"calmar_{label}"]:
+                    row[f"calmar_{label}"] = compute_calmar(
+                        daily_period, cum_period, annualization
+                    )
+
+            if row:
+                rows.append((period, row))
+
+        if not rows:
+            return
+
+        # --- total row (same flags, full series) ---
+        total_row = {}
+        for label in ("gross", "net"):
+            nd = needs_daily[label]
+            nc = needs_cum[label]
+            if not nd and not nc:
+                continue
+
+            daily_full = self._get_daily_series(leg_data, label) if nd else None
+            cum_full = self._get_cumulative_series(leg_data, label) if nc else None
+
+            if want[f"sharpe_{label}"]:
+                total_row[f"sharpe_{label}"] = compute_sharpe(
+                    daily_full, annualization
+                )
+            if want[f"return_{label}"]:
+                total_row[f"return_{label}"] = compute_return(daily_full)
+            if want[f"max_drawdown_{label}"] or want[f"max_drawdown_{label}_pct"]:
+                mdd = compute_max_drawdown(cum_full)
+                if want[f"max_drawdown_{label}"]:
+                    total_row[f"max_drawdown_{label}"] = mdd
+                if want[f"max_drawdown_{label}_pct"]:
+                    total_row[f"max_drawdown_{label}_pct"] = compute_max_drawdown_pct(
+                        cum_full, self._capital, mdd=mdd
+                    )
+            if want[f"calmar_{label}"]:
+                total_row[f"calmar_{label}"] = compute_calmar(
+                    daily_full, cum_full, annualization
+                )
+            if has_capital:
+                if want[f"return_{label}_pct"]:
+                    total_row[f"return_{label}_pct"] = compute_return_pct(
+                        daily_full, self._capital
+                    )
+                if want[f"annualized_return_{label}"]:
+                    total_row[f"annualized_return_{label}"] = (
+                        compute_annualized_return(
+                            daily_full, annualization, self._capital
+                        )
+                    )
+
+        df = pd.DataFrame([r for _, r in rows], index=[p for p, _ in rows])
+        df.loc["total"] = total_row
+        results[output_name] = df
 
     def _build_hit_ratio(
         self, config, leg_data: list[dict], fx_rates: dict | None,

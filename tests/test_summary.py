@@ -276,6 +276,32 @@ class TestSummaryHitRatio:
         assert "hit_ratio_net" in df.columns
 
 
+class TestSummaryPeriodicMetrics:
+    def test_periodic_metrics_yearly(self):
+        leg_id = "leg_001"
+        trade, leg = _make_trade(
+            "t1", "2024-01-02", None,
+            leg_id, [10.0, -5.0, 20.0, -10.0, 5.0],
+        )
+
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        spec = {"reports": {"periodic_metrics": {"timeframe": "yearly"}}}
+        summary = Summary(spec)
+        trading_days = [
+            "2024-01-02", "2024-01-03", "2024-01-04",
+            "2024-01-05", "2024-01-06", "2024-01-07",
+        ]
+        result = summary.generate(
+            [trade], cost_model, trading_days=trading_days,
+        )
+
+        assert "periodic_metrics" in result
+        df = result["periodic_metrics"]
+        assert "total" in df.index
+        assert "return_gross" in df.columns
+        assert "return_net" in df.columns
+
+
 class TestSummaryDrawdownTable:
     def test_drawdown_table_generated(self):
         leg_id = "leg_001"

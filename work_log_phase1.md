@@ -920,3 +920,60 @@ refactor: add lazy computation layer to Summary; fix hit ratio to per-trade
 ```
 feat: add capital parameter for pct metrics; fix hit ratio to per-trade totals with total row
 ```
+
+## 2026-07-01 – Metrics refactoring, periodic_metrics report, design-note update
+
+### Changes applied
+
+**New module `backtester/metrics_calculators.py`:**
+- 7 pure, stateless functions: `compute_return`, `compute_return_pct`, `compute_sharpe`, `compute_max_drawdown`, `compute_max_drawdown_pct`, `compute_calmar`, `compute_annualized_return`.
+- Each takes the necessary series and parameters, returns a single scalar.
+
+**Refactored `backtester/summary.py` — `_build_metrics`:**
+- Replaced inline metric calculations with calls to the new calculator functions.
+- Output DataFrame and column names remain identical; no test changes needed.
+
+**New method `_build_periodic_metrics` in `backtester/summary.py`:**
+- Computes the same metrics as `_build_metrics` over configurable time periods (yearly/monthly).
+- Supports `timeframe`, `annualization`, and `include` from config.
+- Groups periods by year or YYYY‑MM using the trading_days index.
+- Adds a `"total"` row computed from the full daily/cumulative series (not an average of period rows).
+- Inclusion flags computed once at the top (`want` dict); per‑period and total‑row blocks share the same flags.
+- Does **not** include hit ratio.
+- Follows the same lazy‑fetch pattern as `_build_metrics`.
+- Uses `continue` (not `break`) when a label's series is empty.
+
+**Updated `_build_report` dispatch:**
+- Added `elif report_name == "periodic_metrics"` branch.
+
+**Updated `design_notes.md`:**
+- Added `periodic_metrics` row to the standard reports table (after `metrics`).
+- Added new **Internal architecture** subsection in §3.10 describing current design (pure calculator functions) and Phase 2 plan (pluggable `MetricCalculator` + `BaseReport` registries).
+
+**New test in `tests/test_summary.py`:**
+- `TestSummaryPeriodicMetrics.test_periodic_metrics_yearly`: verifies periodic_metrics DataFrame, "total" row, and return_gross/return_net columns.
+
+### Suggested commit message
+```
+feat: extract metric calculators, add periodic_metrics report, document Phase 2 architecture
+```
+
+## 2026-07-01 – Optimise max drawdown computation (avoid double compute)
+
+### Changes applied
+
+**`backtester/metrics_calculators.py`:**
+- `compute_max_drawdown_pct` now accepts optional `mdd` parameter. When provided, uses the pre‑computed value instead of calling `compute_max_drawdown` again.
+
+**`backtester/summary.py` — `_build_metrics`:**
+- Added `compute_max_drawdown_pct` to local import.
+- Passes pre‑computed `mdd_val` to `compute_max_drawdown_pct` via `mdd=` parameter.
+
+**`backtester/summary.py` — `_build_periodic_metrics`:**
+- Per‑period loop: `compute_max_drawdown` called once; result reused for both `max_drawdown` and `max_drawdown_pct`.
+- Total‑row section: merged the two independent `if` blocks for max drawdown into a single block; `compute_max_drawdown` called once.
+
+### Suggested commit message
+```
+perf: avoid double compute_max_drawdown when both mdd and mdd_pct are requested
+```
