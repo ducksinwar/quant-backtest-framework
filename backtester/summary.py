@@ -17,10 +17,12 @@ class Summary:
         cost_model,
         trading_days: list[str],
         fx_rates: dict[str, pd.Series] | None = None,
+        capital: float | None = None,
     ) -> dict | None:
         self._trading_days = trading_days
         self._agg_cache: dict[tuple, pd.Series] = {}
         self._cache: dict[tuple, object] = {}
+        self._capital = capital
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
         leg_data = self._extract_leg_data(trade_history, cost_map, trading_days)
@@ -364,6 +366,7 @@ class Summary:
             annualization = 252
 
         want_all = include is None
+        has_capital = self._capital is not None and self._capital > 0
 
         metrics = {}
         for label in ("gross", "net"):
@@ -375,16 +378,38 @@ class Summary:
                 metrics[f"sharpe_{label}"] = ann_ret / ann_vol if ann_vol > 0 else 0.0
 
             # --- max_drawdown ---
-            if want_all or f"max_drawdown_{label}" in (include or []):
+            want_mdd = want_all or f"max_drawdown_{label}" in (include or [])
+            want_mdd_pct = has_capital and (want_all or f"max_drawdown_{label}_pct" in (include or []))
+            mdd_val = 0.0
+            if want_mdd or want_mdd_pct:
                 cum = self._get_cumulative_series(leg_data, label)
                 running_max = cum.cummax()
                 drawdown = cum - running_max
-                metrics[f"max_drawdown_{label}"] = drawdown.min()
+                mdd_val = drawdown.min()
+            if want_mdd:
+                metrics[f"max_drawdown_{label}"] = mdd_val
 
-            # --- annualized_return ---
-            if want_all or f"annualized_return_{label}" in (include or []):
+            # --- return (total absolute P&L) ---
+            if want_all or f"return_{label}" in (include or []):
                 s = self._get_daily_series(leg_data, label)
-                metrics[f"annualized_return_{label}"] = s.mean() * annualization
+                ret_val = s.sum()
+                metrics[f"return_{label}"] = ret_val
+
+            # --- capital-based percentage metrics ---
+            if has_capital:
+                if want_all or f"annualized_return_{label}" in (include or []):
+                    s = self._get_daily_series(leg_data, label)
+                    metrics[f"annualized_return_{label}"] = (
+                        s.mean() * annualization / self._capital * 100
+                    )
+                if want_all or f"return_{label}_pct" in (include or []):
+                    s = self._get_daily_series(leg_data, label)
+                    ret_val = s.sum()
+                    metrics[f"return_{label}_pct"] = ret_val / self._capital * 100
+                if want_mdd_pct:
+                    metrics[f"max_drawdown_{label}_pct"] = (
+                        mdd_val / self._capital * 100
+                    )
 
             # --- calmar ---
             if want_all or f"calmar_{label}" in (include or []):
@@ -417,32 +442,73 @@ class Summary:
         timeframe = cfg.get("timeframe", "yearly")
         include = cfg.get("include")
 
-        gross = self._get_daily_series(leg_data, "gross")
-        net = self._get_daily_series(leg_data, "net")
+        totals = self._get_trade_totals(leg_data)
+        if not totals:
+            return
+
+        seen: set[str] = set()
+        rows = []
+        for d in leg_data:
+            tid = d["trade_id"]
+            if tid in seen:
+                continue
+            seen.add(tid)
+            trade = d["trade"]
+            rows.append({
+                "entry_date": trade.entry_date or "",
+                "gross_total": totals[tid]["gross"],
+                "net_total": totals[tid]["net"],
+            })
+
+        tdf = pd.DataFrame(rows)
+        if tdf.empty:
+            return
+
+        want_all = include is None
+
+        try:
+            dates = pd.to_datetime(tdf["entry_date"], errors="coerce")
+            if timeframe == "monthly":
+                tdf["group"] = dates.dt.strftime("%Y-%m")
+            else:
+                tdf["group"] = dates.dt.year.astype(str)
+        except Exception:
+            n = len(tdf)
+            row = {}
+            if want_all or "gross" in include:
+                row["hit_ratio_gross"] = (tdf["gross_total"] > 0).mean()
+            if want_all or "net" in include:
+                row["hit_ratio_net"] = (tdf["net_total"] > 0).mean()
+            results[output_name] = pd.DataFrame([row], index=["total"])
+            return
 
         cols = {}
-        if include is None or "gross" in include:
-            cols["hit_ratio_gross"] = self._compute_hit_ratio(gross, timeframe)
-        if include is None or "net" in include:
-            cols["hit_ratio_net"] = self._compute_hit_ratio(net, timeframe)
+        if want_all or "gross" in include:
+            cols["hit_ratio_gross"] = (
+                tdf.groupby("group")["gross_total"].apply(
+                    lambda x: (x > 0).sum() / len(x)
+                )
+            )
+        if want_all or "net" in include:
+            cols["hit_ratio_net"] = (
+                tdf.groupby("group")["net_total"].apply(
+                    lambda x: (x > 0).sum() / len(x)
+                )
+            )
 
-        if cols:
-            results[output_name] = pd.DataFrame(cols)
+        df = pd.DataFrame(cols)
 
-    def _compute_hit_ratio(self, series: pd.Series, timeframe: str) -> pd.Series:
-        series = series.fillna(0.0)
-        try:
-            idx_series = pd.to_datetime(series.index, errors="coerce")
-            if timeframe == "monthly":
-                grouper = idx_series.strftime("%Y-%m")
-            else:
-                grouper = idx_series.strftime("%Y")
-        except Exception:
-            return pd.Series({"overall": (series > 0).mean()})
+        total_row = {}
+        n = len(tdf)
+        if want_all or "gross" in include:
+            total_row["hit_ratio_gross"] = (tdf["gross_total"] > 0).mean()
+        if want_all or "net" in include:
+            total_row["hit_ratio_net"] = (tdf["net_total"] > 0).mean()
 
-        grouped = series.groupby(grouper)
-        hit = grouped.apply(lambda g: (g > 0).mean())
-        return hit
+        df.loc["total"] = total_row
+
+        if not df.empty:
+            results[output_name] = df
 
     def _build_drawdown_table(
         self, config, leg_data: list[dict], fx_rates: dict | None,
@@ -451,17 +517,22 @@ class Summary:
         cfg = self._normalize_config(config)
         top_n = cfg.get("top_n", 10)
         include = cfg.get("include")
+        has_capital = self._capital is not None and self._capital > 0
 
         if include is None or "gross" in include:
             gross_cum = self._get_cumulative_series(leg_data, "gross")
             dd_df = self._compute_drawdown_table_from_cum(gross_cum, top_n)
             if dd_df is not None:
+                if has_capital:
+                    dd_df["depth_pct"] = dd_df["depth"] / self._capital * 100
                 results[f"{output_name}_gross"] = dd_df
 
         if include is None or "net" in include:
             net_cum = self._get_cumulative_series(leg_data, "net")
             dd_df = self._compute_drawdown_table_from_cum(net_cum, top_n)
             if dd_df is not None:
+                if has_capital:
+                    dd_df["depth_pct"] = dd_df["depth"] / self._capital * 100
                 results[f"{output_name}_net"] = dd_df
 
     def _compute_drawdown_table_from_cum(

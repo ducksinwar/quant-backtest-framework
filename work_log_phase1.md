@@ -889,3 +889,34 @@ Confirmed all 11 planned changes are present in `summary.py`:
 ```
 refactor: add lazy computation layer to Summary; fix hit ratio to per-trade
 ```
+
+## 2026-07-01 – Capital parameter, return semantics, per-trade hit ratio, and design notes
+
+### Changes applied
+
+**`backtester/summary.py`:**
+- `generate()`: added optional `capital: float | None = None` parameter, stored as `self._capital`.
+- `_build_metrics`:
+  - Added `return_{label}` = sum of daily series (always available regardless of capital).
+  - When `capital` is provided and positive:
+    - `annualized_return_{label}` = `daily_series.mean() * annualization / capital * 100` (percentage of capital).
+    - `return_{label}_pct` = `return_{label} / capital * 100`.
+    - `max_drawdown_{label}_pct` = `max_drawdown / capital * 100`.
+  - When `capital` is None, `annualized_return` and all `_pct` columns are omitted.
+  - Sharpe and Calmar are not affected (they are already ratios).
+  - Lazy fetch: `_get_daily_series` called only inside blocks that need it (not hit_ratio).
+- `_build_drawdown_table`: when capital provided, adds `depth_pct` = `depth / capital * 100` to each side's DataFrame.
+- `_build_hit_ratio`: completely rewritten to use per-trade totals from `_get_trade_totals`, grouped by entry date according to `timeframe`. Result is a DataFrame indexed by time group with a `"total"` row at the bottom (computed across all trades). Removed `_compute_hit_ratio` helper.
+
+**`design_notes.md`:**
+- §3.10 `generate()` description: added `capital` parameter and its effect.
+- §3.10 `metrics` table row: added `return`, expanded with always-available and capital-dependent columns.
+- §3.10 `hit_ratio` table row: clarified per-trade (by entry date) computation and `"total"` row.
+
+### Test results
+144/144 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+feat: add capital parameter for pct metrics; fix hit ratio to per-trade totals with total row
+```

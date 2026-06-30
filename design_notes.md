@@ -759,9 +759,9 @@ Rows are output in a single table in the fixed nesting order `leg → structure 
 - After FX conversion, all monetary values and risk measures automatically receive `_local` / `_base` variants. Drawdown, max adverse, and max favourable metrics also get base‑currency variants.
 - Instrument‑specific parameters (`Instrument.params`) are automatically expanded into individual columns at the leg level, keeping the `Summary` completely asset‑agnostic.
 
-| `'hit_ratio'`     | Hit ratio over a configurable timeframe. | `timeframe` (default `'yearly'`), `include` | When `include` is specified, it controls whether the gross, cost, and net versions are computed. Examples: `'include': ['gross']` (only gross hit ratio), `'include': ['gross','net']` (gross and net of costs). If omitted, both gross and net are produced. |
+| `'hit_ratio'`     | Hit ratio over a configurable timeframe, computed per trade (by entry date), not per day. | `timeframe` (default `'yearly'`), `include` | When `include` is specified, it controls whether the gross and net versions are computed. Examples: `'include': ['gross']` (only gross hit ratio), `'include': ['gross','net']` (gross and net of costs). If omitted, both gross and net are produced. The output DataFrame is indexed by the time group (e.g., year) with an additional `"total"` row at the bottom that is the hit ratio computed across **all** trades (not the average of the group ratios). |
 | `'drawdown_table'`| Top N drawdowns with dates and underwater days. | `top_n` (default 10), `include` | Same `include` logic as `'hit_ratio'`: controls gross vs. net drawdowns. |
-| `'metrics'`       | Standard scalar metrics (Sharpe, Calmar, annualized return, max drawdown, hit ratio). | `include`, `annualization` (default 252) | `include` specifies which metrics to compute (e.g., `['sharpe','max_drawdown']`). Each metric can be requested in `'gross'` or `'net'` form by adding a suffix (e.g., `'sharpe_gross'`, `'sharpe_net'`). If `include` is omitted, all available metrics are produced in both gross and net versions. |
+| `'metrics'`       | Standard scalar metrics (Sharpe, Calmar, annualized return, max drawdown, return, hit ratio). | `include`, `annualization` (default 252) | `include` specifies which metrics to compute (e.g., `['sharpe','max_drawdown']`). Each metric can be requested in `'gross'` or `'net'` form by adding a suffix (e.g., `'sharpe_gross'`, `'sharpe_net'`). If `include` is omitted, all available metrics are produced in both gross and net versions.<br><br>**Always available:** `return_gross`, `return_net` — total gross/net P&L over the whole simulation period (absolute dollar value).<br>**When `capital` is provided:** `annualized_return_gross`, `annualized_return_net` — annualised return expressed as a percentage of capital; `return_gross_pct`, `return_net_pct` — total return as a percentage of capital; `max_drawdown_gross_pct`, `max_drawdown_net_pct` — max drawdown as a percentage of capital. |
 
 **Output format for `'by_underlying'`:**
 
@@ -877,9 +877,10 @@ summary = Summary(spec)
 ```
 **Primary method:**
 
-- `generate(trade_history: list[Trade], cost_model: CostModel, fx_rates: dict[str, pd.Series] | None = None) -> dict | None`
+- `generate(trade_history: list[Trade], cost_model: CostModel, trading_days: list[str], fx_rates: dict[str, pd.Series] | None = None, capital: float | None = None) -> dict | None`
   Applies the cost model (for standard reports that need it), handles missing data, and produces the requested reports.  
   `fx_rates` is an optional dictionary mapping currency pairs (e.g., `'USDJPY'`) to a `pd.Series` of daily spot rates.  
+  `capital` is an optional parameter that enables percentage versions of return, drawdown, and annualised return. When provided and positive, `annualized_return` is expressed as a percentage of capital, and `return_pct`, `max_drawdown_pct`, and `depth_pct` (in drawdown tables) are added. When omitted, `annualized_return` and all `_pct` columns are not produced; `return` (total absolute P&L) is always available.  
   - **If `fx_rates` is provided**, local‑currency P&L is converted to the base currency (USD) and portfolio‑level metrics are computed.
   - **If `fx_rates` is omitted**, no cross‑currency aggregation is performed. Reports that require a single‑currency portfolio are either omitted or broken down by underlying/currency.
 
