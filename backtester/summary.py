@@ -737,11 +737,11 @@ class Summary:
 
         for i, (idx, dd_val) in enumerate(drawdown.items()):
             if dd_val < 0 and not in_dd:
-                start = i
-                peak_val = running_max.iloc[i]
+                start = max(i - 1, 0)
+                peak_val = running_max.iloc[start]
                 in_dd = True
             elif dd_val >= 0 and in_dd:
-                end = i - 1
+                end = i
                 trough = drawdown.iloc[start:end+1].min()
                 trough_date = drawdown.iloc[start:end+1].idxmin()
                 dd_periods.append({
@@ -799,6 +799,9 @@ class Summary:
             if build_all or "hit_ratio" in include:
                 hr_cfg = include.get("hit_ratio", {}) if not build_all else {}
                 self._build_hit_ratio(hr_cfg, ticker_leg_data, fx_rates, "hit_ratio", sub_results)
+            if build_all or "periodic_metrics" in include:
+                pm_cfg = include.get("periodic_metrics", {}) if not build_all else {}
+                self._build_periodic_metrics(pm_cfg, ticker_leg_data, fx_rates, "periodic_metrics", sub_results)
 
             for sub_name, sub_df in sub_results.items():
                 key = f"{ticker}_{sub_name}"

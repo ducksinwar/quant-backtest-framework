@@ -977,3 +977,28 @@ feat: extract metric calculators, add periodic_metrics report, document Phase 
 ```
 perf: avoid double compute_max_drawdown when both mdd and mdd_pct are requested
 ```
+
+## 2026-07-02 – Fix drawdown table to use peak-to-peak definition
+
+### Problem
+`_compute_drawdown_table_from_cum` used the first underwater day as the drawdown start and the last underwater day as the end, missing the peak and recovery days. This is not the industry-standard peak-to-peak definition and undercounts `underwater_days`.
+
+### Changes applied
+
+**`backtester/summary.py` — `_compute_drawdown_table_from_cum`:**
+- **Start index** (line 740): Changed `start = i` → `start = max(i - 1, 0)`. Start is now the previous peak day, not the first underwater day.
+- **Peak value** (line 741): Changed `peak_val = running_max.iloc[i]` → `peak_val = running_max.iloc[start]`. References the correct index after the start change.
+- **End index** (line 744): Changed `end = i - 1` → `end = i`. End is the recovery day (new peak), not the last underwater day.
+- Trough computation (`drawdown.iloc[start:end+1].min()`) automatically covers the full peak-to-peak window; the peak and recovery day have dd=0 so they don't affect the trough value.
+- Open drawdown at end of series: naturally adapts since `start` uses the new logic and `end = len(drawdown) - 1` is unchanged.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- Add build_periodic_metrics to by_underlying function
+
+### Suggested commit message
+```
+fix: use peak-to-peak drawdown definition in _compute_drawdown_table_from_cum
+```
