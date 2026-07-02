@@ -491,6 +491,12 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
   {'Action': 'UNWIND', 'trade_id': 'trade_123', 'info': []}
   ```
 
+- **Notional‑to‑shares conversion (sizing intent):**
+
+  > *Phase 1 simplification:* The signal currently converts a target notional into shares using `int(notional / current_price)`, where `current_price` is the adjusted close on the execution date. This produces "fake" shares that keep P&L correct in the backtest but do not represent realistic trade quantities.
+  > *Phase 2 plan:* The conversion will move to the `OrderGenerator` (§3.8). In backtest mode, the `OrderGenerator` will still use adjusted close for sizing, preserving the existing P&L integrity. In live production, it will use spot prices to compute actual trade sizes. The signal will output only a pure notional intent, remaining fully agnostic to the execution context.
+  > *Future:* A later refactoring will unify the backtest and live execution paths so that trade quantities are consistent in both environments, without compromising the accuracy of the backtest.
+
 - **Separation of alpha and execution:**  
   **In Phase 1**, `BaseSignal.generate_signals()` directly produces `TargetTrade` dictionaries for simplicity. The signal may delegate mechanical operations (scaling, hedging, rolling) to separate helper modules that also emit `TargetTrade` dicts.
 
@@ -503,7 +509,7 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
 
 ### 3.8 OrderGenerator
 
-The OrderGenerator is a stateless component that sits between the alpha signal and the backtester. It transforms a pure **alpha intent dict** into executable `TargetTrade` orders by applying a chain of swappable **OrderRule** instances.
+The OrderGenerator is a stateless component that sits between the alpha signal and the backtester. It transforms a pure **alpha intent dict** into executable `TargetTrade` orders by applying a chain of swappable **OrderRule** instances. Among its mechanical rules, the `OrderGenerator` will convert a notional‑based alpha intent into an exact number of shares. In backtest mode it will use adjusted close for sizing; in live production it will use spot prices. A future phase will further align the two contexts.
 
 **Alpha intent format (example):**
 ```python

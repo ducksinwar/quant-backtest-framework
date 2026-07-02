@@ -81,8 +81,8 @@ class TestSMACrossoverSignal:
         return SMACrossoverSignal(
             short_window=5,
             long_window=20,
-            ticker="SPY",
-            size=100.0,
+            tickers=["SPY"],
+            notional=100_000.0,
             data_feed=mock_data_feed,
         )
 
@@ -114,13 +114,14 @@ class TestSMACrossoverSignal:
 
         series = self.make_price_series(combined)
         mock_data_feed.get_series.return_value = series
+        mock_data_feed.get_value.return_value = 500.0
 
         orders = signal.generate_signals("2024-06-15", portfolio_state=None)
         assert len(orders) == 1
         assert orders[0]["Action"] == "NEW"
         assert orders[0]["trade_id"] is None
         assert orders[0]["info"][0]["legs"][0]["ticker"] == "SPY"
-        assert orders[0]["info"][0]["legs"][0]["size"] == 100.0
+        assert orders[0]["info"][0]["legs"][0]["size"] == int(100_000.0 / 500.0)
 
     def test_returns_unwind_when_short_below_long_and_in_position(
         self, signal, mock_data_feed

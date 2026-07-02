@@ -20,6 +20,7 @@
 | 12 | 06‑17 | Cost‑exposure implementation (all modules) | [§ Cost impl](#2026-06-17--cost-exposure-refactoring-implementation) |
 | 13 | 06‑17 | Fix Summary cost alignment | [§ Cost fix](#2026-06-17--fix-summary-cost-alignment-date-indexed-gross-pnl) |
 | 14 | 06‑17 | **Final end‑to‑end code review** | [§ Final review](#2026-06-17--final-phase1-endtoend-code-review) |
+| 15 | 07‑03 | SMACrossoverSignal: notional sizing + multi‑ticker | [§ Notional sizing](#2026-07-03--smacrossoversignal-notional-sizing--multi-ticker) |
 
 ---
 
@@ -1098,4 +1099,60 @@ Fix two failing tests (`test_known_spy_price` and `test_get_price_known_value`) 
 ### Suggested commit message
 ```
 fix: point exact-price assertion tests at static test CSV to prevent flaky failures from live data drift
+```
+
+---
+
+## 2026-07-03 – SMACrossoverSignal: notional sizing + multi-ticker
+
+> **Note:** Although the OrderGenerator/notional-intent architecture is a Phase 2 concern,
+> this refactoring is a Phase 1 change: the signal still emits `TargetTrade` dicts directly
+> and does the notional→shares conversion itself. It is logged here in the Phase 1 work log
+> as requested. The design notes (§3.7/§3.8) document how the conversion will migrate to the
+> OrderGenerator in Phase 2.
+
+### Prompt
+Update the signal to use notional instead of shares, support multiple tickers, and document
+the design intent for how sizing will be handled in the future.
+
+### Changes
+1. **`backtester/signals/sma_crossover.py`**
+   - Replaced `ticker: str` / `size: float` with `tickers: list[str]` / `notional: float`.
+   - `generate_signals` now loops over `self.tickers`, delegating to a new
+     `_generate_for_ticker` helper that returns a single order dict or `None`.
+   - NEW orders size shares as `int(notional / price)`, where `price` is the adjusted
+     close for `current_date` (via `DataFeed.get_value`). Orders with non-positive
+     price or zero shares are skipped.
+   - `_is_in_position` now takes an explicit `ticker` argument; the signal remains fully
+     stateless, deriving position state from the PortfolioState snapshot.
+
+2. **`examples/sma_crossover_example.py`**
+   - Uses `tickers=["SPY", "QQQ"]`, `notional=100_000`, `short_window=20`, `long_window=50`.
+
+3. **`tests/test_signal.py`**
+   - Fixture updated to `tickers=["SPY"]`, `notional=100_000.0`.
+   - NEW-order test sets `get_value` to 500.0 and asserts size `== int(100_000 / 500)`.
+
+4. **`design_notes.md`**
+   - §3.7 Signal: added Phase 1 / Phase 2 / Future note on the notional→shares conversion.
+   - §3.8 OrderGenerator: added a sentence describing that it will convert notional intent
+     into exact shares (adjusted close in backtest, spot in live).
+
+### Test results
+145/145 tests pass. Example script runs end-to-end producing both SPY and QQQ trades with
+notional-based sizing.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+feat: convert SMACrossoverSignal to notional sizing with multi-ticker support
+
+- Replace size/ticker params with notional/tickers (list of strings)
+- Size NEW orders as int(notional / adjusted_close) per ticker
+- Keep signal stateless; derive position state per ticker from snapshot
+- Update example to SPY+QQQ, notional=100k, windows 20/50
+- Update signal tests for notional-based share counts
+- Document Phase 1/2 sizing intent in design_notes §3.7 and §3.8
 ```

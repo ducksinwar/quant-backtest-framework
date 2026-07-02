@@ -1,9 +1,7 @@
 import os
 import sys
 
-import pandas as pd
-
-from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester, BacktestResult
+from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester
 from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
@@ -28,19 +26,21 @@ def main():
     equity_pricer = EquityPricer(provider)
 
     # 3. Signal
+    tickers = ["SPY", "QQQ"]
+    notional = 100_000
     signal = SMACrossoverSignal(
-        short_window=50,
-        long_window=200,
-        ticker="SPY",
-        size=100,
+        short_window=20,
+        long_window=50,
+        tickers=tickers,
+        notional=notional,
         data_feed=data_feed,
     )
 
     # 4. Backtester config
     config = BacktestConfig(
         signal=signal,
-        start_date="2020-01-01",
-        end_date="2022-12-31",
+        start_date="2000-01-01",
+        end_date="2025-12-31",
         asset_class_configs={
             "equity": AssetClassConfig(
                 pricer=equity_pricer,
@@ -67,19 +67,26 @@ def main():
     total_cost = sum(s.sum() for s in costs.values())
     print(f"Total transaction cost: ${total_cost:,.2f}")
 
-    # 7. Summary reports
     spec = {
         "reports": {
-            "equity_curve": {"include": ["gross", "net"]},
-            "metrics": {"include": ["sharpe_gross", "max_drawdown_net"]},
+            "equity_curve": True,
             "trade_summary": True,
+            "metrics": True,
+            "hit_ratio": True,
+            "drawdown_table": True,
+            "periodic_metrics": True,
+            "by_underlying": True,
         },
+        "output": {"format": "excel", "path": "results/backtest_results.xlsx"},
     }
+
+    capital = len(tickers) * notional
 
     summary = Summary(spec)
     results = summary.generate(
         trade_history, cost_model,
         trading_days=list(result.trading_days),
+        capital=capital
     )
 
     if results is not None:
@@ -102,27 +109,6 @@ def main():
             print("\n--- Trade Summary ---")
             print(ts.to_string(index=False))
 
-    # 8. Write output files
-    os.makedirs("results", exist_ok=True)
-
-    # Try Excel first, fall back to CSV
-    try:
-        import openpyxl  # noqa: F401
-        from pandas import ExcelWriter
-
-        path = "results/backtest_results.xlsx"
-        with ExcelWriter(path) as writer:
-            if results is not None:
-                for name, df in results.items():
-                    safe_name = name[:31]
-                    df.to_excel(writer, sheet_name=safe_name)
-        print(f"\nResults written to {path}")
-    except ImportError:
-        path = "results"
-        if results is not None:
-            for name, df in results.items():
-                df.to_csv(f"results/{name}.csv")
-        print(f"\nResults written as CSV files in {path}/")
 
     print("\nPhase 1 end-to-end example ran successfully.")
 
