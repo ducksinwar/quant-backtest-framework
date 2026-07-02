@@ -663,6 +663,8 @@ class Summary:
                 row["hit_ratio_gross"] = (tdf["gross_total"] > 0).mean()
             if want_all or "net" in include:
                 row["hit_ratio_net"] = (tdf["net_total"] > 0).mean()
+            if want_all or "total_trades" in include:
+                row["total_trades"] = n
             results[output_name] = pd.DataFrame([row], index=["total"])
             return
 
@@ -679,6 +681,8 @@ class Summary:
                     lambda x: (x > 0).sum() / len(x)
                 )
             )
+        if want_all or "total_trades" in include:
+            cols["total_trades"] = tdf.groupby("group").size()
 
         df = pd.DataFrame(cols)
 
@@ -688,6 +692,8 @@ class Summary:
             total_row["hit_ratio_gross"] = (tdf["gross_total"] > 0).mean()
         if want_all or "net" in include:
             total_row["hit_ratio_net"] = (tdf["net_total"] > 0).mean()
+        if want_all or "total_trades" in include:
+            total_row["total_trades"] = n
 
         df.loc["total"] = total_row
 

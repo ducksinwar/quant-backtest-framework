@@ -1056,3 +1056,24 @@ fix: address review — snapshot efficiency, roll forwarding, entry_date dedup, 
 ```
 fix: use raw path for Excel output; require .xlsx extension in path
 ```
+
+## 2026-07-03 – Add `total_trades` column to hit ratio report
+
+### Changes applied
+
+**`backtester/summary.py` — `_build_hit_ratio`:**
+- Added `total_trades` column showing number of trades started in each period, controlled by the existing `include` mechanism.
+- Fallback path (exception handler): added `total_trades = n` to the row when `include` is None or `"total_trades"` is listed.
+- Per-period columns: added `cols["total_trades"] = tdf.groupby("group").size()`.
+- Total row: added `total_row["total_trades"] = n`.
+
+**`design_notes.md`:**
+- §3.10 `hit_ratio` table row: updated to document the new optional `total_trades` column alongside `gross` and `net`.
+
+### Test results
+143/143 relevant tests passed (2 pre-existing failures unrelated: SPY CSV price data mismatch).
+
+### Suggested commit message
+```
+feat: add total_trades column to hit ratio report controlled by include mechanism
+```
