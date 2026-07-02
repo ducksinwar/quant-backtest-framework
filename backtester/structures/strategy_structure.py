@@ -97,5 +97,11 @@ class StrategyStructure:
         }
         self.event_log.append(event)
 
-    def roll(self, new_structure: "StrategyStructure", date: str):
+    def roll(
+        self, new_structure: "StrategyStructure", date: str,
+        cost_exposures: dict[str, dict] | None = None,
+    ):
         raise NotImplementedError("Roll not implemented in Phase 1")
+
+    def __repr__(self) -> str:
+        return f"StrategyStructure(id={self.structure_id!r}, legs={len(self.legs)})"

@@ -1002,3 +1002,35 @@ perf: avoid double compute_max_drawdown when both mdd and mdd_pct are requested
 ```
 fix: use peak-to-peak drawdown definition in _compute_drawdown_table_from_cum, add _build_periodic_metrics to by_underlying function
 ```
+
+## 2026-07-02 – Post‑review fixes (9 minor issues)
+
+### Prompt
+Apply fixes for 9 issues found during a thorough review of the Phase 1 codebase.
+
+### Issues fixed
+
+1. **PortfolioState efficiency** (`backtest_engine.py`): Moved snapshot construction from the start of each iteration to the end, matching the design notes (built at close of day T, consumed as T‑1 state on day T+1). Initialised as `None` for the first day.
+
+2. **`roll_structure` cost forwarding** (`trade.py`, `strategy_structure.py`): `Trade.roll_structure` now forwards its `cost_exposures` parameter to `structure.roll()`. `StrategyStructure.roll()` signature updated to accept `cost_exposures`.
+
+3. **`periodic_metrics` in design notes** (`design_notes.md`): Added `'periodic_metrics'` to the `by_underlying` table row listing supported sub‑report keys.
+
+4. **`'all'` mode description** (`design_notes.md`): Changed "For multi‑leg trades" to "For every trade (including single‑leg trades)" to match the current implementation.
+
+5. **`entry_date` deduplication** (`backtest_engine.py`, `trade.py`): Removed `trade.entry_date = date` from `_execute_new_trade` in the backtester. `Trade.add_structure` retains its `if None` guard as the single, defensive setter — correct for both backtester and direct callers.
+
+6. **Dict iteration** (`summary.py`): `_adjust_for_missing_legs` now collects Series keys into a separate list before iterating, instead of using `list(d.items())`.
+
+7. **`__repr__` on core classes** (`instrument.py`, `strategy_structure.py`, `trade.py`): Added concise `__repr__` methods to `Instrument`, `StrategyStructure`, and `Trade`.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+fix: address review — snapshot efficiency, roll forwarding, entry_date dedup, dict iteration, __repr__; update design notes
+```

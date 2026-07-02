@@ -53,9 +53,12 @@ class Trade:
         date: str,
         cost_exposures: dict[str, dict] | None = None,
     ):
-        old_structure.roll(new_structure, date)
+        old_structure.roll(new_structure, date, cost_exposures)
 
     def _remove_from_active(self, structure):
         self.active_structures = [
             s for s in self.active_structures if s is not structure
         ]
+
+    def __repr__(self) -> str:
+        return f"Trade(id={self.trade_id!r}, entry={self.entry_date!r})"

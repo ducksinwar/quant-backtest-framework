@@ -42,3 +42,6 @@ class Instrument:
         self.entry_price: float = 0.0
 
         self.pricing_inputs: dict[str, list[float]] = {}
+
+    def __repr__(self) -> str:
+        return f"Instrument(ticker={self.ticker!r}, leg_id={self.leg_id!r})"

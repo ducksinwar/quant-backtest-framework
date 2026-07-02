@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 
@@ -122,11 +121,10 @@ class Summary:
                 combined_mask = combined_mask | mask
 
             for d in trade_legs:
-                for key, s in list(d.items()):
-                    if not isinstance(s, pd.Series):
-                        continue
+                series_keys = [k for k, v in d.items() if isinstance(v, pd.Series)]
 
-                    s_aligned = s.reindex(td_index, fill_value=0.0)
+                for key in series_keys:
+                    s = d[key]
 
                     if key.endswith("_ts"):
                         s_filled_original = s.ffill()
@@ -139,6 +137,8 @@ class Summary:
                     )
                     if not is_pnl:
                         continue
+
+                    s_aligned = s.reindex(td_index, fill_value=0.0)
 
                     s_work = s_aligned.fillna(0.0)
                     cs = s_work.cumsum()

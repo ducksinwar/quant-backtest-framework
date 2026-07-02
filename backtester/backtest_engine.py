@@ -3,8 +3,6 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Tuple
 
-import numpy as np
-
 from backtester.instruments.instrument import Instrument
 from backtester.snapshots import (
     LegSnapshot,
@@ -78,10 +76,10 @@ class Backtester:
                 last_processed_date="",
             )
 
-        for T in self.trading_days:
-            portfolio_state = self._build_portfolio_state(T)
-            trade_history_snapshot = self._build_trade_history_snapshot()
+        portfolio_state = None
+        trade_history_snapshot = None
 
+        for T in self.trading_days:
             self._compute_pnl_for_date(T)
 
             orders = self._config.signal.generate_signals(
@@ -94,6 +92,9 @@ class Backtester:
                 self._execute_order(order, T)
 
             self._compute_risk_for_date(T)
+
+            portfolio_state = self._build_portfolio_state(T)
+            trade_history_snapshot = self._build_trade_history_snapshot()
 
         return BacktestResult(
             trade_history=tuple(self.trade_history),
@@ -354,7 +355,6 @@ class Backtester:
             return
 
         trade = Trade(trade_id=str(uuid.uuid4()))
-        trade.entry_date = date
         for structure in structures:
             cost_exposures = self._compute_cost_exposures(structure, date)
             trade.add_structure(structure, date, cost_exposures)
