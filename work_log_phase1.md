@@ -1000,5 +1000,5 @@ perf: avoid double compute_max_drawdown when both mdd and mdd_pct are requested
 
 ### Suggested commit message
 ```
-fix: use peak-to-peak drawdown definition in _compute_drawdown_table_from_cum
+fix: use peak-to-peak drawdown definition in _compute_drawdown_table_from_cum, add _build_periodic_metrics to by_underlying function
 ```
