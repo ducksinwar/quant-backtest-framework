@@ -1032,5 +1032,27 @@ Apply fixes for 9 issues found during a thorough review of the Phase 1 codebas
 
 ### Suggested commit message
 ```
-fix: address review — snapshot efficiency, roll forwarding, entry_date dedup, dict iteration, __repr__; update design notes
+fix: address review — snapshot efficiency, roll forwarding, entry_date dedup, dict iteration, __repr__; update design notes, remove unnecessary import numpy as np
+```
+
+## 2026-07-02 – Fix Summary Excel output path handling
+
+### Changes applied
+
+**`backtester/summary.py` — `_write_output`:**
+- Excel format: changed `pd.ExcelWriter(f"{path}.xlsx")` to `pd.ExcelWriter(path)`. The user is now required to include `.xlsx` in the path (e.g. `'results/backtest.xlsx'`), since Excel writes a single workbook.
+
+**`design_notes.md` — §3.10 `output` description:**
+- Added note that for Excel, the path must include the `.xlsx` file extension.
+- Added explanation that for CSV/Parquet, the path is a directory (multiple files are produced), so no extension is needed.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning). Example script runs correctly (Excel write succeeds with path as given).
+
+### Manual changes
+- Update output behavior
+
+### Suggested commit message
+```
+fix: use raw path for Excel output; require .xlsx extension in path
 ```

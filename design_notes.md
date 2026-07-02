@@ -707,9 +707,10 @@ The `Summary` constructor takes a single dictionary with the following keys:
 - `output`: optional output configuration.  
   - `'format'`: `'excel'`, `'csv'`, or `'parquet'`.  
   - `'path'`: the file path to write to.  
-  For Excel, each report becomes a separate sheet; for CSV/Parquet, each report becomes a separate file.  
+  For Excel, each report becomes a separate sheet within a single workbook. The path must include the `.xlsx` file extension (e.g., `'results/backtest.xlsx'`).  
+  For CSV/Parquet, `path` is a directory (e.g., `'results/'`) — each report becomes a separate file within that folder. No file extension is needed.  
   An output name is the underscore‑joined path of all enclosing group names, the report name, and for `'by_underlying'` the underlying ticker. The string `by_underlying` does **not** appear in the output name; it is a report template, not a naming component.  
-  If `'output'` is omitted, reports are returned as a dictionary of DataFrames, keyed by their output names.
+  Reports are returned as a dictionary of DataFrames, keyed by their output names.
 
 Parameters that affect computation (annualization, cost inclusion) are specified per report, not globally, so that only the reports that need them carry the extra configuration.
 

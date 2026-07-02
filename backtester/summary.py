@@ -37,7 +37,6 @@ class Summary:
 
         if self._output:
             self._write_output(results)
-            return None
 
         return results
 
@@ -821,7 +820,7 @@ class Summary:
         path = self._output.get("path", "summary_output")
 
         if fmt == "excel":
-            with pd.ExcelWriter(f"{path}.xlsx") as writer:
+            with pd.ExcelWriter(path) as writer:
                 for name, df in results.items():
                     safe_name = name[:31]
                     df.to_excel(writer, sheet_name=safe_name)
