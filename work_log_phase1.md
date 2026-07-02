@@ -1077,3 +1077,25 @@ fix: use raw path for Excel output; require .xlsx extension in path
 ```
 feat: add total_trades column to hit ratio report controlled by include mechanism
 ```
+
+---
+
+## 2026-07-03 – Fix flaky tests reliant on live market data
+
+### Prompt
+Fix two failing tests (`test_known_spy_price` and `test_get_price_known_value`) that depend on live market data which changes over time.
+
+### Changes
+1. Created `tests/test_data/SPY_eod.csv` — a static snapshot of the first 10 rows from `market_data/SPY_eod.csv`. This file is committed to Git and never changes.
+2. Added `test_backend` fixture in `tests/test_csv_backend.py` pointing at `tests/test_data` instead of `market_data`.
+3. Added `test_provider` fixture in `tests/test_equity_price_provider.py` pointing at `tests/test_data` instead of `market_data`.
+4. Updated `test_known_spy_price` and `test_get_price_known_value` to use the new fixtures and corrected the hard-coded assertion values (was `24.175395965576172`, now `24.113256454467773` — the actual value from the SPI split-adjusted CSV).
+5. All other tests continue using the live `market_data` directory via the original `backend`/`provider` fixtures.
+
+### Test results
+145/145 tests pass.
+
+### Suggested commit message
+```
+fix: point exact-price assertion tests at static test CSV to prevent flaky failures from live data drift
+```

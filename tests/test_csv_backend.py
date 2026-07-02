@@ -10,6 +10,11 @@ def backend():
     return CsvBackend(base_dir="market_data")
 
 
+@pytest.fixture
+def test_backend():
+    return CsvBackend(base_dir="tests/test_data")
+
+
 class TestCsvBackend:
     def test_get_value_returns_close(self, backend):
         val = backend.get_value("eod_prices", "2024-01-02", "SPY")
@@ -53,6 +58,6 @@ class TestCsvBackend:
         val2 = backend.get_value("eod_prices", "2024-06-15", "SPY")
         assert val1 == val2
 
-    def test_known_spy_price(self, backend):
-        val = backend.get_value("eod_prices", "1993-01-29", "SPY")
-        assert val == pytest.approx(24.175395965576172)
+    def test_known_spy_price(self, test_backend):
+        val = test_backend.get_value("eod_prices", "1993-01-29", "SPY")
+        assert val == pytest.approx(24.113256454467773)
