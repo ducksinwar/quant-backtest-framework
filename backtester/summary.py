@@ -294,6 +294,23 @@ class Summary:
         if include is None or "net" in include:
             cols["net"] = self._get_cumulative_series(leg_data, "net")
 
+        if self._capital is not None and self._capital > 0:
+            if include is None or "gross_pct" in include:
+                cols["gross_pct"] = (
+                    self._get_cumulative_series(leg_data, "gross")
+                    / self._capital * 100
+                )
+            if include is None or "cost_pct" in include:
+                cols["cost_pct"] = (
+                    self._get_cumulative_series(leg_data, "cost")
+                    / self._capital * 100
+                )
+            if include is None or "net_pct" in include:
+                cols["net_pct"] = (
+                    self._get_cumulative_series(leg_data, "net")
+                    / self._capital * 100
+                )
+
         df = pd.DataFrame(cols)
         if not df.empty:
             results[output_name] = df
@@ -430,6 +447,9 @@ class Summary:
                 else:
                     pos = 0.0
                 metrics[f"hit_ratio_{label}"] = pos
+
+        if has_capital and (want_all or "capital" in (include or [])):
+            metrics["capital"] = self._capital
 
         if metrics:
             results[output_name] = pd.DataFrame([metrics])

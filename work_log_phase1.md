@@ -1156,3 +1156,35 @@ feat: convert SMACrossoverSignal to notional sizing with multi-ticker support
 - Update signal tests for notional-based share counts
 - Document Phase 1/2 sizing intent in design_notes §3.7 and §3.8
 ```
+
+---
+
+## 2026-07-03 – Equity curve pct columns + metrics capital column when capital provided
+
+### Prompt
+Add percentage columns to the equity curve report and a `capital` column to the metrics report, both gated by the existing `include` mechanism and only produced when `capital` is provided to `generate()`.
+
+### Changes applied
+
+**`backtester/summary.py` — `_build_equity_curve`:**
+- When `self._capital is not None and self._capital > 0`, three additional percentage columns are computed:
+  - `gross_pct` = `gross_cum / capital * 100`
+  - `cost_pct` = `cost_cum / capital * 100`
+  - `net_pct` = `net_cum / capital * 100`
+- Each controlled by the existing `include` mechanism (`include is None` or the name is explicitly listed).
+
+**`backtester/summary.py` — `_build_metrics`:**
+- When `self._capital is not None and self._capital > 0`, a `capital` column is added containing the capital value.
+- Controlled by the existing `include` mechanism (`include is None` or `"capital"` is explicitly listed).
+
+**`design_notes.md`:**
+- §3.10 `equity_curve` table row: added `gross_pct`, `cost_pct`, `net_pct` to the include list, noting they appear only when capital is provided.
+- §3.10 `metrics` table row: added `capital` to the capital-dependent column list.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning).
+
+### Suggested commit message
+```
+feat: add equity curve pct columns and metrics capital column when capital provided
+```
