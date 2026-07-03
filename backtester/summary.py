@@ -368,6 +368,14 @@ class Summary:
             if include is None or "net_pnl" in include:
                 row["net_pnl"] = net_total
 
+            if self._capital is not None and self._capital > 0:
+                if include is None or "gross_pnl_pct" in include:
+                    row["gross_pnl_pct"] = gross_total / self._capital * 100
+                if include is None or "cost_pct" in include:
+                    row["cost_pct"] = cost_total / self._capital * 100
+                if include is None or "net_pnl_pct" in include:
+                    row["net_pnl_pct"] = net_total / self._capital * 100
+
             rows.append(row)
 
         if rows:

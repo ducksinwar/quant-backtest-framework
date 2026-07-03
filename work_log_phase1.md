@@ -1188,3 +1188,22 @@ Add percentage columns to the equity curve report and a `capital` column to the 
 ```
 feat: add equity curve pct columns and metrics capital column when capital provided
 ```
+
+## 2026-07-03 – trade_summary percentage columns when capital provided
+
+**`backtester/summary.py` — `_build_trade_summary`:**
+- When `self._capital is not None and self._capital > 0`, compute three new optional columns per trade:
+  - `gross_pnl_pct` = `gross_total / self._capital * 100`
+  - `cost_pct` = `cost_total / self._capital * 100`
+  - `net_pnl_pct` = `net_total / self._capital * 100`
+- Columns respect the existing `include` mechanism (appear when `include` is None or explicitly listed).
+
+**`design_notes.md`:**
+- Updated the `trade_summary` table row to document the new optional columns.
+
+**Tests:** 145/145 passed.
+
+### Suggested commit message
+```
+feat: add trade_summary pnl_pct columns when capital is provided
+```
