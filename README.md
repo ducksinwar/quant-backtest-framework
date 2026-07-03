@@ -4,7 +4,7 @@ A rigorous, production‑grade backtesting and validation engine for systematic 
 
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Phase](https://img.shields.io/badge/phase-1%20manual%20review-yellow)
+![Phase](https://img.shields.io/badge/phase-1%20complete-brightgreen)
 
 ## Motivation
 
@@ -14,13 +14,12 @@ With five years as a head of quant at a hedge fund, I know what separates a back
 ## Key Features
 
 - **Event‑driven daily loop** with one‑day‑lagged signal execution – no look‑ahead bias.  
-- **Swappable data backends** – Phase 1 uses CSV; Phase 2 will introduce SQL, point‑in‑time data, and multi‑source support without changing any strategy code.  
-- **Abstract pricer layer** – equities today, options / futures / FX tomorrow. All instrument‑specific logic is isolated behind clean interfaces.  
 - **Stateless signals** – signals derive positional awareness from immutable portfolio snapshots, making them fully reproducible and trivially extendable.  
+- **Swappable data backends** – a `DataFeed` fronts a pluggable backend (CSV today); adding SQL or multi‑source data later requires no strategy‑code changes.  
+- **Abstract pricer layer** – equities today, with clean interfaces ready for options / futures / FX.  
 - **Transaction cost separation** – costs are computed post‑simulation from a structure‑level event log; change cost assumptions without re‑running the backtest.  
-- **Purged walk‑forward cross‑validation** with nested parameter selection (planned Phase 2).  
-- **Deflated Sharpe Ratio (DSR)** and a **strategy graveyard** for honest multiple‑testing correction (planned Phase 3).  
-- **Modular, well‑documented code** with unit tests – easy to extend with new instruments or signals.
+- **Standard performance reports** – equity curve, trade summary, scalar metrics, periodic metrics, hit ratio, drawdown table, and per‑underlying breakdowns, with optional capital‑based percentage figures.  
+- **Modular, well‑documented code** with 145 unit tests – easy to extend with new instruments or signals.
 
 ## Architecture
 
@@ -32,7 +31,7 @@ The framework is built around a daily event loop:
 - **Pricers** value instruments and supply greeks for P&L decomposition.  
 - **Signals** are stateless, return target‑trade dictionaries, and only see information up to T‑1.  
 - **Backtester** computes daily P&L, executes orders, and records all lifecycle events.  
-- **CostModel** turns those events into a per‑leg cost series; the **Summary** produces standard reports (equity curve, trade summary, metrics).  
+- **CostModel** turns those events into a per‑leg cost series; the **Summary** produces standard reports (equity curve, trade summary, metrics, periodic metrics, hit ratio, drawdown table, and per‑underlying breakdowns).  
 
 Everything is fully decoupled – you can swap a pricer, change the cost model, or add a new report without touching the backtester loop.
 
@@ -60,6 +59,7 @@ backtester/
     snapshots.py                # Frozen snapshot dataclasses
     backtest_engine.py          # Daily loop orchestrator
     summary.py                  # Performance reports
+    metrics_calculators.py      # Pure metric functions (Sharpe, Calmar, …)
     cost_model.py               # Transaction cost computation
 examples/
     sma_crossover_example.py    # End‑to‑end example
@@ -88,8 +88,8 @@ pytest
 conda activate backtest
 python examples/sma_crossover_example.py
 ```
-The script backtests a simple 50/200‑day SMA crossover on SPY and prints the equity curve and standard metrics.  
-*Replace the CSV in `market_data/spy_eod.csv` with your own file (date, close) to test on different data.*
+The script backtests a 20/50‑day SMA crossover on SPY and QQQ (notional‑sized) and prints the equity curve, metrics, and trade summary.  
+*Replace or add CSVs in `market_data/` (named `<TICKER>_eod.csv`, columns `date`, `close`) to test on different data.*
 
 If you don’t have a `market_data/` folder yet, create one and place your CSV inside – the folder is gitignored so your data stays local.
 
@@ -110,16 +110,16 @@ See `examples/sma_crossover_example.py` for a complete, working template.
 
 ## What Sets This Apart
 
-- **Honest validation** – the framework enforces out‑of‑sample testing by design. Walk‑forward folds are purged and embargoed, and the deflated Sharpe ratio protects against the “look‑elsewhere” effect.  
+- **Honest validation by design** – the architecture is built around out‑of‑sample testing; purged, embargoed walk‑forward folds and a deflated Sharpe ratio reality check are the next milestones (see Roadmap).  
 - **Stateless, reviewable signals** – every signal call receives a frozen snapshot of the portfolio; no hidden state means you can resume a backtest at any point and always get the same result.  
-- **Production‑ready separation** – costs, FX conversion, and risk attribution are all post‑processing steps, so you can change assumptions instantly without re‑running the backtester.  
-- **Data independence** – switching from CSV to a full SQL database with point‑in‑time data requires changing a single backend object; the rest of the code never knows the difference.
+- **Production‑ready separation** – costs and risk attribution are post‑processing steps, so you can change assumptions instantly without re‑running the backtester (FX conversion follows the same pattern in Phase 2).  
+- **Data independence** – swapping CSV for a full SQL database with point‑in‑time data requires changing a single backend object; the rest of the code never knows the difference.
 
 ## Roadmap
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Core skeleton – daily loop, equities, SMA example, summary reports, cost model | 🔄 Manual Review |
+| 1 | Core skeleton – daily loop, equities, SMA example, summary reports, cost model | ✅ Complete |
 | 2 | Purged walk‑forward cross‑validation with nested parameter selection | ⬜ Planned |
 | 3 | Deflated Sharpe Ratio, Strategy Graveyard, multiple testing correction | ⬜ Planned |
 | 4 | Multi‑leg trades, options, partial unwinds, advanced pricers | ⬜ Planned |
@@ -133,7 +133,7 @@ If you’re evaluating this project as a hiring manager, that file will give you
 ```bash
 pytest
 ```
-141 unit tests cover `Instrument`, `DataFeed`, `Pricers`, `Trade`, `StrategyStructure`, `CostModel`, `Backtester`, `Summary`, and `Signals`.
+145 unit tests cover `Instrument`, `DataFeed`, `Pricers`, `Trade`, `StrategyStructure`, `CostModel`, `Backtester`, `Summary`, and `Signals`.
 
 ## Contributing
 

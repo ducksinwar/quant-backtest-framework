@@ -48,7 +48,7 @@ It is designed to:
 ## 2. Project structure (planned)
 
 The full framework will eventually contain the following modules.  
-**Phase 1** implements only the files marked with `(* Phase 1 *)`; the rest are stubbed or not yet created.
+The files marked `(* Phase 1 *)` are implemented and tested as of the completed Phase 1; the rest are stubbed or not yet created.
 
 
 ```markdown
@@ -211,8 +211,8 @@ It is the natural entity for cost quotation, execution, and rolling.
   - Underlying / instrument‑based grouping is native: the summary module can inspect the legs to determine the underlying ticker, currency pair, or asset class. No tags are needed for that.  
   - User‑defined tags: Structures can carry an optional list of string tags. Tags are copied from the `TargetStructure` when the structure is created. Tags are completely ignored by the backtester and cost model; they exist solely for the summary module.
 
-- **Phase 1 default:**  
-  In Phase 1, every `StrategyStructure` contains exactly one `Instrument` (an equity). This abstraction adds zero overhead but provides the natural upgrade path for multi‑leg, multi‑currency strategies.
+- **Phase 1 default and limitations:**  
+  In Phase 1, every `StrategyStructure` contains exactly one `Instrument` (an equity). This abstraction adds zero overhead but provides the natural upgrade path for multi‑leg, multi‑currency strategies. `open`, `add_size`, and `unwind` (full and partial) are fully implemented; `roll()` is stubbed (raises `NotImplementedError`) and is scheduled for a later phase (see §5).
 
 ### 3.3 Trade
 
@@ -257,22 +257,7 @@ In Phase 1, every trade contains exactly one `StrategyStructure` with a single
 
 ### 3.4 MarketData & Data Providers (Phase 1 – CSV, Phase 2+ – SQL & multi‑source)
 
-The framework uses a **DataFeed** class from Phase 1 – a single, concrete class that serves all market data to the research engine. Internally, it delegates to a swappable **backend** object. The initial backend is a `CsvBackend` that reads daily adjusted close prices from CSV files.
-```python
-class DataFeed:
-    def __init__(self, backend):
-        self._backend = backend
-
-    def get_value(self, dataset: str, date: str, ticker: str = None, **params) -> float:
-        return self._backend.get_value(dataset, date, ticker, **params)
-
-    def get_series(self, dataset: str, start: str, end: str, ticker: str = None, **params) -> pd.Series:
-        return self._backend.get_series(dataset, start, end, ticker, **params)
-```
-**Why this design?**
-- **Single point of storage change**: switching from CSV to a full SQL database with source‑tracking requires only writing a new backend that follows the same protocol and passing it to the `DataFeed` constructor. No consumer code changes.
-- **Separation of concerns**: pricers get clean, typed interfaces (e.g., `EquityPriceProvider` wrapping the `DataFeed`), while signals can use the `DataFeed` directly for any ad‑hoc or alternative data.
-- **Multi‑source robustness**: the `DataFeed` can be configured to select between multiple sources (`source='bloomberg'` vs `'refinitiv'`) and observation times (`observation_time='ny_close'`), enabling vendor‑robustness checks and point‑in‑time backtests.
+The framework uses a **DataFeed** class from Phase 1 – a single, concrete class that serves all market data to the research engine. Internally, it delegates to a swappable **backend** object; the Phase 1 backend is a `CsvBackend` that reads daily adjusted close prices from CSV files. The class definition and the rationale for the backend abstraction (single storage‑change point, separation of concerns, multi‑source robustness) are given once in §8.1 and not repeated here. This section covers the Phase 1 consumer‑facing behaviour: single‑instance caching, missing‑data handling, holiday masking, and the initialization sequence.
 
 **Single‑instance & caching:**
 - The `DataFeed` and all typed providers are designed to be **instantiated once** and shared across the entire backtesting session – including all instruments, pricers, and validation folds.
@@ -628,6 +613,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
          Let `unwind_fraction = info[0]['size'] / structure.current_size`. Call `trade.unwind_structure(structure, fraction=unwind_fraction)`. The structure records a partial‑unwind cost event. The trade remains in `active_trades` if any size remains.
 
      - **`ROLL` orders (Action = `'ROLL'`):**  
+       *(Phase 1 limitation: `ROLL` execution is stubbed and raises `NotImplementedError`; the semantics below describe the intended Phase 2+ behaviour. The SMA example never emits `ROLL`.)*  
        - `trade_id` must be provided.  
        - For each entry in `info`:
          - Look up the old structure by `old_structure_id` in the trade.  
@@ -896,10 +882,7 @@ summary = Summary(spec)
 
   1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved.
 
-   2. **Aggregation and missing‑data handling:**  
-      - `'any'` (default): Leg NaNs in P&L series are treated as zero; the true economic P&L is preserved. Risk series (`*_ts`) are left raw.
-      - `'all'`: For multi-leg trades, P&L on days where any leg has missing data is zeroed across all legs of that trade and deferred to the next valid day via cumsum‑drop‑diff. Risk series are forward‑filled. Single‑leg trades are unaffected.
-      - `'per_leg'`: Unaggregated per‑leg series are used directly. Both P&L and risk series are left raw.
+   2. **Aggregation and missing‑data handling:** Apply the `missing_data_mode` semantics defined earlier in this section (`'any'`, `'all'`, `'per_leg'`). In `'all'` mode, P&L on days where any leg of a trade has genuine missing data is zeroed across all legs of that trade — including single‑leg trades — and deferred to the next valid day via cumsum‑drop‑diff, while risk series (`*_ts`) are forward‑filled.
 
   3. **Cost application:** The `CostModel.compute_costs()` returns a dictionary mapping `leg_id` to a per‑leg daily cost series, each in the leg’s local currency. For each leg in the trade history, the `Summary` uses the leg’s `leg_id` to look up the corresponding cost series and computes its local net P&L as `net_local = gross_local - cost_local` (with missing cost treated as zero).
 
@@ -942,6 +925,8 @@ No changes to the `Summary` code are required when new decomposition or risk mea
 ### 3.11 Data Extractor
 
 The `DataExtractor` class provides a flexible, lightweight pipeline for extracting raw data from the `trade_history`. It performs **no** aggregation, grouping, metric computation, or cost application. It simply returns the exact attributes you request, leaving all further processing to you.
+
+> **Phase status:** The `DataExtractor` is specified for Phase 2+ and is not part of the completed Phase 1 build (`data_extractor.py` is not yet created). The API and examples below define the intended design.
 
 **Extractor specification:**
 
@@ -1119,6 +1104,8 @@ No new functions are needed—`extract()` and `inspect()` cover the full workflo
 ### 3.12 PnL Attribution (extensible breakdown)
 
 The framework supports decomposing daily PnL into user‑specified risk factors (carry, mark‑to‑market, delta, vega, etc.) without altering the core backtester loop.
+
+> **Phase status:** No concrete `AssetPnlCalculator` is built in Phase 1 (equities need no decomposition, so `pnl_calculator` is always `None`). The interface and asset‑specific calculators below are the Phase 2+ design.
 
 **AssetPnlCalculator interface:**
 - An abstract class `AssetPnlCalculator` defines the contract for all asset‑specific decomposition logic:

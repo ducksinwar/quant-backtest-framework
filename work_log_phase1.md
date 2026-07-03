@@ -1249,3 +1249,40 @@ feat: add trade_summary as a by_underlying sub-report
 ```
 fix(summary): use deterministic leg-ID cache keys to fix by_underlying P&L collision
 ```
+
+## 2026-07-04 – Final Phase 1 polish: README + design_notes
+
+### Prompt
+Final polish pass on design_notes.md and README.md now that Phase 1 is complete.
+
+### Changes applied
+**README.md:**
+- Badge → "phase 1 complete" (brightgreen); Roadmap Phase 1 → ✅ Complete.
+- Key Features rewritten to implemented-only; added standard reports + capital;
+  removed planned walk-forward/DSR bullets (kept in Roadmap). Test count 141 → 145.
+- Quick Start updated to 20/50 SMA on SPY+QQQ (notional); CSV naming clarified.
+- "What Sets This Apart" reframed validation/FX as roadmap items (honest tense).
+- Project Structure: added metrics_calculators.py; Architecture Summary lists full report set.
+
+**design_notes.md (polish, no renumbering):**
+- §2: clarified Phase 1 files are implemented/tested.
+- §3.4: removed duplicated DataFeed code block + rationale (canonical copy in §8.1).
+- §3.2 / §3.9: marked `roll()` / `ROLL` as stubbed Phase 1 limitations with pointers.
+- §3.10: fixed 'all' missing-data mode inconsistency (single-leg included) and de-duplicated.
+- §3.11 / §3.12: added Phase-status notes (DataExtractor and AssetPnlCalculator are Phase 2+).
+
+### Test results
+145/145 passed (no code changes; docs only).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: final Phase 1 polish of README and design_notes
+
+- README: mark Phase 1 complete (badge + roadmap), align feature list with
+  implemented reports/capital, fix test count (145), refresh quick start
+- design_notes: mark ROLL/roll stubs and DataExtractor/PnlCalculator as Phase 2+,
+  fix 'all' missing-data-mode inconsistency, de-duplicate DataFeed spec (§3.4↔§8.1)
+```
