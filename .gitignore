@@ -175,6 +175,8 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 market_data/*.csv
+!market_data/spy_eod.csv
+!market_data/qqq_eod.csv
 *.egg-info
 nul
 fetch_data.py
