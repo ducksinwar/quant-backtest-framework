@@ -823,6 +823,10 @@ class Summary:
             if build_all or "equity_curve" in include:
                 ec_cfg = include.get("equity_curve", {}) if not build_all else {}
                 self._build_equity_curve(ec_cfg, ticker_leg_data, fx_rates, "equity_curve", sub_results)
+            if build_all or "trade_summary" in include:
+                ts_cfg = include.get("trade_summary", {}) if not build_all else {}
+                ticker_trades = [t for t in trades if any(d["trade_id"] == t.trade_id for d in ticker_leg_data)]
+                self._build_trade_summary(ts_cfg, ticker_trades, ticker_leg_data, fx_rates, "trade_summary", sub_results)
             if build_all or "metrics" in include:
                 m_cfg = include.get("metrics", {}) if not build_all else {}
                 self._build_metrics(m_cfg, ticker_leg_data, fx_rates, "metrics", sub_results)

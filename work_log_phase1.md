@@ -1207,3 +1207,20 @@ feat: add equity curve pct columns and metrics capital column when capital provi
 ```
 feat: add trade_summary pnl_pct columns when capital is provided
 ```
+
+## 2026-07-04 – trade_summary sub-report in by_underlying
+
+**`backtester/summary.py` — `_build_by_underlying`:**
+- Added a `trade_summary` branch immediately after the `equity_curve` block, following the standard reports table order. Built when `build_all` is true or `"trade_summary"` is present in the `include` dict.
+- Derived per-ticker `ticker_trades` from `ticker_leg_data` so each underlying's `trade_summary` lists only trades that touched that ticker, then dispatched to `_build_trade_summary`.
+- Fixed a pre-existing broken working-tree edit that had dropped the `_build_equity_curve` call and mis-passed arguments to `_build_trade_summary`.
+
+**`design_notes.md`:**
+- Updated the `by_underlying` standard reports row to list `trade_summary` as a supported sub-report, placed after `equity_curve`.
+
+**Tests:** 145/145 passed.
+
+### Suggested commit message
+```
+feat: add trade_summary as a by_underlying sub-report
+```
