@@ -224,7 +224,8 @@ class Summary:
         if not leg_data:
             return pd.Series(dtype=float)
 
-        cache_key = (id(leg_data), key, self._missing_mode)
+        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        cache_key = (legs_key, key, self._missing_mode)
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -247,7 +248,8 @@ class Summary:
     def _get_cumulative_series(
         self, leg_data: list[dict], key: str
     ) -> pd.Series:
-        cache_key = ("cum", id(leg_data), key)
+        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        cache_key = ("cum", legs_key, key)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -259,7 +261,8 @@ class Summary:
     def _get_trade_totals(
         self, leg_data: list[dict]
     ) -> dict[str, dict[str, float]]:
-        cache_key = ("trade_totals", id(leg_data))
+        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        cache_key = ("trade_totals", legs_key)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached

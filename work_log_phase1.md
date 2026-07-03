@@ -1224,3 +1224,28 @@ feat: add trade_summary pnl_pct columns when capital is provided
 ```
 feat: add trade_summary as a by_underlying sub-report
 ```
+
+## 2026-07-04 – Fix cache-collision bug in Summary series helpers
+
+### Problem
+`_get_daily_series`, `_get_cumulative_series`, and `_get_trade_totals` keyed their caches on `id(leg_data)`. Since `id()` returns a memory address that is not stable across garbage-collection states, a filtered per-ticker `leg_data` list in `by_underlying` could reuse an address previously held by the full-portfolio list, so the per-ticker sub-reports returned the cached total-portfolio P&L instead of the filtered ticker P&L. Trade-based reports were unaffected.
+
+### Changes applied
+
+**`backtester/summary.py`:**
+- Replaced `id(leg_data)` in all three cache keys with a deterministic key `tuple(sorted(d['leg_id'] for d in leg_data))`.
+  - `_get_daily_series`: `cache_key = (legs_key, key, self._missing_mode)`.
+  - `_get_cumulative_series`: `cache_key = ("cum", legs_key, key)`.
+  - `_get_trade_totals`: `cache_key = ("trade_totals", legs_key)`.
+- Leg IDs are per-leg UUIDs (`backtest_engine.py:526`), so a sorted tuple of leg IDs uniquely and deterministically identifies the exact leg-data subset — no two different subsets can share the same set of leg IDs. The ticker-based key was rejected as too coarse (collides across different subsets with the same tickers).
+
+### Verification
+- `python examples/sma_crossover_example.py` (normal CLI mode) runs correctly; `by_underlying` per-ticker P&L is now filtered per ticker.
+- No temporary diagnostic prints present in `summary.py`.
+
+**Tests:** 145/145 passed.
+
+### Suggested commit message
+```
+fix(summary): use deterministic leg-ID cache keys to fix by_underlying P&L collision
+```
