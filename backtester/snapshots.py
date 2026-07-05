@@ -8,6 +8,7 @@ class LegSnapshot:
     size: float
     entry_price: float
     current_price: float
+    leg_id: str = ""
     daily_total_pnl: tuple[float, ...] = ()
     component_pnls: dict = field(default_factory=dict)
     risk_measures: dict = field(default_factory=dict)

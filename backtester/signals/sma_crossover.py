@@ -78,7 +78,13 @@ class SMACrossoverSignal(BaseSignal):
                 "info": [
                     {
                         "structure_id": None,
-                        "legs": [{"ticker": ticker, "size": shares}],
+                        "legs": [
+                            {
+                                "ticker": ticker,
+                                "size": shares,
+                                "asset_class": "equity",
+                            }
+                        ],
                     }
                 ],
             }

@@ -12,7 +12,7 @@ from backtester.summary import Summary
 
 
 def main():
-    csv_path = os.path.join("market_data", "spy_eod.csv")
+    csv_path = os.path.join("market_data", "SPY_eod.csv")
     if not os.path.exists(csv_path):
         print(f"Error: {csv_path} not found.")
         sys.exit(1)

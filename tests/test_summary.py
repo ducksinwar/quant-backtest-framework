@@ -107,7 +107,7 @@ class TestSummaryTradeSummary:
         leg_id = "leg_001"
         trade, leg = _make_trade(
             "t1", "2024-01-02", "2024-01-05",
-            leg_id, [10.0, -5.0, 20.0, -10.0],
+            leg_id, [10.0, -5.0, 20.0],
             tags=["alpha", "momentum"],
         )
 
@@ -177,8 +177,8 @@ class TestSummaryFiltering:
         leg1_id = "leg_001"
         leg2_id = "leg_002"
 
-        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, 20.0], tags=["alpha"])
-        t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 15.0], tags=["beta"])
+        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, 20.0, 5.0], tags=["alpha"])
+        t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 15.0, 8.0], tags=["beta"])
 
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {
@@ -203,8 +203,8 @@ class TestSummaryFiltering:
         leg1_id = "leg_001"
         leg2_id = "leg_002"
 
-        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0], tags=["live"])
-        t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0], tags=["dead"])
+        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, 5.0, 3.0], tags=["live"])
+        t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 2.0, 1.0], tags=["dead"])
 
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {
@@ -353,7 +353,7 @@ class TestSummaryNoOutputReturnsDict:
     def test_no_output_returns_dict(self):
         leg_id = "leg_001"
         trade, leg = _make_trade(
-            "t1", "2024-01-02", None, leg_id, [10.0],
+            "t1", "2024-01-02", None, leg_id, [10.0, 5.0, 3.0],
         )
         cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
         spec = {"reports": {"equity_curve": True}}

@@ -466,8 +466,8 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
 
   No mutable references to live `Trade`, `Structure`, or `Instrument` objects are exposed. The signal can safely inspect this snapshot to enforce cooldowns, count trades, or apply any other logic that requires knowledge of past trading activity, without any risk of corrupting the backtester’s internal state.
 
-- **SMACrossoverSignal** (example): parameters `short_window`, `long_window`. Uses market data up to `current_date - 1`.  
-  `requires_portfolio_state = True` – it checks the `PortfolioState` snapshot for any open trade with the target ticker to determine whether it is currently in a position. No internal state is stored; the signal is fully stateless.  
+- **SMACrossoverSignal** (example): parameters `short_window`, `long_window`, a list of `tickers`, and a target `notional`. It evaluates each ticker independently and converts the target notional into shares via `int(notional / price)`. Uses market data up to `current_date - 1`.  
+  `requires_portfolio_state = True` – it checks the `PortfolioState` snapshot for any open trade holding a given ticker to determine whether it is currently in a position. No internal state is stored; the signal is fully stateless.  
   Returns orders like the examples shown below (in Python dict form):
   ```python
   # Open new long

@@ -50,7 +50,15 @@ class Summary:
                 for leg in structure.legs:
                     pnl_list = leg.daily_total_pnl
                     if len(pnl_list) > 0:
-                        entry_idx = trading_days.index(trade.entry_date or "")
+                        entry_date = structure.original_entry_date
+                        if not entry_date:
+                            raise ValueError(
+                                f"Structure {structure.structure_id} "
+                                f"(trade {trade.trade_id}) is missing "
+                                f"original_entry_date; cannot align leg "
+                                f"{leg.leg_id} P&L."
+                            )
+                        entry_idx = trading_days.index(entry_date)
                         pnl_start = entry_idx + 1
 
                         if trade.exit_date is not None:
@@ -60,14 +68,21 @@ class Summary:
 
                         pnl_dates = trading_days[pnl_start:pnl_end + 1]
 
-                        if len(pnl_dates) == len(pnl_list):
-                            gross = pd.Series(pnl_list, index=pnl_dates, dtype=float)
-                        else:
-                            gross = pd.Series(pnl_list, index=trading_days[:len(pnl_list)], dtype=float)
+                        if len(pnl_dates) != len(pnl_list):
+                            raise ValueError(
+                                f"P&L length mismatch for leg {leg.leg_id} "
+                                f"(trade {trade.trade_id}, structure "
+                                f"{structure.structure_id}): expected "
+                                f"{len(pnl_dates)} day(s) "
+                                f"[{entry_date} -> "
+                                f"{trade.exit_date or trading_days[-1]}], "
+                                f"but leg has {len(pnl_list)} P&L entries."
+                            )
+                        gross = pd.Series(pnl_list, index=pnl_dates, dtype=float)
 
-                        if trade.entry_date and trade.entry_date not in gross.index:
+                        if entry_date not in gross.index:
                             gross = pd.concat([
-                                pd.Series(0.0, index=[trade.entry_date], dtype=float),
+                                pd.Series(0.0, index=[entry_date], dtype=float),
                                 gross,
                             ])
                     else:

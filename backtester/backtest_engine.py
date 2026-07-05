@@ -122,31 +122,34 @@ class Backtester:
                             self._record_pricing_inputs_nan(leg, pricer, date, cfg)
                         continue
 
-                    if leg.current_price != 0.0:
-                        daily_pnl = (
-                            (price_today - leg.current_price)
-                            * leg.multiplier
-                            * leg.current_size
-                        )
-                        leg.daily_total_pnl.append(daily_pnl)
-                    else:
-                        leg.daily_total_pnl.append(0.0)
+                    daily_pnl = (
+                        (price_today - leg.current_price)
+                        * leg.multiplier
+                        * leg.current_size
+                    )
+                    leg.daily_total_pnl.append(daily_pnl)
 
                     leg.current_price = price_today
 
                     if cfg.record_pricing_inputs:
                         pi = pricer.pricing_inputs(leg, date)
                         if pi is not None:
+                            keys = getattr(leg, "_pricing_input_keys", None)
+                            if keys is None:
+                                keys = set()
+                                leg._pricing_input_keys = keys
+                            keys.update(pi.keys())
                             for key, val in pi.items():
                                 series = leg.pricing_inputs.setdefault(key, [])
                                 series.append(val)
 
     def _record_pricing_inputs_nan(self, leg, pricer, date, cfg):
-        pi = pricer.pricing_inputs(leg, date)
-        if pi is not None:
-            for key in pi:
-                series = leg.pricing_inputs.setdefault(key, [])
-                series.append(float("nan"))
+        keys = getattr(leg, "_pricing_input_keys", None)
+        if not keys:
+            return
+        for key in keys:
+            series = leg.pricing_inputs.setdefault(key, [])
+            series.append(float("nan"))
 
     def _compute_risk_for_date(self, date: str):
         for trade in self.active_trades:
@@ -178,7 +181,11 @@ class Backtester:
             for info in infos:
                 leg_dicts = info.get("legs", [])
                 for leg_dict in leg_dicts:
-                    asset_class = leg_dict.get("asset_class", "equity")
+                    asset_class = leg_dict.get("asset_class")
+                    if asset_class is None:
+                        raise ValueError(
+                            "Leg dict is missing required 'asset_class' field."
+                        )
                     cfg = self._config.asset_class_configs.get(asset_class)
                     if cfg is None:
                         raise ValueError(
@@ -252,7 +259,10 @@ class Backtester:
                         size=leg.current_size,
                         entry_price=leg.entry_price,
                         current_price=leg.current_price,
+                        leg_id=leg.leg_id,
                         daily_total_pnl=tuple(leg.daily_total_pnl),
+                        component_pnls={},
+                        risk_measures={},
                     )
                     leg_snapshots.append(leg_snap)
                 structure_snapshots.append(
@@ -339,11 +349,11 @@ class Backtester:
         infos = order.get("info", [])
 
         if trade_id is None:
-            self._execute_new_trade(infos, date)
+            self._execute_new_trade(infos, date, order.get("tags"))
         else:
             self._execute_add_to_existing(trade_id, infos, date)
 
-    def _execute_new_trade(self, infos: list, date: str):
+    def _execute_new_trade(self, infos: list, date: str, tags=None):
         structures = []
         for info in infos:
             structure = self._build_structure_from_info(info, date)
@@ -354,7 +364,7 @@ class Backtester:
         if not structures:
             return
 
-        trade = Trade(trade_id=str(uuid.uuid4()))
+        trade = Trade(trade_id=str(uuid.uuid4()), tags=tags)
         for structure in structures:
             cost_exposures = self._compute_cost_exposures(structure, date)
             trade.add_structure(structure, date, cost_exposures)
@@ -493,6 +503,7 @@ class Backtester:
         return StrategyStructure(
             structure_id=structure_id,
             legs=legs,
+            tags=info.get("tags"),
             cost_leg_ids=cost_leg_ids,
         )
 

@@ -1286,3 +1286,90 @@ docs: final Phase 1 polish of README and design_notes
 - design_notes: mark ROLL/roll stubs and DataExtractor/PnlCalculator as Phase 2+,
   fix 'all' missing-data-mode inconsistency, de-duplicate DataFeed spec (§3.4↔§8.1)
 ```
+
+## 2026-07-05 – Phase 1 review fixes: correctness + polish
+
+### Prompt
+Fix several correctness and polish issues found during the Phase 1 review
+(H1, H2, M1, M5, L3–L8). Apply after diff approval; run pytest (145 must pass);
+update this work log.
+
+### Changes applied
+
+**Correctness:**
+- **H1 – PnL sentinel removed** (`backtest_engine.py::_compute_pnl_for_date`):
+  dropped the `if leg.current_price != 0.0:` guard. Daily P&L is now always
+  `(price_today - current_price) * multiplier * current_size`. The old guard
+  silently zeroed the first real P&L day for any instrument with a legitimate
+  0.0 entry price (e.g. FX forwards struck at market, per §3.6). NaN handling
+  for missing prices is unchanged.
+- **H2 + M5 – structure-based P&L dating, no silent fallback**
+  (`summary.py::_extract_leg_data`): entry-date alignment now uses
+  `structure.original_entry_date` (authoritative), not `trade.entry_date`.
+  A missing/empty `original_entry_date` raises `ValueError` (no fallback to the
+  trade date, which would reproduce the mis-dating bug for scale-in structures).
+  The old silent length-mismatch fallback (`trading_days[:len(pnl_list)]`, which
+  pinned P&L to the wrong dates) is replaced with a `ValueError`. The prepended
+  zero-P&L entry-day row is indexed by `structure.original_entry_date`.
+- **M1 – trade/structure tags populated** (`backtest_engine.py`):
+  `_execute_new` forwards the order dict's optional `'tags'` to
+  `_execute_new_trade`, which passes them to the `Trade` constructor.
+  `_build_structure_from_info` forwards the structure info dict's `'tags'` to the
+  `StrategyStructure` constructor. Summary group filters (`lambda t: 'x' in t.tags`)
+  are now usable end-to-end.
+
+**Polish:**
+- **L3 – pricing-input NaN padding** (`backtest_engine.py`): on the first
+  successful day, the leg's returned pricing-input keys are cached on
+  `leg._pricing_input_keys`; missing days pad `NaN` for exactly those keys. If no
+  successful day has occurred, padding is skipped (keys not yet known), keeping
+  each series aligned with `daily_total_pnl`.
+- **L4 – `Instrument` dataclass removed** (`instrument.py`): dropped the dead
+  `@dataclass` decorator, class-level field declarations, and `dataclasses`
+  import. The manual `__init__`/`__repr__` (the only live code) remain.
+- **L5 – strict asset_class** (`backtest_engine.py::_check_data_available`):
+  a missing `asset_class` on a NEW leg now raises `ValueError` (previously
+  defaulted to `"equity"`); present-but-unknown still raises. Paired change:
+  `SMACrossoverSignal` now emits `asset_class: "equity"` on its legs so the
+  example still runs.
+- **L6 – case-sensitive CSV filenames**: example existence-check path
+  `spy_eod.csv` → `SPY_eod.csv`; `.gitignore` whitelist `spy/qqq` → `SPY/QQQ`.
+  (On-disk and git-tracked CSVs were already uppercase — no rename needed.)
+- **L7 – design_notes drift**: §3.7 SMACrossoverSignal bullet updated from the
+  single-ticker `size`-based description to the current multi-ticker,
+  notional-sized signal. (README already stated 145 tests and 20/50 SPY+QQQ.)
+- **L8 – LegSnapshot fields**: added `leg_id` to `LegSnapshot`; `_build_portfolio_state`
+  now populates `leg_id`, `component_pnls={}`, and `risk_measures={}`.
+
+### Test data corrections
+Four `test_summary.py` cases supplied P&L lists whose lengths only survived under
+the old silent fallback. With the M5 hard error in place, their synthetic P&L
+lengths were corrected to match real backtester output (open trade: N-1 entries;
+closed trade: exit_idx − entry_idx entries):
+- `test_trade_summary_basic`: 4 → 3 entries.
+- `test_group_filter_applies_correctly`: 2 → 3 entries per leg.
+- `test_root_filter_applies_to_all`: 1 → 3 entries per leg.
+- `test_no_output_returns_dict`: 1 → 3 entries.
+No tests added or removed (count stays 145).
+
+### Test results
+145/145 passed (0 failures, 1 expected order-rejection warning).
+End-to-end example runs successfully, including multi-structure scale-in/out trades.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+fix: correct PnL sentinel & scale-in P&L dating; populate tags/snapshots; polish
+
+- H1: remove current_price!=0 guard so 0.0-entry instruments (e.g. FX fwd) are correct
+- H2/M5: date leg P&L by structure.original_entry_date; raise (no silent fallback)
+- M1: populate trade- and structure-level tags from order/structure dicts
+- L3: pad pricing-input NaNs using cached first-day key set
+- L4: drop dead @dataclass machinery from Instrument
+- L5: raise on missing/unknown asset_class; SMA signal now emits asset_class
+- L6: fix case-sensitive CSV names (example path + .gitignore whitelist)
+- L7: refresh design_notes §3.7 SMACrossoverSignal spec
+- L8: add leg_id/component_pnls/risk_measures to LegSnapshot
+```
