@@ -17,6 +17,7 @@ class LegSnapshot:
 @dataclass(frozen=True)
 class StructureSnapshot:
     legs: tuple[LegSnapshot, ...]
+    structure_id: str = ""
 
 
 @dataclass(frozen=True)

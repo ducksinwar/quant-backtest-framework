@@ -1373,3 +1373,29 @@ fix: correct PnL sentinel & scale-in P&L dating; populate tags/snapshots; polish
 - L7: refresh design_notes §3.7 SMACrossoverSignal spec
 - L8: add leg_id/component_pnls/risk_measures to LegSnapshot
 ```
+
+## 2026-07-05 – Add structure_id to StructureSnapshot
+
+### Prompt
+Add the missing `structure_id` field to the portfolio snapshot so signals can
+reference structures. Apply after diff approval; run pytest (145 must pass);
+update this work log.
+
+### Changes applied
+- `snapshots.py`: added `structure_id: str = ""` to the `StructureSnapshot`
+  frozen dataclass, placed after the non-defaulted `legs` field (dataclass
+  ordering requirement); the default keeps it backward compatible.
+- `backtest_engine.py::_build_portfolio_state`: pass
+  `structure_id=structure.structure_id` when constructing each
+  `StructureSnapshot`, so the snapshot now carries the structure identity.
+
+### Test results
+145/145 passed (0 failures, 1 expected order-rejection warning).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+feat: add structure_id to StructureSnapshot and populate in portfolio state
+```

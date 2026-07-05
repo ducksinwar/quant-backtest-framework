@@ -266,7 +266,10 @@ class Backtester:
                     )
                     leg_snapshots.append(leg_snap)
                 structure_snapshots.append(
-                    StructureSnapshot(legs=tuple(leg_snapshots))
+                    StructureSnapshot(
+                        legs=tuple(leg_snapshots),
+                        structure_id=structure.structure_id,
+                    )
                 )
             trade_snapshots.append(
                 TradeSnapshot(
