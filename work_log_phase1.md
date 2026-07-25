@@ -20,7 +20,38 @@
 | 12 | 06‑17 | Cost‑exposure implementation (all modules) | [§ Cost impl](#2026-06-17--cost-exposure-refactoring-implementation) |
 | 13 | 06‑17 | Fix Summary cost alignment | [§ Cost fix](#2026-06-17--fix-summary-cost-alignment-date-indexed-gross-pnl) |
 | 14 | 06‑17 | **Final end‑to‑end code review** | [§ Final review](#2026-06-17--final-phase1-endtoend-code-review) |
-| 15 | 07‑03 | SMACrossoverSignal: notional sizing + multi‑ticker | [§ Notional sizing](#2026-07-03--smacrossoversignal-notional-sizing--multi-ticker) |
+| 15 | 06‑19 | Design note clarifications + add_to_structure fix | [§ Notes fix](#2026-06-19--design-note-clarifications-add_to_structure-fix-and-additional-test-coverage) |
+| 16 | 06‑20 | Fix Summary PnL/cost date alignment | [§ Date align](#2026-06-20--fix-summary-pnlcost-date-alignment) |
+| 17 | 06‑26 | BacktestResult, aggregation fix, design notes | [§ BacktestResult](#2026-06-26--backtestresult-aggregation-fix-design-note-updates) |
+| 18 | 06‑26 | Manual fixes for summary | [§ Manual fixes](#2026-06-26--manual-fixes-for-summary) |
+| 19 | 06‑26 | trade_summary enhancements + design‑note updates | [§ TS enhance](#2026-06-26--trade_summary-enhancements-and-design-note-updates) |
+| 20 | 06‑26 | trade_summary mandatory identifiers, column ordering | [§ TS columns](#2026-06-26--trade_summary-mandatory-identifiers-column-ordering) |
+| 21 | 06‑27 | Design note corrections: component P&L + curve risk | [§ DN correct](#2026-06-27--design-note-corrections-component-pl-and-equity-curve-risk) |
+| 22 | 06‑27 | Fix trade_summary table row in design notes | [§ TS table](#2026-06-27--fix-trade_summary-table-row-in-design-notes) |
+| 23 | 06‑27 | Fix outdated FixedCostModel references | [§ FCM refs](#2026-06-27--fix-outdated-fixedcostmodel-references-in-design-notes) |
+| 24 | 06‑27 | Add caching to Summary._aggregate_series | [§ Agg cache](#2026-06-27--add-caching-to-summary_aggregate_series) |
+| 25 | 06‑27 | Fix 'all' missing-data mode + simplify aggregation | [§ Missing mode](#2026-06-27--fix-all-missing-data-mode-simplify-aggregation-update-design-notes) |
+| 26 | 06‑27 | Summary refactoring: lazy layer + hit-ratio fix | [§ Lazy refactor](#2026-06-27--summary-refactoring-lazy-computation-layer-and-hit-ratio-fix) |
+| 27 | 06‑28 | Consolidate _build_metrics into single lazy loop | [§ Metrics loop](#2026-06-28--consolidate-_build_metrics-into-single-lazy-loop) |
+| 28 | 06‑29 | Lazy-evaluation verification | [§ Lazy verify](#2026-06-29--lazy-evaluation-verification) |
+| 29 | 07‑01 | Capital parameter + return semantics + hit ratio | [§ Capital](#2026-07-01--capital-parameter-return-semantics-per-trade-hit-ratio-and-design-notes) |
+| 30 | 07‑01 | Metrics refactoring + periodic_metrics report | [§ Periodic](#2026-07-01--metrics-refactoring-periodic_metrics-report-design-note-update) |
+| 31 | 07‑01 | Optimise max drawdown (avoid double compute) | [§ MDD opt](#2026-07-01--optimise-max-drawdown-computation-avoid-double-compute) |
+| 32 | 07‑02 | Fix drawdown table to use peak-to-peak definition | [§ DD table](#2026-07-02--fix-drawdown-table-to-use-peak-to-peak-definition) |
+| 33 | 07‑02 | Post‑review fixes (9 minor issues) | [§ Review 9](#2026-07-02--post-review-fixes-9-minor-issues) |
+| 34 | 07‑02 | Fix Summary Excel output path handling | [§ Excel path](#2026-07-02--fix-summary-excel-output-path-handling) |
+| 35 | 07‑03 | Add total_trades column to hit ratio report | [§ Hit trades](#2026-07-03--add-total_trades-column-to-hit-ratio-report) |
+| 36 | 07‑03 | Fix flaky tests reliant on live market data | [§ Flaky tests](#2026-07-03--fix-flaky-tests-reliant-on-live-market-data) |
+| 37 | 07‑03 | SMACrossoverSignal: notional sizing + multi‑ticker | [§ Notional sizing](#2026-07-03--smacrossoversignal-notional-sizing--multi-ticker) |
+| 38 | 07‑03 | Equity curve pct columns + metrics capital column | [§ EC pct](#2026-07-03--equity-curve-pct-columns--metrics-capital-column-when-capital-provided) |
+| 39 | 07‑03 | trade_summary percentage columns when capital provided | [§ TS pct](#2026-07-03--trade_summary-percentage-columns-when-capital-provided) |
+| 40 | 07‑04 | trade_summary sub-report in by_underlying | [§ TS by_u](#2026-07-04--trade_summary-sub-report-in-by_underlying) |
+| 41 | 07‑04 | Fix cache-collision bug in Summary series helpers | [§ Cache fix](#2026-07-04--fix-cache-collision-bug-in-summary-series-helpers) |
+| 42 | 07‑04 | Final Phase 1 polish: README + design_notes | [§ Polish](#2026-07-04--final-phase-1-polish-readme--design_notes) |
+| 43 | 07‑05 | Phase 1 review fixes: correctness + polish | [§ Review fix2](#2026-07-05--phase-1-review-fixes-correctness--polish) |
+| 44 | 07‑05 | Add structure_id to StructureSnapshot | [§ Snap struct](#2026-07-05--add-structure_id-to-structuresnapshot) |
+| 45 | 07‑25 | Example enhancements: tags, filtering, deduplicated cost | [§ Example +](#2026-07-25--example-enhancements-tags-filtering-deduplicated-cost) |
+| 46 | 07‑25 | Hierarchical filter demonstration | [§ Hier filter](#2026-07-25--hierarchical-filter-demonstration) |
 
 ---
 
