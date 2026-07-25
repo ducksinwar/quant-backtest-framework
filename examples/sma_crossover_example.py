@@ -11,6 +11,28 @@ from backtester.signals.sma_crossover import SMACrossoverSignal
 from backtester.summary import Summary
 
 
+def _make_sma_filter(threshold: float = 1.0):
+    """Return a filter that excludes trades whose short_ma / long_ma
+    SMA values differ by less than *threshold*."""
+    def _filter(trade) -> bool:
+        if not trade.tags:
+            return True
+        vals: dict[str, float] = {}
+        for tag in trade.tags:
+            if ":" in tag:
+                k, v = tag.split(":", 1)
+                try:
+                    vals[k] = float(v)
+                except ValueError:
+                    pass
+        short = vals.get("short_ma")
+        long = vals.get("long_ma")
+        if short is None or long is None:
+            return True
+        return abs(long - short) >= threshold
+    return _filter
+
+
 def main():
     csv_path = os.path.join("market_data", "SPY_eod.csv")
     if not os.path.exists(csv_path):
@@ -61,11 +83,7 @@ def main():
         print("No trades were generated. Exiting.")
         return
 
-    # 6. Compute costs
     cost_model = CostModel(calculators={"equity": EquityCostCalculator(bps=2.0)})
-    costs = cost_model.compute_costs(trade_history)
-    total_cost = sum(s.sum() for s in costs.values())
-    print(f"Total transaction cost: ${total_cost:,.2f}")
 
     spec = {
         "reports": {
@@ -76,6 +94,15 @@ def main():
             "drawdown_table": True,
             "periodic_metrics": True,
             "by_underlying": True,
+            "filtered_sma_group": {
+                "filter": _make_sma_filter(threshold=1.0),
+                "reports": {
+                    "equity_curve": True,
+                    "trade_summary": True,
+                    "metrics": True,
+                    "hit_ratio": True,
+                },
+            },
         },
         "output": {"format": "excel", "path": "results/backtest_results.xlsx"},
     }
@@ -90,6 +117,11 @@ def main():
     )
 
     if results is not None:
+        # Compute total cost from trade_summary
+        if "trade_summary" in results:
+            total_cost = results["trade_summary"]["cost"].sum()
+            print(f"Total transaction cost: ${total_cost:,.2f}")
+
         # Print metrics
         if "metrics" in results:
             print("\n--- Metrics ---")

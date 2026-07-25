@@ -75,6 +75,7 @@ class SMACrossoverSignal(BaseSignal):
             return {
                 "Action": "NEW",
                 "trade_id": None,
+                "tags": [f"short_ma:{last_short:.2f}", f"long_ma:{last_long:.2f}"],
                 "info": [
                     {
                         "structure_id": None,

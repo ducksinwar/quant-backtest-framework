@@ -1399,3 +1399,68 @@ update this work log.
 ```
 feat: add structure_id to StructureSnapshot and populate in portfolio state
 ```
+
+## 2026-07-25 – Example enhancements: tags, filtering, deduplicated cost
+
+### Prompt
+Enhance the example script and signal to demonstrate tags and filtering, and
+to remove a redundant cost computation.
+
+### Changes applied
+
+**`backtester/signals/sma_crossover.py`:**
+- NEW orders now carry top-level `"tags": [f"short_ma:{last_short:.2f}", f"long_ma:{last_long:.2f}"]`,
+  carrying the actual SMA values at signal-generation time as trade-level tags.
+
+**`examples/sma_crossover_example.py`:**
+- Removed the standalone `cost_model.compute_costs()` call and its print statement
+  — the cost is now derived from the summary output.
+- Added `_make_sma_filter(threshold=2.0)` helper that parses `"short_ma"` / `"long_ma"`
+  float values from trade tags and excludes trades where the absolute difference
+  between the two is less than the threshold, demonstrating the Summary filtering
+  feature.
+- Applied the filter as a root filter in the summary spec via
+  `"filter": _make_sma_filter(threshold=2.0)`.
+- After summary generation, total cost is computed from
+  `results["trade_summary"]["cost"].sum()` and printed.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning). Example runs end-to-end
+(133 trades, tags visible in trade_summary, cost printed from summary output).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+feat: add SMA-value tags to NEW orders, demo Summary filtering, deduplicate cost computation
+```
+
+## 2026-07-25 – Hierarchical filter demonstration
+
+### Prompt
+Restructure the example spec to demonstrate hierarchical filtering: keep
+all current reports as an unfiltered overall section, and add a filtered
+group with a subset of reports gated by the SMA filter.
+
+### Changes applied
+
+**`examples/sma_crossover_example.py`:**
+- Moved the `"filter"` key from the flat reports dict into a nested group
+  `"filtered_sma_group"`, leaving all 7 standard reports unfiltered.
+- The nested group contains `"filter": _make_sma_filter(threshold=2.0)` and
+  a `"reports"` dict with `"metrics"`, `"hit_ratio"`, and `"trade_summary"`.
+- The unfiltered reports run as before (no change to console output); the
+  Excel output gains three additional sheets: `filtered_sma_group_metrics`,
+  `filtered_sma_group_hit_ratio`, and `filtered_sma_group_trade_summary`.
+
+### Test results
+145/145 passed (0 failures, 1 expected warning). Example runs end-to-end.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+feat: demonstrate hierarchical filter group in example spec
+```

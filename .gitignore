@@ -181,3 +181,4 @@ market_data/*.csv
 nul
 fetch_data.py
 results/
+.vscode/

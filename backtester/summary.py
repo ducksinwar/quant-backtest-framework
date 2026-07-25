@@ -44,6 +44,7 @@ class Summary:
         self, trade_history: list, cost_map: dict,
         trading_days: list[str],
     ) -> list[dict]:
+
         rows = []
         for trade in trade_history:
             for structure in trade.structure_history:
@@ -99,6 +100,7 @@ class Summary:
                         "trade": trade,
                         "trade_id": trade.trade_id,
                         "structure": structure,
+                        "structure_id": structure.structure_id,
                         "leg": leg,
                         "leg_id": leg.leg_id,
                         "ticker": leg.ticker,
