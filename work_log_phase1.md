@@ -1429,7 +1429,7 @@ to remove a redundant cost computation.
 (133 trades, tags visible in trade_summary, cost printed from summary output).
 
 ### Manual changes
-- None
+- Added structure id for future use when aggregating legs
 
 ### Suggested commit message
 ```
@@ -1458,7 +1458,7 @@ group with a subset of reports gated by the SMA filter.
 145/145 passed (0 failures, 1 expected warning). Example runs end-to-end.
 
 ### Manual changes
-- None
+- Update example for better demonstrative logic
 
 ### Suggested commit message
 ```
