@@ -79,8 +79,7 @@ Final section numbering:
 ### Manual changes
 - None
 
-### Commit
-Suggested message:
+### Suggested commit message
 ```
 docs: add CalendarProvider and OrderGenerator to Phase 2 design
 
@@ -98,6 +97,7 @@ docs: add CalendarProvider and OrderGenerator to Phase 2 design
 - Add CalendarProvider + OrderGenerator tasks to Phase 2 implementation plan
 - Add calendar system bullet to §8.4 Phase 2 description
 - Create work_log_phase2.md; archive old work_log.md (Phase 1 complete)
+```
 
 ## 2026-07-25 – Documentation restructuring: archive Phase 1, rename + move docs
 
@@ -116,4 +116,8 @@ materials archived under `docs/archive/`.
 
 ### Manual changes
 - None
+
+### Suggested commit message
+```
+docs: archive Phase 1 worklog, move Phase 2 docs into docs/
 ```
