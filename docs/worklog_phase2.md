@@ -121,3 +121,179 @@ materials archived under `docs/archive/`.
 ```
 docs: archive Phase 1 worklog, move Phase 2 docs into docs/
 ```
+
+## 2026-07-27 – Task 1: Summary refactoring – pluggable MetricCalculator & BaseReport registries
+
+### Prompt
+Implement Task 1 of Phase 2: refactor the Summary module to use pluggable
+MetricCalculator and BaseReport registries, following the same pattern as the
+CostModel. The Summary becomes a thin data coordinator that exposes public
+cached-series helpers; all report-building and metric-computation logic moves
+out of Summary into registry-backed classes.
+
+### Changes applied
+
+- **Created `backtester/metrics_registry.py`** – `BaseMetricCalculator` ABC with
+  `compute()` method; 8 concrete calculator classes (Return, ReturnPct, Sharpe,
+  MaxDrawdown, MaxDrawdownPct, AnnualizedReturn, Calmar, HitRatio); module-level
+  `METRIC_CALCULATORS` dict; `CAPITAL_DEPENDENT_METRICS` set; shared
+  `_compute_metrics_row` helper used by both MetricsReport and
+  PeriodicMetricsReport.
+
+- **Created `backtester/reports/` package** (8 files):
+  - `_base.py` – `BaseReport` ABC with `build()` signature accepting (summary,
+    trades, leg_data, report_config, fx_rates, output_name).
+  - `equity_curve.py` – `EquityCurveReport`
+  - `trade_summary.py` – `TradeSummaryReport`
+  - `metrics.py` – `MetricsReport` (uses metric registry + `_compute_metrics_row`)
+  - `periodic_metrics.py` – `PeriodicMetricsReport` (per-period metric rows +
+    total row via `_compute_metrics_row`)
+  - `hit_ratio.py` – `HitRatioReport`
+  - `drawdown_table.py` – `DrawdownTableReport` (includes private static
+    `_compute_drawdown_table_from_cum`, moved from Summary)
+  - `by_underlying.py` – `ByUnderlyingReport` (uses REPORTS registry directly
+    for sub-reports)
+
+- **`__init__.py`** re-exports `BaseReport` and the `REPORTS` dict mapping report
+  name strings to concrete report classes.
+
+- **Deleted `backtester/metrics_calculators.py`** – all old pure functions
+  superseded by the calculator registry.
+
+- **`backtester/summary.py`** – removed all 7 `_build_*` methods and
+  `_compute_drawdown_table_from_cum`; promoted `_get_daily_series`,
+  `_get_cumulative_series`, `_get_trade_totals` to public (dropped leading
+  underscore); rewrote `_build_report` to dispatch via REPORTS registry; made
+  `_normalize_config` a `@staticmethod`; added `capital` property (set from
+  `self._capital` in `generate()`); initialised `_capital = None` in
+  `__init__`.
+
+- **`tests/test_summary.py`** – added `TestSummaryRegistryExtensibility` class
+  verifying that registering a dummy calculator + dummy report and calling
+  `generate()` produces the expected output. Test restores original registries
+  after running.
+
+### Backward compatibility
+All 128 pre-existing tests pass without modification. 146 total tests pass
+(128 + 18 summary including the new registry-extensibility test).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: pluggable MetricCalculator and BaseReport registries for Summary
+
+- Add BaseMetricCalculator ABC + 8 concrete calculators in
+  backtester/metrics_registry.py with module-level METRIC_CALCULATORS
+  registry and CAPITAL_DEPENDENT_METRICS set
+- Add BaseReport ABC + 7 concrete report classes in backtester/reports/
+  package with module-level REPORTS registry
+- Remove backtester/metrics_calculators.py (pure functions superseded)
+- Refactor backtester/summary.py: remove all _build_* methods, promote
+  getters to public, dispatch via REPORTS registry, add capital property
+- Move _compute_drawdown_table_from_cum to DrawdownTableReport
+- Add registry-extensibility test in tests/test_summary.py
+- All 146 tests pass (128 existing + 18 summary)
+```
+
+## 2026-07-27 – PeriodicMetrics hit‑ratio exclusion + documentation sync
+
+### Prompt
+Finalise Task 1 of Phase 2: apply the hit‑ratio exclusion fix in PeriodicMetricsReport
+and update design_notes.md and README.md to reflect the completed refactoring.
+
+### Changes applied
+
+- **`backtester/reports/periodic_metrics.py`** – Added module‑level `_EXCLUDED_METRICS =
+  {"hit_ratio"}`; compute an `_eligible` tuple from `METRIC_CALCULATORS` excluding
+  hit_ratio. Used `_eligible` everywhere periodic_metrics iterates the metric registry
+  (want/needs detection, label_include construction). When `include` is `None`,
+  `label_include` is now set to `list(_eligible)` instead of `None`, preventing
+  `_compute_metrics_row` from falling back to the full registry (which would reintroduce
+  hit_ratio).
+  Result: hit_ratio columns no longer appear in any `periodic_metrics` output sheet.
+
+- **`design_notes.md`** — Three updates:
+  1. §2 project structure tree: replaced `summary.py (standard reports)` with
+     `(thin data coordinator)`; added `metrics_registry.py` and the `reports/` directory
+     with all its files (`_base.py`, `equity_curve.py`, etc.).
+  2. §3.10 metrics row: renamed percentage column names to the new convention
+     (`return_pct_gross`, `return_pct_net`, `max_drawdown_pct_gross`,
+     `max_drawdown_pct_net`).
+  3. §3.10 Internal architecture: replaced the future‑tense Phase 2 plan paragraph with
+     a present‑tense description of the current `BaseMetricCalculator` registry,
+     `BaseReport` registry, and the `Summary`'s role as a thin data coordinator.
+
+- **`README.md`** — Two updates:
+  1. Project Structure tree: removed `metrics_calculators.py`, added
+     `metrics_registry.py` and the `reports/` directory with all files, updated
+     `summary.py` description from "Performance reports" to "Thin data coordinator".
+  2. Architecture summary paragraph: updated the CostModel/Summary sentence to describe
+     the pluggable `BaseReport` registry and reusable `BaseMetricCalculator` classes.
+
+### Manual changes
+- Update Calmar calculator to first check if mdd is in context before computing mdd
+- In `PeriodicMetricsReport.build()`, after building `cum_period` from the full
+  cumulative series, added `cum_period = cum_period - cum_period.iloc[0]` to rebase
+  the period's cumulative P&L to zero. This prevents future metrics that rely on the
+  absolute cumulative level from inadvertently including pre-period P&L. Existing
+  drawdown metrics are mathematically unchanged. All tests pass.
+
+### Suggested commit message
+```
+fix: exclude hit_ratio from periodic_metrics; sync docs with refactoring
+
+- periodic_metrics.py: add _EXCLUDED_METRICS and _eligible tuple to ensure
+  hit_ratio is never computed in periodic_metrics output regardless of
+  `include` setting
+- design_notes.md: update §2 file tree, §3.10 percentage column names
+  (return_pct_gross etc.), and §3.10 internal architecture paragraph
+- README.md: update project structure tree and architecture summary
+- All 146 tests pass; output comparison confirms hit_ratio absent from
+  periodic_metrics sheets
+
+## 2026-07-28 – DrawdownTable report: rename columns + add trough value
+
+### Prompt
+Clean up the drawdown table report to eliminate confusing naming and add the
+missing cumulative trough value. No mathematical logic changes — only rename
+variables, rename columns, and add one new column.
+
+### Changes applied
+
+- **`backtester/reports/drawdown_table.py`** — `_compute_drawdown_table_from_cum`:
+  - Renamed local variable `trough` → `drawdown_val` (both branches of the
+    underwater-period state machine).
+  - Renamed dictionary key `"depth"` → `"drawdown"` in both period dicts.
+  - Added new dictionary key `"trough" = peak_val + drawdown_val` (the actual
+    cumulative P&L value at the trough date, computed from the negative
+    drawdown_val offset).
+  - Updated sort key from `x["depth"]` → `x["drawdown"]`.
+  
+- **`backtester/reports/drawdown_table.py`** — `build`:
+  - Column `"depth_pct"` → `"drawdown_pct"` (still computed from the drawdown
+    value, still negative).
+  - Added `_reorder_columns()` helper to enforce a logical column order:
+    `start, end, trough_date, peak, trough, drawdown, underwater_days`
+    (with `drawdown_pct` after `drawdown` when capital is present).
+
+### Test impact
+No test changes needed — the only drawdown_table test checks for key presence
+(`"drawdown_table_gross"`, `"drawdown_table_net"`) and does not inspect column
+names. All 146 tests pass.
+
+### Manual changes
+- Worklog entry appended.
+
+### Suggested commit message
+```
+refactor: rename drawdown table columns and add cumulative trough
+
+- Rename depth->drawdown, depth_pct->drawdown_pct in DrawdownTableReport
+- Add trough column (cumulative P&L at trough date)
+- Rename internal variable trough->drawdown_val for clarity
+- Add _reorder_columns helper for logical column ordering
+- All 146 tests pass (no test changes required)
+```
+```

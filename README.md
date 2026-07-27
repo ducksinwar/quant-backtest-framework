@@ -31,7 +31,7 @@ The framework is built around a daily event loop:
 - **Pricers** value instruments and supply greeks for P&L decomposition.  
 - **Signals** are stateless, return target‑trade dictionaries, and only see information up to T‑1.  
 - **Backtester** computes daily P&L, executes orders, and records all lifecycle events.  
-- **CostModel** turns those events into a per‑leg cost series; the **Summary** produces standard reports (equity curve, trade summary, metrics, periodic metrics, hit ratio, drawdown table, and per‑underlying breakdowns).  
+- **CostModel** turns those events into a per‑leg cost series; the **Summary** is a thin data coordinator that dispatches report generation through a pluggable `BaseReport` registry, with individual metrics computed by reusable `BaseMetricCalculator` classes.  
 
 Everything is fully decoupled – you can swap a pricer, change the cost model, or add a new report without touching the backtester loop.
 
@@ -58,9 +58,19 @@ backtester/
         trade.py                # Trade class
     snapshots.py                # Frozen snapshot dataclasses
     backtest_engine.py          # Daily loop orchestrator
-    summary.py                  # Performance reports
-    metrics_calculators.py      # Pure metric functions (Sharpe, Calmar, …)
+    summary.py                  # Thin data coordinator
     cost_model.py               # Transaction cost computation
+    metrics_registry.py         # Pluggable BaseMetricCalculator registry
+    reports/
+        __init__.py             # REPORTS dict + re‑exports
+        _base.py                # BaseReport ABC
+        equity_curve.py         # EquityCurveReport
+        trade_summary.py        # TradeSummaryReport
+        metrics.py              # MetricsReport
+        periodic_metrics.py     # PeriodicMetricsReport
+        hit_ratio.py            # HitRatioReport
+        drawdown_table.py       # DrawdownTableReport
+        by_underlying.py        # ByUnderlyingReport
 examples/
     sma_crossover_example.py    # End‑to‑end example
 tests/

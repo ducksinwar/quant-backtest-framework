@@ -78,10 +78,21 @@ backtester/
     trades/
         trade.py                        # (* Phase 1 *) Trade class
     backtest_engine.py                  # (* Phase 1 *) Backtester daily loop
-    summary.py                          # (* Phase 1 *) Summary (standard reports)
+    summary.py                          # (* Phase 1 *) Summary (thin data coordinator)
     cost_model.py                       # (* Phase 1 *) CostModel (includes EquityCostCalculator)
+    metrics_registry.py                 # (* Phase 2 *) Pluggable BaseMetricCalculator registry
     data_extractor.py                   # DataExtractor (raw data extraction)
     pnl_calculator.py                   # AssetPnlCalculator (PnL decomposition)
+    reports/
+        __init__.py                     # (* Phase 2 *) REPORTS dict + re‑exports
+        _base.py                        # (* Phase 2 *) BaseReport ABC
+        equity_curve.py                 # (* Phase 2 *) EquityCurveReport
+        trade_summary.py                # (* Phase 2 *) TradeSummaryReport
+        metrics.py                      # (* Phase 2 *) MetricsReport
+        periodic_metrics.py             # (* Phase 2 *) PeriodicMetricsReport
+        hit_ratio.py                    # (* Phase 2 *) HitRatioReport
+        drawdown_table.py               # (* Phase 2 *) DrawdownTableReport
+        by_underlying.py                # (* Phase 2 *) ByUnderlyingReport
 examples/
     sma_crossover_example.py            # (* Phase 1 *) End‑to‑end example
 tests/
@@ -754,7 +765,7 @@ Rows are output in a single table in the fixed nesting order `leg → structure 
 
 | `'hit_ratio'`     | Hit ratio over a configurable timeframe, computed per trade (by entry date), not per day. | `timeframe` (default `'yearly'`), `include` | When `include` is specified, it controls which columns are produced. Supported values: `'gross'`, `'net'`, `'total_trades'`. If omitted, all three are produced. `total_trades` shows the number of trades started in each period and the overall total. The output DataFrame is indexed by the time group (e.g., year) with an additional `"total"` row at the bottom that is the hit ratio computed across **all** trades (not the average of the group ratios). |
 | `'drawdown_table'`| Top N drawdowns with dates and underwater days. | `top_n` (default 10), `include` | Same `include` logic as `'hit_ratio'`: controls gross vs. net drawdowns. |
-| `'metrics'`       | Standard scalar metrics (Sharpe, Calmar, annualized return, max drawdown, return, hit ratio). | `include`, `annualization` (default 252) | `include` specifies which metrics to compute (e.g., `['sharpe','max_drawdown']`). Each metric can be requested in `'gross'` or `'net'` form by adding a suffix (e.g., `'sharpe_gross'`, `'sharpe_net'`). If `include` is omitted, all available metrics are produced in both gross and net versions.<br><br>**Always available:** `return_gross`, `return_net` — total gross/net P&L over the whole simulation period (absolute dollar value).<br>**When `capital` is provided:** `annualized_return_gross`, `annualized_return_net` — annualised return expressed as a percentage of capital; `return_gross_pct`, `return_net_pct` — total return as a percentage of capital; `max_drawdown_gross_pct`, `max_drawdown_net_pct` — max drawdown as a percentage of capital; `capital` — the capital value used for percentage computations. |
+| `'metrics'`       | Standard scalar metrics (Sharpe, Calmar, annualized return, max drawdown, return, hit ratio). | `include`, `annualization` (default 252) | `include` specifies which metrics to compute (e.g., `['sharpe','max_drawdown']`). Each metric can be requested in `'gross'` or `'net'` form by adding a suffix (e.g., `'sharpe_gross'`, `'sharpe_net'`). If `include` is omitted, all available metrics are produced in both gross and net versions.<br><br>**Always available:** `return_gross`, `return_net` — total gross/net P&L over the whole simulation period (absolute dollar value).<br>**When `capital` is provided:** `annualized_return_gross`, `annualized_return_net` — annualised return expressed as a percentage of capital; `return_pct_gross`, `return_pct_net` — total return as a percentage of capital; `max_drawdown_pct_gross`, `max_drawdown_pct_net` — max drawdown as a percentage of capital; `capital` — the capital value used for percentage computations. |
 | `'periodic_metrics'` | Periodic breakdown of the same scalar metrics as `'metrics'`, computed over configurable time periods. | `timeframe` (default `'yearly'`), `include`, `annualization` (default 252) | Same `include` groups as `'metrics'` (return, Sharpe, max drawdown, Calmar, and when `capital` is provided, annualized return, return_pct, max_drawdown_pct). Hit ratio is **not** included (see `'hit_ratio'` for that). The output DataFrame is indexed by the time period (e.g., year) with an additional `"total"` row at the bottom computed from the full simulation series. |
 
 **Output format for `'by_underlying'`:**
@@ -919,8 +930,10 @@ No changes to the `Summary` code are required when new decomposition or risk mea
 
 **Internal architecture:**
 
-- **Current design:** Performance metrics are extracted into a separate module `backtester/metrics_calculators.py` as pure, stateless functions. Both `_build_metrics` and `_build_periodic_metrics` use these functions, keeping the `Summary` clean and the metric logic reusable.
-- **Phase 2 plan:** The metric‑calculation layer will be replaced by a pluggable `MetricCalculator` registry (following the same pattern as the `CostModel`), and the report layer will be replaced by a pluggable `BaseReport` registry. When this is done, the `Summary` will own only the shared state (leg data, trading days, capital, missing‑data mode, and the cached daily/cumulative helpers) and will expose those helpers to the registered calculators and reports. Adding a new metric or a new report will require only a new class and a registry entry; the `Summary`'s dispatch code will never change.
+- A `BaseMetricCalculator` ABC and registry (`backtester/metrics_registry.py`) provide pluggable metric calculators for sharpe, max_drawdown, return, return_pct, annualized_return, calmar, and hit_ratio. The shared helper `_compute_metrics_row` is used by `MetricsReport` and `PeriodicMetricsReport`. Capital‑dependent metrics (annualized_return, return_pct, max_drawdown_pct) are automatically excluded when no capital is set.
+- A `BaseReport` ABC and registry (`backtester/reports/`) provide pluggable report classes for each standard report: equity_curve, trade_summary, metrics, periodic_metrics, hit_ratio, drawdown_table, and by_underlying. The `REPORTS` dict in `__init__.py` maps string names to concrete report classes.
+- The `Summary` class owns only the shared state (leg data, trading days, capital, missing‑data mode) and exposes public caching helpers (`get_daily_series`, `get_cumulative_series`, `get_trade_totals`) to all registered reports. It dispatches report generation through the `REPORTS` registry with no hard‑coded `_build_*` methods.
+- Adding a new metric or report requires only a new class and a registry entry; the `Summary`'s dispatch code never changes.
 
 ### 3.11 Data Extractor
 

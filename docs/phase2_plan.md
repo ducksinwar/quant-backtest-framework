@@ -9,7 +9,7 @@
 ## Phase 2A – Core Infrastructure & Abstractions
 
 ### Task 1: Summary Refactoring – Pluggable MetricCalculator & BaseReport Registries
-- [ ] **Goal:** Replace hard‑coded metric functions and report builders with a registry pattern (like CostModel). Summary becomes a thin data coordinator.
+- [x] **Goal:** Replace hard‑coded metric functions and report builders with a registry pattern (like CostModel). Summary becomes a thin data coordinator.
 - **Deliverables:**
   - `BaseMetricCalculator` ABC + registry (wrapping existing pure functions).
   - `BaseReport` ABC + registry (each standard report becomes a class).

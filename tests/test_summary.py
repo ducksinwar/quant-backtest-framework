@@ -361,3 +361,45 @@ class TestSummaryNoOutputReturnsDict:
         result = summary.generate([trade], cost_model, trading_days=["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
         assert isinstance(result, dict)
         assert "equity_curve" in result
+
+
+class TestSummaryRegistryExtensibility:
+    def test_registry_extensibility(self):
+        from backtester.metrics_registry import BaseMetricCalculator, METRIC_CALCULATORS
+        from backtester.reports import REPORTS, BaseReport
+
+        original_calcs = dict(METRIC_CALCULATORS)
+        original_reports = dict(REPORTS)
+
+        try:
+
+            class DummyMetricCalculator(BaseMetricCalculator):
+                def compute(self, summary, label, context, annualization):
+                    return 42.0
+
+            METRIC_CALCULATORS["dummy_metric"] = DummyMetricCalculator()
+
+            class DummyReport(BaseReport):
+                def build(self, summary, trades, leg_data, report_config, fx_rates, output_name):
+                    return {output_name: pd.DataFrame([{"dummy": 42}])}
+
+            REPORTS["dummy_report"] = DummyReport
+
+            leg_id = "leg_001"
+            trade, leg = _make_trade(
+                "t1", "2024-01-02", None, leg_id, [10.0, 5.0],
+            )
+            cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+            spec = {"reports": {"dummy_report": True}}
+            summary = Summary(spec)
+            result = summary.generate(
+                [trade], cost_model,
+                trading_days=["2024-01-02", "2024-01-03", "2024-01-04"],
+            )
+            assert "dummy_report" in result
+            assert result["dummy_report"].iloc[0]["dummy"] == 42
+        finally:
+            METRIC_CALCULATORS.clear()
+            METRIC_CALCULATORS.update(original_calcs)
+            REPORTS.clear()
+            REPORTS.update(original_reports)
