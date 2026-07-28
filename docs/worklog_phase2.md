@@ -252,6 +252,7 @@ fix: exclude hit_ratio from periodic_metrics; sync docs with refactoring
 - README.md: update project structure tree and architecture summary
 - All 146 tests pass; output comparison confirms hit_ratio absent from
   periodic_metrics sheets
+```
 
 ## 2026-07-28 – DrawdownTable report: rename columns + add trough value
 
@@ -296,4 +297,22 @@ refactor: rename drawdown table columns and add cumulative trough
 - Add _reorder_columns helper for logical column ordering
 - All 146 tests pass (no test changes required)
 ```
+
+---
+
+## 2026-07-28 – Docs: fix stale column name in design notes
+
+### Prompt
+Task 1 final validation found a stale column name in design_notes.md:
+`depth_pct` → `drawdown_pct` to match the refactored drawdown table.
+
+### Change
+- `design_notes.md` §3.10, line 888: `depth_pct` → `drawdown_pct`.
+
+### Test impact
+None — docs-only change. All 146 tests pass.
+
+### Suggested commit message
+```
+docs: fix stale depth_pct -> drawdown_pct in design notes §3.10
 ```

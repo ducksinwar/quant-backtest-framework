@@ -885,7 +885,7 @@ summary = Summary(spec)
 - `generate(trade_history: list[Trade], cost_model: CostModel, trading_days: list[str], fx_rates: dict[str, pd.Series] | None = None, capital: float | None = None) -> dict | None`
   Applies the cost model (for standard reports that need it), handles missing data, and produces the requested reports.  
   `fx_rates` is an optional dictionary mapping currency pairs (e.g., `'USDJPY'`) to a `pd.Series` of daily spot rates.  
-  `capital` is an optional parameter that enables percentage versions of return, drawdown, and annualised return. When provided and positive, `annualized_return` is expressed as a percentage of capital, and `return_pct`, `max_drawdown_pct`, and `depth_pct` (in drawdown tables) are added. When omitted, `annualized_return` and all `_pct` columns are not produced; `return` (total absolute P&L) is always available.  
+  `capital` is an optional parameter that enables percentage versions of return, drawdown, and annualised return. When provided and positive, `annualized_return` is expressed as a percentage of capital, and `return_pct`, `max_drawdown_pct`, and `drawdown_pct` (in drawdown tables) are added. When omitted, `annualized_return` and all `_pct` columns are not produced; `return` (total absolute P&L) is always available.  
   - **If `fx_rates` is provided**, local‑currency P&L is converted to the base currency (USD) and portfolio‑level metrics are computed.
   - **If `fx_rates` is omitted**, no cross‑currency aggregation is performed. Reports that require a single‑currency portfolio are either omitted or broken down by underlying/currency.
 
