@@ -28,7 +28,7 @@ The framework is built around a daily event loop:
 **Data → Pricer → Signal → Backtester → Summary & Cost Model**
 
 - **DataFeed** abstracts all data access (CSV today, SQL tomorrow).  
-- **Pricers** value instruments and supply greeks for P&L decomposition.  
+- **Pricers** value instruments via an immutable `Contract` and supply greeks for P&L decomposition.  
 - **Signals** are stateless, return target‑trade dictionaries, and only see information up to T‑1.  
 - **Backtester** computes daily P&L, executes orders, and records all lifecycle events.  
 - **CostModel** turns those events into a per‑leg cost series; the **Summary** is a thin data coordinator that dispatches report generation through a pluggable `BaseReport` registry, with individual metrics computed by reusable `BaseMetricCalculator` classes.  
@@ -44,18 +44,15 @@ backtester/
         data_feed.py            # DataFeed with swappable backends
         csv_backend.py          # CSV backend implementation
         typed_providers/        # (future) Vol, rate, forward curve providers
-    instruments/
-        instrument.py           # Instrument dataclass
-    structures/
-        strategy_structure.py   # Atomic leg grouping with event log
+    instruments.py              # Contract and LegState
+    strategy_structure.py       # Atomic leg grouping with event log
     pricers/
         base_pricer.py          # Abstract BasePricer
         equity_pricer.py        # EquityPricer (Phase 1)
     signals/
         base_signal.py          # BaseSignal abstract class
         sma_crossover.py        # SMA crossover example
-    trades/
-        trade.py                # Trade class
+    trade.py                    # Trade class
     snapshots.py                # Frozen snapshot dataclasses
     backtest_engine.py          # Daily loop orchestrator
     summary.py                  # Thin data coordinator

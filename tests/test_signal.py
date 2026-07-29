@@ -10,7 +10,7 @@ from backtester.signals.sma_crossover import SMACrossoverSignal
 @dataclass
 class MockLegSnapshot:
     ticker: str = "SPY"
-    instrument_type: str = "equity"
+    asset_class: str = "equity"
     size: float = 100.0
     entry_price: float = 450.0
     current_price: float = 455.0

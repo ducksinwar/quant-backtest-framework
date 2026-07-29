@@ -1,5 +1,3 @@
-import uuid
-from dataclasses import dataclass
 from unittest.mock import MagicMock, PropertyMock
 
 import numpy as np
@@ -9,7 +7,7 @@ from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtes
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
 from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider
-from backtester.instruments.instrument import Instrument
+from backtester.instruments import Contract
 from backtester.pricers.equity_pricer import EquityPricer
 from backtester.snapshots import (
     LegSnapshot,
@@ -18,8 +16,8 @@ from backtester.snapshots import (
     TradeRecord,
     TradeSnapshot,
 )
-from backtester.structures.strategy_structure import StrategyStructure
-from backtester.trades.trade import Trade
+from backtester.strategy_structure import StrategyStructure
+from backtester.trade import Trade
 
 
 def _make_mock_signal(orders_lookup=None, requires_portfolio=False, requires_history=False):
@@ -61,7 +59,7 @@ def simple_csv(tmp_path):
 class TestSnapshots:
     def test_leg_snapshot_frozen(self):
         ls = LegSnapshot(
-            ticker="SPY", instrument_type="equity",
+            ticker="SPY", asset_class="equity",
             size=100.0, entry_price=450.0, current_price=455.0,
         )
         with pytest.raises(Exception):
@@ -69,7 +67,7 @@ class TestSnapshots:
 
     def test_portfolio_state_builds_from_trades(self):
         leg = LegSnapshot(
-            ticker="SPY", instrument_type="equity",
+            ticker="SPY", asset_class="equity",
             size=100.0, entry_price=450.0, current_price=455.0,
         )
         structure = StructureSnapshot(legs=(leg,))
@@ -294,7 +292,7 @@ class TestBacktesterPnl:
 
         trade = history[0]
         leg = trade.structure_history[0].legs[0]
-        assert leg.multiplier == 50.0
+        assert leg.contract.multiplier == 50.0
         assert len(leg.daily_total_pnl) > 0
 
     def test_pnl_nan_on_missing_price(self, simple_csv):
@@ -489,21 +487,21 @@ class TestBacktesterDataAvailability:
 
         class GappyPricer:
             def resolve_instrument(self, leg_dict, date):
-                return leg_dict
+                return Contract(ticker=leg_dict.get("ticker", ""), asset_class="equity")
 
-            def price(self, instrument, date):
+            def price(self, contract, date):
                 if date == "2024-01-03":
                     return None
                 return 100.0
 
-            def valuation_data(self, instrument, date, measures):
+            def valuation_data(self, contract, date, measures):
                 return {}
 
-            def pricing_inputs(self, instrument, date):
+            def pricing_inputs(self, contract, date):
                 return {}
 
-            def compute_cost_exposure(self, instrument, date):
-                return {"notional_per_unit": instrument.current_price}
+            def compute_cost_exposure(self, contract, date):
+                return {"notional_per_unit": 100.0}
 
         pricer = GappyPricer()
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
@@ -712,46 +710,6 @@ class TestBacktesterCostExposure:
         leg_id = list(open_event["cost_exposures"].keys())[0]
         assert "notional_per_unit" in open_event["cost_exposures"][leg_id]
 
-    def test_cost_leg_ids_populated(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        data_feed = DataFeed(backend)
-        provider = EquityPriceProvider(data_feed)
-        pricer = EquityPricer(provider)
-        config = AssetClassConfig(pricer=pricer, risk_measures=[])
-
-        orders = {
-            "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
-            ],
-        }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
-        bt_config = BacktestConfig(
-            signal=signal,
-            start_date="2024-01-02",
-            end_date="2024-01-05",
-            asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
-        )
-        bt = Backtester(bt_config, data_feed)
-        result = bt.run()
-        history = list(result.trade_history)
-
-        assert len(history) == 1
-        structure = history[0].structure_history[0]
-        assert len(structure.cost_leg_ids) == 1
-        assert structure.cost_leg_ids[0] == structure.legs[0].leg_id
-
     def test_cost_exposures_on_unwind(self, simple_csv):
         backend = CsvBackend(base_dir=simple_csv)
         data_feed = DataFeed(backend)
@@ -878,6 +836,77 @@ class TestBacktesterRecordPricingInputs:
         assert isinstance(leg.pricing_inputs, dict)
 
 
+class TestBacktesterPricingInputsNanPadding:
+    def test_pricing_inputs_nan_padded_for_missing_keys(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+
+        class GappyInputsPricer:
+            def __init__(self):
+                self._call_count = 0
+
+            def resolve_instrument(self, leg_dict, date):
+                return Contract(
+                    ticker=leg_dict.get("ticker", ""), asset_class="equity"
+                )
+
+            def price(self, contract, date):
+                return 100.0 + self._call_count
+
+            def valuation_data(self, contract, date, measures):
+                return {}
+
+            def pricing_inputs(self, contract, date):
+                self._call_count += 1
+                if self._call_count == 1:
+                    return {"spot": 100.0}
+                if self._call_count == 2:
+                    return {}
+                if self._call_count == 3:
+                    return {"spot": 102.0, "rate": 0.05}
+                if self._call_count == 4:
+                    return {"spot": 104.0}
+                return {}
+
+            def compute_cost_exposure(self, contract, date):
+                return {"notional_per_unit": 100.0}
+
+        pricer = GappyInputsPricer()
+        config = AssetClassConfig(
+            pricer=pricer, risk_measures=[], record_pricing_inputs=True,
+        )
+
+        orders = {
+            "2024-01-02": [{
+                "Action": "NEW", "trade_id": None,
+                "info": [{"structure_id": None, "legs": [
+                    {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                ]}],
+            }],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        bt_config = BacktestConfig(
+            signal=signal, start_date="2024-01-02", end_date="2024-01-08",
+            asset_class_configs={"equity": config}, calendar_ticker="TEST",
+        )
+        bt = Backtester(bt_config, data_feed)
+        result = bt.run()
+        history = list(result.trade_history)
+
+        leg = history[0].structure_history[0].legs[0]
+        spot = leg.pricing_inputs.get("spot", [])
+        assert len(spot) == 4
+        assert spot == pytest.approx(
+            [100.0, float("nan"), 102.0, 104.0], nan_ok=True,
+        )
+
+        rate = leg.pricing_inputs.get("rate", [])
+        assert len(rate) == 4
+        assert rate == pytest.approx(
+            [float("nan"), float("nan"), 0.05, float("nan")], nan_ok=True,
+        )
+
+
 class TestBacktesterOrderRejectionWarning:
     def test_order_rejection_emits_warning(self, simple_csv):
         backend = CsvBackend(base_dir=simple_csv)
@@ -885,21 +914,21 @@ class TestBacktesterOrderRejectionWarning:
 
         class GappyPricer:
             def resolve_instrument(self, leg_dict, date):
-                return leg_dict
+                return Contract(ticker=leg_dict.get("ticker", ""), asset_class="equity")
 
-            def price(self, instrument, date):
+            def price(self, contract, date):
                 if date == "2024-01-03":
                     return None
                 return 100.0
 
-            def valuation_data(self, instrument, date, measures):
+            def valuation_data(self, contract, date, measures):
                 return {}
 
-            def pricing_inputs(self, instrument, date):
+            def pricing_inputs(self, contract, date):
                 return {}
 
-            def compute_cost_exposure(self, instrument, date):
-                return {"notional_per_unit": instrument.current_price}
+            def compute_cost_exposure(self, contract, date):
+                return {"notional_per_unit": 100.0}
 
         pricer = GappyPricer()
         config = AssetClassConfig(pricer=pricer, risk_measures=[])

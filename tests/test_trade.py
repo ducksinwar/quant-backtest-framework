@@ -1,19 +1,17 @@
 import pytest
-from backtester.instruments.instrument import Instrument
-from backtester.structures.strategy_structure import StrategyStructure
-from backtester.trades.trade import Trade
+from backtester.instruments import Contract, LegState
+from backtester.strategy_structure import StrategyStructure
+from backtester.trade import Trade
 
 
 class TestTrade:
     @pytest.fixture
     def leg(self):
-        inst = Instrument(
-            ticker="SPY", asset_class="equity", leg_id="leg_1"
+        contract = Contract(ticker="SPY", asset_class="equity")
+        return LegState(
+            contract=contract, leg_id="leg_1",
+            current_size=100.0, current_price=450.0, entry_price=440.0,
         )
-        inst.current_size = 100.0
-        inst.current_price = 450.0
-        inst.entry_price = 440.0
-        return inst
 
     @pytest.fixture
     def structure(self, leg):
@@ -46,9 +44,11 @@ class TestTrade:
         trade.add_structure(structure, "2024-01-15")
         s2 = StrategyStructure(
             structure_id="struct_2",
-            legs=[Instrument(ticker="SPY", asset_class="equity", leg_id="leg_2")],
+            legs=[LegState(
+                contract=Contract(ticker="SPY", asset_class="equity"),
+                leg_id="leg_2", current_size=50.0,
+            )],
         )
-        s2.legs[0].current_size = 50.0
         trade.add_structure(s2, "2024-02-01")
         assert trade.entry_date == "2024-01-15"
 
@@ -86,9 +86,11 @@ class TestTrade:
         trade.add_structure(structure, "2024-01-15")
         s2 = StrategyStructure(
             structure_id="struct_2",
-            legs=[Instrument(ticker="AAPL", asset_class="equity", leg_id="leg_2")],
+            legs=[LegState(
+                contract=Contract(ticker="AAPL", asset_class="equity"),
+                leg_id="leg_2", current_size=50.0,
+            )],
         )
-        s2.legs[0].current_size = 50.0
         trade.add_structure(s2, "2024-02-01")
         trade.unwind_structure(structure, "2024-02-10", fraction=1.0)
         assert trade.exit_date is None
@@ -129,7 +131,10 @@ class TestTrade:
         trade.add_structure(structure, "2024-01-15")
         new_structure = StrategyStructure(
             structure_id="struct_2",
-            legs=[Instrument(ticker="SPY", asset_class="equity", leg_id="leg_2")],
+            legs=[LegState(
+                contract=Contract(ticker="SPY", asset_class="equity"),
+                leg_id="leg_2",
+            )],
         )
         with pytest.raises(NotImplementedError):
             trade.roll_structure(structure, new_structure, "2024-02-01")

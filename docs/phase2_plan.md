@@ -82,6 +82,9 @@
 ---
 
 ## Phase 2C (Future) – Risk Bridge
-- Enable trivial delta risk measures for equities.
-- Implement `RiskReport` using the new `BaseReport` interface.
-- Demonstrates connection to the Risk pillar without new asset classes.
+- A lightweight, immutable `RiskPosition` dataclass holds only what the risk engine needs: instrument identity (ticker, asset_class, multiplier, currency), net position size, current price, and per‑unit greeks (delta, gamma, etc.).
+- The backtester produces a daily time series of `RiskPosition` objects by netting all `LegState` objects per ticker and fetching greeks from the pricer. For the current equity‑only scope, netting is per ticker. When options or futures are added, the netting key expands to include contract‑specific parameters (strike, expiry) so distinct instruments on the same underlying are not incorrectly aggregated.
+- The same `RiskPosition` class is produced by the live position system from its blotter, so the risk engine consumes both historical simulations and live positions through a single interface.
+- The risk engine never imports `LegState` or other backtester internals — it depends only on `RiskPosition`.
+- Gross trade/leg detail (for margin, funding, and settlement) is a separate concern and is not part of `RiskPosition`; the backtester's event log and trade history already contain sufficient detail for those calculations if needed later.
+- This design ensures the backtester and live system are aligned on risk analytics while keeping each pillar independent.

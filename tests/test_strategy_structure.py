@@ -1,27 +1,19 @@
 import pytest
-from backtester.instruments.instrument import Instrument
-from backtester.structures.strategy_structure import StrategyStructure
+from backtester.instruments import Contract, LegState
+from backtester.strategy_structure import StrategyStructure
 
 
 class TestStrategyStructure:
     @pytest.fixture
     def leg(self):
-        inst = Instrument(ticker="SPY", asset_class="equity", leg_id="leg_1")
-        inst.current_size = 100.0
-        return inst
+        contract = Contract(ticker="SPY", asset_class="equity")
+        return LegState(contract=contract, leg_id="leg_1", current_size=100.0)
 
     @pytest.fixture
     def structure(self, leg):
         return StrategyStructure(
-            structure_id="struct_1", legs=[leg], cost_leg_ids=["leg_1"],
+            structure_id="struct_1", legs=[leg],
         )
-
-    def test_cost_leg_ids_stored(self, structure, leg):
-        assert structure.cost_leg_ids == ["leg_1"]
-
-    def test_cost_leg_ids_defaults_empty(self, leg):
-        s = StrategyStructure(structure_id="s1", legs=[leg])
-        assert s.cost_leg_ids == []
 
     def test_open_records_event(self, structure):
         structure.open("2024-01-15", cost_exposures={"leg_1": {"notional_per_unit": 100.0}})
@@ -31,13 +23,11 @@ class TestStrategyStructure:
         assert event["date"] == "2024-01-15"
         assert event["unit_size_change"] == 100.0
         assert event["cost_exposures"] == {"leg_1": {"notional_per_unit": 100.0}}
-        assert event["cost_leg_id"] == "leg_1"
         assert event["cost_free"] is False
 
     def test_open_without_cost_exposures(self, structure):
         structure.open("2024-01-15")
         assert structure.event_log[0]["cost_exposures"] == {}
-        assert structure.event_log[0]["cost_leg_id"] == "leg_1"
 
     def test_open_sets_original_entry_date(self, structure):
         assert structure.original_entry_date is None

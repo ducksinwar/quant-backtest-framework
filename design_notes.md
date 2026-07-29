@@ -5,7 +5,7 @@
 - [1. Overview](#1-overview)
 - [2. Project structure (planned)](#2-project-structure-planned)
 - [3. Core classes and their responsibilities](#3-core-classes-and-their-responsibilities)
-  - [3.1 Instrument](#31-instrument)
+  - [3.1 Contract and LegState](#31-contract-and-legstate)
   - [3.2 Strategy Structure](#32-strategy-structure-atomic-leg-grouping)
   - [3.3 Trade](#33-trade)
   - [3.4 MarketData & Data Providers](#34-marketdata--data-providers-phase-1--csv-phase-2--sql--multisource)
@@ -62,10 +62,8 @@ backtester/
             vol_surface_provider.py
             forward_curve_provider.py
             corporate_action_provider.py
-    instruments/
-        instrument.py                   # (* Phase 1 *) Instrument dataclass
-    structures/
-        strategy_structure.py           # (* Phase 1 *) StrategyStructure (atomic leg grouping)
+    instruments.py                      # (* Phase 2 *) Contract and LegState
+    strategy_structure.py               # (* Phase 1 *) StrategyStructure (atomic leg grouping)
     pricers/
         base_pricer.py                  # (* Phase 1 *) Abstract BasePricer
         equity_pricer.py                # (* Phase 1 *) EquityPricer
@@ -75,8 +73,7 @@ backtester/
     signals/
         base_signal.py                  # (* Phase 1 *) BaseSignal abstract class
         sma_crossover.py                # (* Phase 1 *) SMA crossover example
-    trades/
-        trade.py                        # (* Phase 1 *) Trade class
+    trade.py                            # (* Phase 1 *) Trade class
     backtest_engine.py                  # (* Phase 1 *) Backtester daily loop
     summary.py                          # (* Phase 1 *) Summary (thin data coordinator)
     cost_model.py                       # (* Phase 1 *) CostModel (includes EquityCostCalculator)
@@ -106,18 +103,51 @@ design_notes.md                         # This file
 
 ## 3. Core classes and their responsibilities
 
-### 3.1 Instrument
+### 3.1 Contract and LegState
 
-- A dataclass with common fields:
-  - `ticker: str`
-  - `asset_class: str`
-  - `multiplier: float` (default 1.0)
-  - `currency: str` (default `'USD'`) – the currency in which the instrument’s P&L is computed.  
-    For USD‑cross FX products this is always `'USD'`, even if the notional is in a foreign currency.  
-    This field is used by the summary module to decide whether FX conversion is needed (see Section 3.10).
-  - `tags: list[str]` (optional)
-  - `leg_id: str` – a globally unique identifier for this leg instance, assigned by the backtester at creation. Used to match cost series and risk data across different parts of the system (e.g., `CostModel` output to `Summary`).
-  - `params: dict` – a dictionary of **asset‑specific parameters** needed for pricing and risk. The backtester never inspects this dictionary; it is opaque to the backtester and only interpreted by the pricer.
+The former `Instrument` class has been split into two types:
+
+**`Contract`** – an immutable (frozen) dataclass capturing the static
+identity of a financial instrument (`ticker`, `asset_class`, `multiplier`,
+`currency`, `params`).  Pricers accept a `Contract`, never mutable
+position state.  The freeze is shallow; callers must not mutate `params`.
+The set of infrastructure keys excluded from `params` (`_INFRA_KEYS`) now
+lives in `BasePricer._build_contract()`.
+
+**Forward note:** The current `asset_class` field uses compound strings
+(e.g. `"equity_option"`) that encode both the broad asset class and the
+instrument type.  A future task will decompose this into two fields —
+`asset_class` (broad: `"equity"`, `"rate"`, `"fx"`) and `instrument_type`
+(specific: `"option"`, `"future"`, `"swap"`) — to enable cross-instrument
+risk aggregation in the summary layer.
+
+**`LegState`** – a mutable dataclass holding all position-level data for
+a single leg (`contract`, `leg_id`, `current_price`, `current_size`,
+`entry_price`, `daily_total_pnl`, `valuation_data`, `pricing_inputs`,
+`cost_leg`, `tags`).  The backtester constructs and
+mutates `LegState` directly.
+
+The fields below describe the position-level data now held by `LegState`:
+  - `contract: Contract` – reference to the immutable instrument identity.
+  - `leg_id: str` – a globally unique identifier for this leg instance, assigned
+    by the backtester at creation. Used to match cost series and risk data across
+    different parts of the system (e.g., `CostModel` output to `Summary`).
+  - `current_price: float` – the most recent valid mark‑to‑market price.
+  - `current_size: float` – the number of units currently open.
+  - `entry_price: float` – the weighted‑average entry price of the open position.
+  - `daily_total_pnl: list[float]` – daily total P&L changes, appended by the
+    backtester.
+  - `valuation_data: dict[str, list[float]]` – per‑measure time series for
+    P&L decomposition and risk attribution.
+  - `pricing_inputs: dict[str, list[float]]` – per‑key time series of raw
+    market data used to value this leg (populated when `record_pricing_inputs`
+    is enabled).
+  - `cost_leg: bool` – whether this leg bears transaction costs.
+  - `tags: list[str] | None` — optional operational labels assigned by the
+    strategy (e.g. strategy name, asset sub‑class).  Tags are not part of
+    instrument identity; they belong on the mutable `LegState`, not on the
+    immutable `Contract`.  Used by the summary/reporting layer for
+    filtering and grouping.
 
 - **`params` content by asset class (examples):**
   - Equity: `{}` (empty – ticker is sufficient).
@@ -127,7 +157,7 @@ design_notes.md                         # This file
 - The `params` dictionary is populated from the `TargetTrade` leg dictionary.  
   The following keys are treated as **common/infrastructure** and are **never** placed in `params`:
   - `ticker`, `size`, `multiplier`, `currency`, `asset_class`, `tags` – standard instrument‑level fields.
-  - `structure_id`, `leg_id`, `cost_leg` – internal identifiers and flags used by the backtester; they are consumed during trade construction and discarded from the final `Instrument`.
+  - `structure_id`, `leg_id`, `cost_leg` – internal identifiers and flags used by the backtester; they are consumed during trade construction and filtered by `BasePricer._build_contract()`.
   All other keys from the leg dict are automatically stored in `params`.
 - The Instrument is a **pure data holder** for leg‑level P&L and risk. All P&L calculations are performed by the backtester (see Section 3.9). The pricer reads `params` to know what it is pricing.
 
@@ -173,11 +203,11 @@ design_notes.md                         # This file
 
 ### 3.2 Strategy Structure (atomic leg grouping)
 
-A `StrategyStructure` groups a set of `Instrument` legs that must always be opened, rolled, and unwound together as a single unit.  
+A `StrategyStructure` groups a set of `LegState` legs that must always be opened, rolled, and unwound together as a single unit.  
 It is the natural entity for cost quotation, execution, and rolling.
 
 - **Atomic design:**  
-  - `legs` – a fixed list of `Instrument` instances.  
+  - `legs` – a fixed list of `LegState` instances.  
   - Leg sizes move in lockstep: any size‑changing operation (open, add, unwind, roll) scales all legs proportionally. The relative sizes of the legs are constant throughout the structure’s life.
   - No separate active/history leg lists – the whole structure is always opened or closed together.
   - Partial unwind is intended solely for risk‑management adjustments (e.g., delta hedging, dynamic hedge rebalancing). Strategy‑driven scaling‑out is always performed by closing whole structures.
@@ -223,7 +253,7 @@ It is the natural entity for cost quotation, execution, and rolling.
   - User‑defined tags: Structures can carry an optional list of string tags. Tags are copied from the `TargetStructure` when the structure is created. Tags are completely ignored by the backtester and cost model; they exist solely for the summary module.
 
 - **Phase 1 default and limitations:**  
-  In Phase 1, every `StrategyStructure` contains exactly one `Instrument` (an equity). This abstraction adds zero overhead but provides the natural upgrade path for multi‑leg, multi‑currency strategies. `open`, `add_size`, and `unwind` (full and partial) are fully implemented; `roll()` is stubbed (raises `NotImplementedError`) and is scheduled for a later phase (see §5).
+  In Phase 1, every `StrategyStructure` contains exactly one `LegState` (an equity leg). This abstraction adds zero overhead but provides the natural upgrade path for multi‑leg, multi‑currency strategies. `open`, `add_size`, and `unwind` (full and partial) are fully implemented; `roll()` is stubbed (raises `NotImplementedError`) and is scheduled for a later phase (see §5).
 
 ### 3.3 Trade
 
@@ -539,7 +569,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
     - `pricer` – the `BasePricer` instance responsible for pricing all instruments of this asset class.
     - `risk_measures` – a list of PnL decomposition/risk measures to compute for all instruments of this type (e.g., `['mtm','carry']` for FX forwards, `['delta','gamma','vega']` for options). An empty list means no decomposition.
     - `pnl_calculator` – an **optional** instance of `AssetPnlCalculator` (see Section 3.12). Required when `risk_measures` is non‑empty; the backtester delegates to this calculator for all component‑PnL computations. If `None` or absent, no decomposition is performed.
-    - `record_pricing_inputs` – an optional boolean (default `False`). If `True`, the pricer is instructed to return the raw pricing inputs (e.g., implied vol, forward price) that were used on each date. These are stored on `Instrument.pricing_inputs`.
+    - `record_pricing_inputs` – an optional boolean (default `False`). If `True`, the pricer is instructed to return the raw pricing inputs (e.g., implied vol, forward price) that were used on each date. These are stored on `LegState.pricing_inputs`.
 
 - **No pre‑defined instrument universe.** The backtester does not hold a list of instruments ahead of time.  
   Instruments are created dynamically by the signal when it returns `TargetTrade` dictionaries. Each `TargetTrade` specifies the `Instrument` (ticker, asset class, multiplier, etc.) that the backtester uses to open a new `Trade`.  
@@ -568,13 +598,18 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
            - Append `daily_pnl` to the leg’s `daily_total_pnl` list.
            - Update `leg.current_price = price_today`.
            - **If decomposition is configured** (the asset class’s `AssetClassConfig` includes both `risk_measures` and a `pnl_calculator`):
-               - Call `pricer.valuation_data(instrument, date=T, risk_measures)` to get today’s building‑block numbers.
-               - From the Instrument’s valuation‑data time series, retrieve the most recent **non‑NaN** entry for each required measure (this gives the T‑1 values).
+               - Call `pricer.valuation_data(leg_state.contract, date=T, risk_measures)` to get today’s building‑block numbers.
+               - From the leg’s valuation‑data time series, retrieve the most recent **non‑NaN** entry for each required measure (this gives the T‑1 values).
                - Pass the T‑1 and T data to the calculator:  
-                 `component_pnls = pnl_calculator.compute_component_pnl(instrument, prev_data, curr_data, risk_measures)`.
-               - Append each returned value to the corresponding component‑PnL list on the Instrument (e.g., `instrument.delta_pnl.append(...)`).
-           - **If `record_pricing_inputs` is enabled**, call `pricer.pricing_inputs(instrument, date=T)`.  
-             If the result is not `None`, append its keys and values to the leg’s `pricing_inputs` dictionary time series; if the price had been `None`, append `NaN` for each key to keep the series aligned.
+                 `component_pnls = pnl_calculator.compute_component_pnl(leg_state, prev_data, curr_data, risk_measures)`.
+               - Append each returned value to the corresponding component‑PnL list on the `LegState` (e.g., `leg_state.delta_pnl.append(...)`).
+           - **If `record_pricing_inputs` is enabled** (unconditional block after the
+             price‑available/missing branch): call `pricer.pricing_inputs(contract, date=T)`
+             every day.  Append each returned key’s value to the leg’s `pricing_inputs`
+             time series; for any already‑known key absent from today’s snapshot, append
+             `NaN` to keep all lists aligned.  If a key appears for the first time
+             mid‑backtest, backfill `NaN` for all prior days before appending today’s
+             value.
 
   2. **Request and execute today’s orders:**  
       *(Phase 1:* calls `signal.generate_signals()` directly. *Phase 2:* calls signal to get alpha intents, then passes them through the OrderGenerator (§3.8) to obtain `TargetTrade` orders.*)
@@ -1127,7 +1162,7 @@ The framework supports decomposing daily PnL into user‑specified risk factors 
       @abstractmethod
       def compute_component_pnl(
           self,
-          instrument: Instrument,
+          leg_state: LegState,
           prev_valuation_data: dict[str, float],
           current_valuation_data: dict[str, float],
           risk_measures: list[str]
@@ -1143,13 +1178,13 @@ The framework supports decomposing daily PnL into user‑specified risk factors 
 **Integration with the backtester:**
 - The `AssetClassConfig` contains an optional `pnl_calculator` field. When a strategy requires decomposition, the user supplies the appropriate calculator for that asset class.
 - During the daily PnL step (step 1), the backtester:
-  1. Fetches `valuation_data` from the pricer for the current date T and retrieves the stored T‑1 data from the Instrument.
-  2. Calls `pnl_calculator.compute_component_pnl(instrument, prev_data, curr_data, risk_measures)`.
-  3. Appends the returned values to the Instrument’s component PnL lists.
+  1. Fetches `valuation_data` from the pricer for the current date T and retrieves the stored T‑1 data from the leg.
+  2. Calls `pnl_calculator.compute_component_pnl(leg_state, prev_data, curr_data, risk_measures)`.
+  3. Appends the returned values to the leg’s component PnL lists.
 - This entirely decouples the backtester from the asset‑specific math, so new asset classes can be added with zero changes to the backtester loop.
 
 **Extensibility:**
-- To add a new decomposition (e.g., a new risk factor), you only need to update the calculator for that asset class and extend the `risk_measures` list in the configuration. The backtester and the Instrument’s storage remain unchanged.
+- To add a new decomposition (e.g., a new risk factor), you only need to update the calculator for that asset class and extend the `risk_measures` list in the configuration. The backtester and the `LegState`’s storage remain unchanged.
 - For asset classes with no decomposition (Phase 1 equities), the `pnl_calculator` is `None` and no extra work is performed.
 
 ### 3.13 Cost Model (transaction cost handling)
@@ -1187,7 +1222,6 @@ class BaseCostCalculator(ABC):
           - "unit_size_change": float
           - "cost_exposures": dict[str, dict]  # leg_id -> per-unit metrics
           - "cost_free": bool
-          - "cost_leg_id": str  (retained for readability)
 
         The calculator:
           1. Reads event["cost_exposures"][leg_id] to get the per-unit metrics.
@@ -1281,11 +1315,12 @@ Trade
 └── structure_history: list[StrategyStructure]
 
 StrategyStructure
-├── legs: list[Instrument]
+├── legs: list[LegState]
 └── event_log: list[CostEvent]
 
-Instrument
-└── per‑leg PnL, risk
+LegState (mutable)             Contract (frozen)
+├── per‑leg PnL, risk          └── immutable instrument
+└── ref → Contract                  identity (ticker, ...)
 ```
 
 ## 4. Validation framework (to be built after core backtester)

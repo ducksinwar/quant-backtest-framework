@@ -53,8 +53,8 @@ class Summary:
         rows = []
         for trade in trade_history:
             for structure in trade.structure_history:
-                for leg in structure.legs:
-                    pnl_list = leg.daily_total_pnl
+                for leg_state in structure.legs:
+                    pnl_list = leg_state.daily_total_pnl
                     if len(pnl_list) > 0:
                         entry_date = structure.original_entry_date
                         if not entry_date:
@@ -62,7 +62,7 @@ class Summary:
                                 f"Structure {structure.structure_id} "
                                 f"(trade {trade.trade_id}) is missing "
                                 f"original_entry_date; cannot align leg "
-                                f"{leg.leg_id} P&L."
+                                f"{leg_state.leg_id} P&L."
                             )
                         entry_idx = trading_days.index(entry_date)
                         pnl_start = entry_idx + 1
@@ -76,7 +76,7 @@ class Summary:
 
                         if len(pnl_dates) != len(pnl_list):
                             raise ValueError(
-                                f"P&L length mismatch for leg {leg.leg_id} "
+                                f"P&L length mismatch for leg {leg_state.leg_id} "
                                 f"(trade {trade.trade_id}, structure "
                                 f"{structure.structure_id}): expected "
                                 f"{len(pnl_dates)} day(s) "
@@ -94,7 +94,7 @@ class Summary:
                     else:
                         gross = pd.Series(pnl_list, dtype=float)
 
-                    cost_series = cost_map.get(leg.leg_id, pd.Series(dtype=float))
+                    cost_series = cost_map.get(leg_state.leg_id, pd.Series(dtype=float))
                     cost_aligned = cost_series.reindex(
                         gross.index, fill_value=0.0,
                     )
@@ -106,14 +106,32 @@ class Summary:
                         "trade_id": trade.trade_id,
                         "structure": structure,
                         "structure_id": structure.structure_id,
-                        "leg": leg,
-                        "leg_id": leg.leg_id,
-                        "ticker": leg.ticker,
-                        "currency": leg.currency,
+                        "leg": leg_state,
+                        "leg_id": leg_state.leg_id,
+                        "ticker": leg_state.contract.ticker,
+                        "currency": leg_state.contract.currency,
+                        "multiplier": leg_state.contract.multiplier,
+                        "tags": leg_state.tags,
+                        "params": leg_state.contract.params,
                         "gross": gross,
                         "cost": cost_aligned,
                         "net": net,
                     })
+                    for measure, ts_list in leg_state.valuation_data.items():
+                        key = f"{measure}_ts"
+                        if len(ts_list) > 0:
+                            rows[-1][key] = pd.Series(
+                                ts_list, index=gross.index, dtype=float,
+                            )
+                        else:
+                            rows[-1][key] = pd.Series(ts_list, dtype=float)
+                    for key, ts_list in leg_state.pricing_inputs.items():
+                        if len(ts_list) > 0:
+                            rows[-1][key] = pd.Series(
+                                ts_list, index=gross.index, dtype=float,
+                            )
+                        else:
+                            rows[-1][key] = pd.Series(ts_list, dtype=float)
         return rows
 
     @staticmethod

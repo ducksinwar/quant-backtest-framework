@@ -316,3 +316,379 @@ None — docs-only change. All 146 tests pass.
 ```
 docs: fix stale depth_pct -> drawdown_pct in design notes §3.10
 ```
+
+---
+
+## 2026-07-28 – Task 2: Contract / LegState split + remove cost_leg_id
+
+### Prompt
+Split the monolithic `Instrument` class into an immutable `Contract`
+and a mutable `LegState`, update all consumers, remove the legacy
+`cost_leg_id` field from the event log, and clean up the dead
+`cost_leg_ids` field from `StrategyStructure`.
+
+### Changes applied
+
+- **Deleted** `backtester/instruments/instrument.py` and
+  `backtester/instruments/__init__.py`.
+- **Created** `backtester/instruments.py` with `Contract` (frozen
+  dataclass) and `LegState` (mutable dataclass) including a new
+  `pricing_inputs_history` time‑series field.
+- **`BasePricer`** gains `_INFRA_KEYS` and `_build_contract()`;
+  all abstract method signatures accept `Contract`.
+- **`EquityPricer`** updated to use `contract.ticker`; `compute_cost_exposure`
+  now fetches the market price from its provider, not from position state.
+- **`Backtester`** updated end‑to‑end: `_compute_pnl_for_date`,
+  `_compute_risk_for_date`, `_check_data_available`, `_build_portfolio_state`,
+  `_compute_cost_exposures`, `_build_structure_from_info`, and
+  `_resolve_and_price_leg` all use `LegState`/`Contract`.  The
+  `_record_pricing_inputs_nan` method and `_collect_cost_leg_ids` are
+  deleted.  `_INFRA_KEYS` is removed from the backtester.
+- **`_compute_pnl_for_date`** now uses `leg_state.pricing_inputs_history`:
+  on valid days, appends each key's value from the snapshot and `NaN`
+  for already‑known keys absent from the snapshot; on `None`‑price days,
+  appends `NaN` for all known keys.
+- **`StrategyStructure`** no longer records `cost_leg_id` in event log
+  entries.  The `_cost_leg_id_from_exposures` helper and the
+  `cost_leg_ids` field/parameter are removed.
+- **`Snapshots.LegSnapshot`**: `instrument_type` → `asset_class`.
+- **`Summary._extract_leg_data`**: reads explicit fields from
+  `LegState` and `contract`; valuation‑data and pricing‑input‑history
+  time series are built as `pd.Series` aligned to the P&L index.
+  `multiplier`, `tags`, and `params` are now explicit top‑level keys
+  in the leg‑data dict.
+- **`CostModel`**: `leg.asset_class` → `leg.contract.asset_class`.
+- **All 8 test files** updated to import `Contract`/`LegState`,
+  construct them correctly, and remove `cost_leg_ids` arguments.
+  New test added: `test_compute_cost_exposure_fetches_from_provider_not_state`.
+- **`design_notes.md`** and **`README.md`** updated.
+
+### Key design notes
+- `size` is now correctly excluded from `Contract.params` (never leaked).
+- `roll()` is stubbed (raises `NotImplementedError`); no event dict to update.
+- `_on_order` and `_add_leg_to_structure` do not exist in the current codebase.
+- Single‑leg cost‑exposure fallback in `_compute_cost_exposures` preserved
+  with a comment explaining the default behavior.
+- `_check_data_available` now builds a lightweight `Contract` via
+  `resolve_instrument` (minor behavioral change, no impact).
+- All 150 tests pass on the first run (only 2 snapshots/assertion fixes
+  needed — `LegSnapshot` vs `LegState` attribute access, and
+  `pricing_inputs_history` being empty when the pricer returns no inputs).
+- **Breaking change** for any serialized Phase 1 `trade_history` — old
+  `cost_leg_id` keys may remain in event dicts but are ignored by the
+  `CostModel`.
+- **Forward note**: future task will decompose `asset_class` into
+  broad `asset_class` + `instrument_type`.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: split Instrument into Contract + LegState; remove cost_leg_id
+
+- Introduce frozen Contract dataclass and mutable LegState dataclass
+  in backtester/instruments.py, replacing the monolithic Instrument
+- Pricers accept Contract (never LegState); compute_cost_exposure
+  fetches market price from provider, not position state
+- _INFRA_KEYS moves from Backtester to BasePricer._build_contract()
+- Remove cost_leg_id from event log entries in StrategyStructure;
+  delete _cost_leg_id_from_exposures helper
+- Remove dead cost_leg_ids field/param from StrategyStructure; delete
+  _collect_cost_leg_ids from Backtester
+- Replace dynamic setattr (_pricing_input_keys) with proper
+  pricing_inputs_history dict on LegState; _compute_pnl_for_date
+  appends NaN for missing keys to keep series aligned
+- snapshots.LegSnapshot: instrument_type -> asset_class
+- Summary: valuation_data and pricing_inputs_history time series built
+  as pd.Series in leg-data dicts; multiplier/tags/params are explicit
+  top-level keys
+- Add test for compute_cost_exposure fetching from provider not state
+- Update all 8 test files, design_notes.md §3.1 (rewritten), and README.md
+- All 150 tests pass
+```
+
+---
+
+## 2026-07-29 -- Phase 2C Risk Bridge design: RiskPosition spec
+
+### Prompt
+Update the Phase 2C placeholder in phase2_plan.md with a detailed design
+description for the Risk Bridge, capturing the `RiskPosition` dataclass and
+its role as the single interface between the backtester, live system, and
+risk engine.
+
+### Changes applied
+
+- **`docs/phase2_plan.md`** — Phase 2C section replaced old placeholder
+  bullet points with six detailed bullets describing:
+  - `RiskPosition` dataclass fields (instrument identity, net size,
+    current price, per‑unit greeks).
+  - Backtester produces a daily time series by netting `LegState` per
+    ticker (equity scope); netting key expands to contract‑specific
+    parameters (strike, expiry) when options/futures are added.
+  - Live position system produces the same `RiskPosition` objects from
+    its blotter, giving the risk engine a single unified interface.
+  - The risk engine never imports `LegState` or backtester internals —
+    it depends only on `RiskPosition`.
+  - Gross trade/leg detail is excluded from `RiskPosition` (the event
+    log and trade history already cover margin/funding/settlement).
+  - Backtester and live system remain independent pillars aligned on
+    risk analytics.
+
+### Manual changes
+- Appended this worklog entry.
+
+### Suggested commit message
+```
+docs: flesh out Phase 2C Risk Bridge design with RiskPosition spec
+```
+
+---
+
+## 2026-07-29 -- Move `tags` from `Contract` to `LegState`
+
+### Prompt
+Tags are operational labels assigned by the strategy, not instrument identity.
+Move `tags` from the immutable `Contract` to the mutable `LegState`.
+
+### Changes applied
+
+- **`backtester/instruments.py`** -- Removed `tags: list[str] | None = None`
+  from `Contract`; added `tags: list[str] | None = None` to `LegState` with
+  a docstring noting that tags are optional operational labels, not part of
+  instrument identity.
+- **`backtester/pricers/base_pricer.py`** -- Removed `tags=resolved.get("tags")`
+  from `_build_contract`.  `"tags"` remains in `_INFRA_KEYS` so the key is
+  still excluded from `Contract.params`.
+- **`backtester/backtest_engine.py`** -- `_resolve_and_price_leg` now passes
+  `tags=leg_dict.get("tags")` when constructing `LegState`.
+- **`backtester/summary.py`** -- `_extract_leg_data` reads
+  `leg_state.tags` instead of `leg_state.contract.tags`.
+- **`tests/test_instrument.py`** -- Removed `tags` assertions from
+  `TestContract` (`test_default_values`, `test_custom_values`,
+  `test_none_tags_allowed` deleted).  Added `assert ls.tags is None` to
+  `TestLegState.test_requires_contract`, `tags=["alpha", "momentum"]` to
+  `test_custom_values`, and a new `test_tags_default_none`.
+- **`design_notes.md` S3.1** -- Removed `tags` from the `Contract` field
+  list; added `tags` to the `LegState` field list with description.
+
+### Test impact
+All 150 tests pass.  No test file constructs `Contract` with `tags=...`
+outside of `test_instrument.py` (which is updated).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: move tags from Contract to LegState
+
+Tags are operational labels assigned by the strategy (e.g. strategy name,
+asset sub-class), not part of instrument identity.  Move them from the
+immutable Contract to the mutable LegState.
+
+- Remove tags field from frozen Contract dataclass
+- Add tags field to mutable LegState dataclass with docstring
+- Remove tags arg from BasePricer._build_contract() (keep in _INFRA_KEYS)
+- Read leg_dict tags in Backtester._resolve_and_price_leg() for LegState
+- Read leg_state.tags in Summary._extract_leg_data()
+- Add tags tests to TestLegState; remove tags assertions from TestContract
+- Update design_notes.md S3.1 field lists
+- All 150 tests pass
+```
+
+---
+
+## 2026-07-29 -- Clean up pricing‑input fields on LegState
+
+### Prompt
+Remove the redundant `pricing_inputs: dict[str, float]` snapshot field from
+`LegState`, rename `pricing_inputs_history` to `pricing_inputs`, and use a
+local `today` variable in the backtester for the day's values.  Pure cleanup,
+no behaviour changes.
+
+### Changes applied
+
+- **`backtester/instruments.py`** — Removed `pricing_inputs: dict[str, float]`
+  field; renamed `pricing_inputs_history: dict[str, list[float]]` to
+  `pricing_inputs: dict[str, list[float]]`.
+- **`backtester/backtest_engine.py`** — In `_compute_pnl_for_date`:
+  - Replaced `leg_state.pricing_inputs` snapshot with local `today` variable.
+  - On valid days, appends values from `today` to `leg_state.pricing_inputs`
+    and appends `NaN` for known keys absent from `today`.
+  - On missing days, simplified to a single loop over `leg_state.pricing_inputs`
+    appending `NaN` (removed snapshot clearing step).
+  - All `pricing_inputs_history` references → `pricing_inputs`.
+- **`backtester/summary.py`** — `pricing_inputs_history.items()` →
+  `pricing_inputs.items()`.
+- **`tests/test_instrument.py`** — Removed `pricing_inputs_history` assertion
+  from `test_requires_contract`; updated `test_pricing_inputs_default_factory_isolates_instances`
+  to pass `{"iv": [22.0]}` (a list); renamed `test_pricing_inputs_history_default_factory_isolates_instances`
+  → `test_pricing_inputs_setdefault_isolates_instances` and `test_pricing_inputs_history_append`
+  → `test_pricing_inputs_append`; all field references updated.
+- **`tests/test_backtester.py`** — Replaced `pricing_inputs_history` with
+  `pricing_inputs` in both `TestBacktesterRecordPricingInputs` tests; removed
+  redundant `isinstance` assertions on the old history field.
+
+### Manual changes
+- Remove unused import in backtest_engine
+
+### Suggested commit message
+```
+refactor: remove pricing_inputs snapshot; rename history to pricing_inputs
+
+- Remove dead pricing_inputs: dict[str, float] snapshot field from LegState
+- Rename pricing_inputs_history -> pricing_inputs: dict[str, list[float]]
+- Use local today variable in _compute_pnl_for_date instead of snapshot
+- Simplify missing-day branch to single loop (no snapshot to clear)
+- Update Summary to read leg_state.pricing_inputs directly
+- Rename/update 4 tests in test_instrument.py, 2 tests in test_backtester.py
+- All 150 tests pass
+```
+
+---
+
+## 2026-07-29 -- Fix partial/missing data recording in backtest engine
+
+### Prompt
+Fix two related problems in `_compute_pnl_for_date` and `_compute_risk_for_date`
+where partial or missing pricing/valuation data is not recorded faithfully,
+causing series misalignment and loss of diagnostic information.
+
+### Changes applied
+
+- **`backtester/backtest_engine.py` — `_compute_pnl_for_date`**:
+  - Replaced `continue`-based early exit with `if/else` so pricing-input
+    recording runs unconditionally regardless of price availability.
+  - The missing-price branch now only appends `NaN` to `daily_total_pnl`;
+    the `else` branch handles P&L computation and `current_price` update.
+  - After the `if/else` block, a single unconditional block calls
+    `pricer.pricing_inputs()` every day, appends returned values, and
+    backfills `NaN` for any already-known key missing from today's snapshot.
+    This preserves partial pricing inputs (e.g. spot + rate valid, IV missing)
+    instead of blindly padding all known keys with `NaN`.
+
+- **`backtester/backtest_engine.py` — `_compute_risk_for_date`**:
+  - Replaced the `if vd is not None:` guard with the same three-step pattern:
+    call `valuation_data()`, append present values, backfill `NaN` for
+    missing keys.  This ensures valuation-data time series stay aligned with
+    `daily_total_pnl` even when the pricer returns `None`.
+
+Both changes follow the same call → append → backfill pattern to keep all
+per-leg time series length-aligned.
+
+### Test impact
+All 150 tests pass without modification.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+fix: record pricing inputs and valuation data faithfully on partial/missing data
+
+- Hoist pricing-input recording out of price-available branch so it runs
+  unconditionally every day; preserve partial data when pricer returns
+  some but not all inputs
+- Replace valuation_data None guard with call → append → NaN-backfill
+  pattern to keep valuation series aligned with daily_total_pnl
+- All 150 tests pass
+```
+
+---
+
+## 2026-07-29 -- Flatten project structure: remove empty subdirectories
+
+### Prompt
+Housekeeping: move single-file subdirectories into flat files to avoid
+misleading directory structure. `strategy_structure.py` and `trade.py` were the
+only files in `structures/` and `trades/` respectively.
+
+### Changes applied
+
+- **Moved** `backtester/structures/strategy_structure.py` → `backtester/strategy_structure.py`
+- **Moved** `backtester/trades/trade.py` → `backtester/trade.py`
+- **Deleted** empty `backtester/structures/` and `backtester/trades/` directories
+  (including `__init__.py` and `__pycache__/`)
+- **Updated imports** in 6 files:
+  - `backtester/backtest_engine.py`
+  - `tests/test_backtester.py`
+  - `tests/test_strategy_structure.py`
+  - `tests/test_trade.py`
+  - `tests/test_cost_model.py`
+  - `tests/test_summary.py`
+- **Updated** `design_notes.md` §2 project structure tree
+- **Updated** `README.md` project structure tree
+- All 150 tests pass
+
+### Suggested commit message
+```
+refactor: flatten structures/ and trades/ into backtester/ root
+
+Move strategy_structure.py and trade.py up one level since they were
+the only files in their respective otherwise-empty directories.
+Update all imports and documentation to match.
+```
+
+---
+
+## 2026-07-29 -- Post‑Task 2 code-review fixes
+
+### Prompt
+Apply eight fixes identified in the Task 2 code review: remove two unused
+imports, correct four documentation inaccuracies in design_notes.md, fix
+retroactive NaN-padding for newly-appearing keys in pricing_inputs and
+valuation_data, and add a test for pricing-inputs subset-key NaN-padding.
+
+### Changes applied
+
+- **`tests/test_pricers.py`** (M‑1) — Removed unused `LegState` import.
+- **`tests/test_backtester.py`** (m‑2, m‑5) — Removed unused `LegState` import.
+  Added `TestBacktesterPricingInputsNanPadding` class verifying that keys
+  absent from a day's `pricing_inputs` snapshot receive `NaN`, present keys
+  are recorded normally, and new-mid-backtest keys are backfilled with `NaN`
+  for all prior days.
+- **`backtester/backtest_engine.py`** — Retroactive-padding fix: when a key
+  appears for the first time in `pricing_inputs` or `valuation_data`, backfill
+  `NaN` for all prior days (using `max(0, len(daily_total_pnl) - 1)`) before
+  appending today's value.  Applied to both `_compute_pnl_for_date` and
+  `_compute_risk_for_date`.
+- **`design_notes.md`** — Six corrections:
+  - §3.1: replaced stale `pricing_inputs_history` with `pricing_inputs` in
+    the LegState intro sentence.
+  - §3.1 (M‑3): corrected the `LegState` field listing — removed `ticker`,
+    `asset_class`, `multiplier`, `currency`, `params` (now on `Contract`);
+    listed actual `LegState` fields (`contract`, `current_price`, etc.).
+  - §3.9 (M‑2): replaced inaccurate pricing-inputs description with the
+    actual behaviour (call unconditionally, append returned values,
+    NaN-backfill missing keys; backfill prior days when key first appears).
+  - §3.2, §3.9, §3.12, §3.15 (M‑4): replaced stale `Instrument` references
+    with `LegState`/`Contract`.
+  - §3.13 (M‑6): removed the `"cost_leg_id"` line from the `compute_cost`
+    event-dict description.
+  - §3.15: updated architecture tree to show `LegState`/`Contract` instead
+    of `Instrument`.
+
+### Test impact
+All 130 tests pass (128 existing + 1 new NaN-padding test + 1 from prior
+work).  The new test uses a `GappyInputsPricer` that returns `{"spot": ...}`
+on some days and `{}` on others, verifying that `NaN` is correctly appended
+for missing keys and that a mid-backtest `"rate"` key is backfilled with
+`NaN` for prior days.
+
+### Suggested commit message
+```
+fix: post-Task 2 review — unused imports, doc corrections, NaN-padding
+
+- Remove unused LegState import from tests/test_pricers.py and
+  tests/test_backtester.py
+- Fix design_notes.md §3.1 LegState field listing, §3.9 pricing-inputs
+  description, §3.2/§3.9/§3.12/§3.15 Instrument→LegState references,
+  §3.13 cost_leg_id removal, and stale pricing_inputs_history name
+- Add retroactive NaN-padding in backtest_engine.py for keys that first
+  appear mid-backtest in pricing_inputs and valuation_data
+- Add TestBacktesterPricingInputsNanPadding verifying subset-key
+  NaN-padding and mid-run key backfilling
+- All 130 tests pass
+```

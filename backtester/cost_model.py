@@ -41,7 +41,7 @@ class CostModel:
                         if leg is None:
                             continue
 
-                        asset_class = leg.asset_class
+                        asset_class = leg.contract.asset_class
                         calculator = self._calculators.get(asset_class)
                         if calculator is None:
                             continue

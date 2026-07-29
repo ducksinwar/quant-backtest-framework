@@ -2,21 +2,22 @@ import numpy as np
 import pandas as pd
 import pytest
 from backtester.cost_model import CostModel, EquityCostCalculator
-from backtester.instruments.instrument import Instrument
-from backtester.structures.strategy_structure import StrategyStructure
+from backtester.instruments import Contract, LegState
+from backtester.strategy_structure import StrategyStructure
 from backtester.summary import Summary
-from backtester.trades.trade import Trade
+from backtester.trade import Trade
 
 
-def _make_trade(trade_id, entry_date, exit_date, leg_id, pnl_list, tags=None):
-    leg = Instrument(ticker="SPY", asset_class="equity", leg_id=leg_id)
+def _make_trade(trade_id, entry_date, exit_date, leg_id, pnl_list, tags=None, ticker="SPY"):
+    contract = Contract(ticker=ticker, asset_class="equity")
+    leg = LegState(
+        contract=contract, leg_id=leg_id,
+        current_size=100.0, entry_price=450.0, current_price=455.0,
+    )
     leg.daily_total_pnl = pnl_list
-    leg.current_size = 100.0
-    leg.entry_price = 450.0
-    leg.current_price = 455.0
 
     structure = StrategyStructure(
-        structure_id=f"s_{trade_id}", legs=[leg], cost_leg_ids=[leg_id],
+        structure_id=f"s_{trade_id}", legs=[leg],
     )
     structure.original_entry_date = entry_date
     structure.open(entry_date)
@@ -324,9 +325,7 @@ class TestSummaryByUnderlying:
         leg1_id = "leg_001"
         leg2_id = "leg_002"
 
-        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, -5.0, 20.0])
-        # Change ticker for second leg
-        l1.ticker = "AAPL"
+        t1, l1 = _make_trade("t1", "2024-01-02", None, leg1_id, [10.0, -5.0, 20.0], ticker="AAPL")
 
         t2, l2 = _make_trade("t2", "2024-01-02", None, leg2_id, [5.0, 10.0, -3.0])
         # SPY is default

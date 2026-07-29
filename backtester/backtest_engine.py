@@ -3,7 +3,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Tuple
 
-from backtester.instruments.instrument import Instrument
+from backtester.instruments import LegState
 from backtester.snapshots import (
     LegSnapshot,
     PortfolioState,
@@ -11,21 +11,8 @@ from backtester.snapshots import (
     TradeRecord,
     TradeSnapshot,
 )
-from backtester.structures.strategy_structure import StrategyStructure
-from backtester.trades.trade import Trade
-
-
-_INFRA_KEYS = {
-    "ticker",
-    "size",
-    "multiplier",
-    "currency",
-    "asset_class",
-    "tags",
-    "structure_id",
-    "leg_id",
-    "cost_leg",
-}
+from backtester.strategy_structure import StrategyStructure
+from backtester.trade import Trade
 
 
 @dataclass
@@ -106,8 +93,8 @@ class Backtester:
     def _compute_pnl_for_date(self, date: str):
         for trade in self.active_trades:
             for structure in trade.active_structures:
-                for leg in structure.legs:
-                    asset_class = leg.asset_class
+                for leg_state in structure.legs:
+                    asset_class = leg_state.contract.asset_class
                     if asset_class not in self._config.asset_class_configs:
                         raise ValueError(
                             f"Unknown asset class: {asset_class}"
@@ -115,47 +102,40 @@ class Backtester:
                     cfg = self._config.asset_class_configs[asset_class]
                     pricer = cfg.pricer
 
-                    price_today = pricer.price(leg, date)
+                    price_today = pricer.price(leg_state.contract, date)
                     if price_today is None:
-                        leg.daily_total_pnl.append(float("nan"))
-                        if cfg.record_pricing_inputs:
-                            self._record_pricing_inputs_nan(leg, pricer, date, cfg)
-                        continue
-
-                    daily_pnl = (
-                        (price_today - leg.current_price)
-                        * leg.multiplier
-                        * leg.current_size
-                    )
-                    leg.daily_total_pnl.append(daily_pnl)
-
-                    leg.current_price = price_today
+                        leg_state.daily_total_pnl.append(float("nan"))
+                    else:
+                        daily_pnl = (
+                            (price_today - leg_state.current_price)
+                            * leg_state.contract.multiplier
+                            * leg_state.current_size
+                        )
+                        leg_state.daily_total_pnl.append(daily_pnl)
+                        leg_state.current_price = price_today
 
                     if cfg.record_pricing_inputs:
-                        pi = pricer.pricing_inputs(leg, date)
-                        if pi is not None:
-                            keys = getattr(leg, "_pricing_input_keys", None)
-                            if keys is None:
-                                keys = set()
-                                leg._pricing_input_keys = keys
-                            keys.update(pi.keys())
-                            for key, val in pi.items():
-                                series = leg.pricing_inputs.setdefault(key, [])
-                                series.append(val)
-
-    def _record_pricing_inputs_nan(self, leg, pricer, date, cfg):
-        keys = getattr(leg, "_pricing_input_keys", None)
-        if not keys:
-            return
-        for key in keys:
-            series = leg.pricing_inputs.setdefault(key, [])
-            series.append(float("nan"))
+                        today = (
+                            pricer.pricing_inputs(leg_state.contract, date) or {}
+                        )
+                        for key, val in today.items():
+                            if key not in leg_state.pricing_inputs:
+                                prior_len = max(0, len(leg_state.daily_total_pnl) - 1)
+                                leg_state.pricing_inputs[key] = (
+                                    [float("nan")] * prior_len
+                                )
+                            leg_state.pricing_inputs[key].append(val)
+                        for key in leg_state.pricing_inputs:
+                            if key not in today:
+                                leg_state.pricing_inputs[key].append(
+                                    float("nan")
+                                )
 
     def _compute_risk_for_date(self, date: str):
         for trade in self.active_trades:
             for structure in trade.active_structures:
-                for leg in structure.legs:
-                    asset_class = leg.asset_class
+                for leg_state in structure.legs:
+                    asset_class = leg_state.contract.asset_class
                     cfg = self._config.asset_class_configs.get(asset_class)
                     if cfg is None:
                         continue
@@ -163,15 +143,17 @@ class Backtester:
                     risk_measures = cfg.risk_measures
 
                     if risk_measures:
-                        vd = pricer.valuation_data(leg, date, risk_measures)
-                        if vd is not None:
-                            for key, val in vd.items():
-                                attr = f"{key}_ts"
-                                series = getattr(leg, attr, None)
-                                if series is None:
-                                    series = []
-                                    setattr(leg, attr, series)
-                                series.append(val)
+                        vd = pricer.valuation_data(leg_state.contract, date, risk_measures) or {}
+                        for key, val in vd.items():
+                            if key not in leg_state.valuation_data:
+                                prior_len = max(0, len(leg_state.daily_total_pnl) - 1)
+                                leg_state.valuation_data[key] = (
+                                    [float("nan")] * prior_len
+                                )
+                            leg_state.valuation_data[key].append(val)
+                        for key in leg_state.valuation_data:
+                            if key not in vd:
+                                leg_state.valuation_data[key].append(float("nan"))
 
     def _check_data_available(self, order: dict, date: str) -> bool:
         action = order.get("Action")
@@ -192,23 +174,10 @@ class Backtester:
                             f"Unknown asset class: {asset_class}"
                         )
                     pricer = cfg.pricer
-                    resolved = pricer.resolve_instrument(leg_dict, date)
-                    if resolved is None:
+                    contract = pricer.resolve_instrument(leg_dict, date)
+                    if contract is None:
                         return False
-                    ticker = resolved.get("ticker", "")
-                    params = {
-                        k: v
-                        for k, v in resolved.items()
-                        if k not in _INFRA_KEYS
-                    }
-                    temp = Instrument(
-                        ticker=ticker,
-                        asset_class=resolved.get("asset_class", asset_class),
-                        multiplier=resolved.get("multiplier", 1.0),
-                        currency=resolved.get("currency", "USD"),
-                        params=params,
-                    )
-                    if pricer.price(temp, date) is None:
+                    if pricer.price(contract, date) is None:
                         return False
             return True
 
@@ -217,27 +186,27 @@ class Backtester:
             if trade_id is None:
                 for trade in self.active_trades:
                     for structure in trade.active_structures:
-                        for leg in structure.legs:
-                            asset_class = leg.asset_class
+                        for leg_state in structure.legs:
+                            asset_class = leg_state.contract.asset_class
                             if asset_class not in self._config.asset_class_configs:
                                 raise ValueError(
                                     f"Unknown asset class: {asset_class}"
                                 )
                             cfg = self._config.asset_class_configs[asset_class]
-                            if cfg.pricer.price(leg, date) is None:
+                            if cfg.pricer.price(leg_state.contract, date) is None:
                                 return False
                 return True
             trade = self._find_active_trade(trade_id)
             if trade is None:
                 return True
             for structure in trade.active_structures:
-                for leg in structure.legs:
-                    asset_class = leg.asset_class
+                for leg_state in structure.legs:
+                    asset_class = leg_state.contract.asset_class
                     cfg = self._config.asset_class_configs.get(asset_class)
                     if cfg is None:
                         return False
                     pricer = cfg.pricer
-                    if pricer.price(leg, date) is None:
+                    if pricer.price(leg_state.contract, date) is None:
                         return False
             return True
 
@@ -252,15 +221,15 @@ class Backtester:
             structure_snapshots = []
             for structure in trade.active_structures:
                 leg_snapshots = []
-                for leg in structure.legs:
+                for leg_state in structure.legs:
                     leg_snap = LegSnapshot(
-                        ticker=leg.ticker,
-                        instrument_type=leg.asset_class,
-                        size=leg.current_size,
-                        entry_price=leg.entry_price,
-                        current_price=leg.current_price,
-                        leg_id=leg.leg_id,
-                        daily_total_pnl=tuple(leg.daily_total_pnl),
+                        ticker=leg_state.contract.ticker,
+                        asset_class=leg_state.contract.asset_class,
+                        size=leg_state.current_size,
+                        entry_price=leg_state.entry_price,
+                        current_price=leg_state.current_price,
+                        leg_id=leg_state.leg_id,
+                        daily_total_pnl=tuple(leg_state.daily_total_pnl),
                         component_pnls={},
                         risk_measures={},
                     )
@@ -297,39 +266,45 @@ class Backtester:
             )
         return tuple(records)
 
-    # ─── cost‑exposure helper ──────────────────────────────────────
+    # --- cost-exposure helper ------------------------------------------
 
     def _compute_cost_exposures(
         self, structure: StrategyStructure, date: str
     ) -> dict[str, dict]:
         result: dict[str, dict] = {}
-        if not structure.cost_leg_ids or not structure.legs:
+        if not structure.legs:
             return result
 
-        asset_class = structure.legs[0].asset_class
+        asset_class = structure.legs[0].contract.asset_class
         cfg = self._config.asset_class_configs.get(asset_class)
         if cfg is None:
             return result
         pricer = cfg.pricer
 
-        leg_by_id = {leg.leg_id: leg for leg in structure.legs}
-
-        for leg_id in structure.cost_leg_ids:
-            leg = leg_by_id.get(leg_id)
-            if leg is None:
+        for leg_state in structure.legs:
+            if not leg_state.cost_leg:
                 continue
-            exposure = pricer.compute_cost_exposure(leg, date)
+            exposure = pricer.compute_cost_exposure(leg_state.contract, date)
             if exposure is None:
                 warnings.warn(
-                    f"compute_cost_exposure returned None for leg {leg_id}"
-                    f" on {date}; treating as cost‑free for this event."
+                    f"compute_cost_exposure returned None for leg {leg_state.leg_id}"
+                    f" on {date}; treating as cost-free for this event."
                 )
                 continue
-            result[leg_id] = exposure
+            result[leg_state.leg_id] = exposure
+
+        # Preserve existing behavior: for single-leg structures where
+        # cost_leg was not explicitly marked, treat the sole leg as the
+        # cost-bearing leg by default.
+        if not result and len(structure.legs) == 1:
+            sole = structure.legs[0]
+            exposure = pricer.compute_cost_exposure(sole.contract, date)
+            if exposure is not None:
+                result[sole.leg_id] = exposure
 
         return result
 
-    # ─── order dispatch ────────────────────────────────────────────
+    # --- order dispatch -------------------------------------------------
 
     def _execute_order(self, order: dict, date: str):
         if not self._check_data_available(order, date):
@@ -481,7 +456,7 @@ class Backtester:
                     t for t in self.active_trades if t is not trade
                 ]
 
-    # ─── structure / leg construction ──────────────────────────────
+    # --- structure / leg construction -----------------------------------
 
     def _build_structure_from_info(
         self, info: dict, date: str
@@ -489,43 +464,25 @@ class Backtester:
         leg_dicts = info.get("legs", [])
         structure_id = info.get("structure_id") or str(uuid.uuid4())
 
-        legs = []
-        resolved_dicts = []
+        leg_states = []
         for leg_dict in leg_dicts:
-            instrument, resolved = self._resolve_and_price_leg(leg_dict, date)
-            if instrument is None:
+            leg_state = self._resolve_and_price_leg(leg_dict, date)
+            if leg_state is None:
                 return None
-            legs.append(instrument)
-            resolved_dicts.append(resolved)
+            leg_states.append(leg_state)
 
-        if not legs:
+        if not leg_states:
             return None
-
-        cost_leg_ids = self._collect_cost_leg_ids(resolved_dicts, legs)
 
         return StrategyStructure(
             structure_id=structure_id,
-            legs=legs,
+            legs=leg_states,
             tags=info.get("tags"),
-            cost_leg_ids=cost_leg_ids,
         )
-
-    @staticmethod
-    def _collect_cost_leg_ids(
-        resolved_dicts: list[dict], legs: list[Instrument],
-    ) -> list[str]:
-        ids = []
-        for resolved, leg in zip(resolved_dicts, legs):
-            if resolved.get("cost_leg"):
-                ids.append(leg.leg_id)
-        if not ids and len(legs) == 1:
-            ids.append(legs[0].leg_id)
-        return ids
 
     def _resolve_and_price_leg(
         self, leg_dict: dict, date: str
-    ) -> tuple[Instrument | None, dict | None]:
-        ticker = leg_dict.get("ticker")
+    ) -> LegState | None:
         asset_class = leg_dict.get("asset_class", "equity")
         if asset_class not in self._config.asset_class_configs:
             raise ValueError(f"Unknown asset class: {asset_class}")
@@ -533,36 +490,30 @@ class Backtester:
         cfg = self._config.asset_class_configs[asset_class]
         pricer = cfg.pricer
 
-        resolved = pricer.resolve_instrument(leg_dict, date)
-        if resolved is None:
-            return None, None
+        contract = pricer.resolve_instrument(leg_dict, date)
+        if contract is None:
+            return None
 
         leg_id = str(uuid.uuid4())
-        params = {k: v for k, v in resolved.items() if k not in _INFRA_KEYS}
+        size = float(leg_dict.get("size", 0))
 
-        size = resolved.get("size", 0)
-
-        instrument = Instrument(
-            ticker=resolved.get("ticker", ticker),
-            asset_class=resolved.get("asset_class", asset_class),
-            multiplier=resolved.get("multiplier", 1.0),
-            currency=resolved.get("currency", "USD"),
-            tags=resolved.get("tags"),
-            leg_id=leg_id,
-            params=params,
-        )
-        instrument.current_size = size
-
-        entry_price = pricer.price(instrument, date)
+        entry_price = pricer.price(contract, date)
         if entry_price is None:
-            return None, None
+            return None
 
-        instrument.entry_price = entry_price
-        instrument.current_price = entry_price
+        leg_state = LegState(
+            contract=contract,
+            leg_id=leg_id,
+            current_size=size,
+            entry_price=entry_price,
+            current_price=entry_price,
+            cost_leg=leg_dict.get("cost_leg", False),
+            tags=leg_dict.get("tags"),
+        )
 
-        return instrument, resolved
+        return leg_state
 
-    # ─── lookups ───────────────────────────────────────────────────
+    # --- lookups --------------------------------------------------------
 
     def _find_active_trade(self, trade_id: str) -> Trade | None:
         for trade in self.active_trades:

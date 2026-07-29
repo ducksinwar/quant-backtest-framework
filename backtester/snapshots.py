@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class LegSnapshot:
     ticker: str
-    instrument_type: str
+    asset_class: str
     size: float
     entry_price: float
     current_price: float

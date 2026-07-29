@@ -5,20 +5,21 @@ from backtester.cost_model import (
     CostModel,
     EquityCostCalculator,
 )
-from backtester.instruments.instrument import Instrument
-from backtester.structures.strategy_structure import StrategyStructure
-from backtester.trades.trade import Trade
+from backtester.instruments import Contract, LegState
+from backtester.strategy_structure import StrategyStructure
+from backtester.trade import Trade
 
 
 def _make_trade_with_open_event(
     trade_id, leg_id, asset_class, date, size, cost_exposures=None
 ):
-    leg = Instrument(ticker="SPY", asset_class=asset_class, leg_id=leg_id)
-    leg.current_size = size
-    leg.current_price = 450.0
+    contract = Contract(ticker="SPY", asset_class=asset_class)
+    leg = LegState(
+        contract=contract, leg_id=leg_id,
+        current_size=size, current_price=450.0,
+    )
     structure = StrategyStructure(
         structure_id=f"s_{trade_id}", legs=[leg],
-        cost_leg_ids=[leg_id] if cost_exposures else [],
     )
     structure.open(date, cost_exposures=cost_exposures)
     trade = Trade(trade_id=trade_id)
@@ -92,16 +93,13 @@ class TestCostModel:
         assert result == {}
 
     def test_compute_costs_multiple_legs(self):
-        leg1 = Instrument(ticker="SPY", asset_class="equity", leg_id="leg_a")
-        leg1.current_size = 100.0
-        leg1.current_price = 450.0
-        leg2 = Instrument(ticker="AAPL", asset_class="equity", leg_id="leg_b")
-        leg2.current_size = 100.0
-        leg2.current_price = 200.0
+        c1 = Contract(ticker="SPY", asset_class="equity")
+        leg1 = LegState(contract=c1, leg_id="leg_a", current_size=100.0, current_price=450.0)
+        c2 = Contract(ticker="AAPL", asset_class="equity")
+        leg2 = LegState(contract=c2, leg_id="leg_b", current_size=100.0, current_price=200.0)
 
         structure = StrategyStructure(
             structure_id="s1", legs=[leg1, leg2],
-            cost_leg_ids=["leg_a", "leg_b"],
         )
         structure.open(
             "2024-05-01",
@@ -123,11 +121,10 @@ class TestCostModel:
         assert len(result["leg_b"]) == 1
 
     def test_compute_costs_partial_unwind(self):
-        leg = Instrument(ticker="SPY", asset_class="equity", leg_id="leg_1")
-        leg.current_size = 100.0
-        leg.current_price = 450.0
+        contract = Contract(ticker="SPY", asset_class="equity")
+        leg = LegState(contract=contract, leg_id="leg_1", current_size=100.0, current_price=450.0)
         structure = StrategyStructure(
-            structure_id="s1", legs=[leg], cost_leg_ids=["leg_1"],
+            structure_id="s1", legs=[leg],
         )
         structure.open(
             "2024-01-15",
@@ -156,22 +153,20 @@ class TestCostModel:
         )
 
     def test_compute_costs_same_day_aggregation(self):
-        leg = Instrument(ticker="SPY", asset_class="equity", leg_id="leg_a")
-        leg.current_size = 100.0
-        leg.current_price = 450.0
+        c1 = Contract(ticker="SPY", asset_class="equity")
+        leg = LegState(contract=c1, leg_id="leg_a", current_size=100.0, current_price=450.0)
         s1 = StrategyStructure(
-            structure_id="s1", legs=[leg], cost_leg_ids=["leg_a"],
+            structure_id="s1", legs=[leg],
         )
         s1.open(
             "2024-05-01",
             cost_exposures={"leg_a": {"notional_per_unit": 450.0}},
         )
 
-        leg2 = Instrument(ticker="AAPL", asset_class="equity", leg_id="leg_a")
-        leg2.current_size = 200.0
-        leg2.current_price = 200.0
+        c2 = Contract(ticker="AAPL", asset_class="equity")
+        leg2 = LegState(contract=c2, leg_id="leg_a", current_size=200.0, current_price=200.0)
         s2 = StrategyStructure(
-            structure_id="s2", legs=[leg2], cost_leg_ids=["leg_a"],
+            structure_id="s2", legs=[leg2],
         )
         s2.open(
             "2024-05-01",

@@ -4,23 +4,12 @@ class StrategyStructure:
         structure_id: str,
         legs: list,
         tags: list[str] | None = None,
-        cost_leg_ids: list[str] | None = None,
     ):
         self.structure_id = structure_id
         self.legs = list(legs)
         self.tags = tags
         self.event_log: list[dict] = []
         self.original_entry_date: str | None = None
-        self.cost_leg_ids: list[str] = (
-            list(cost_leg_ids) if cost_leg_ids is not None else []
-        )
-
-    def _cost_leg_id_from_exposures(
-        self, cost_exposures: dict[str, dict] | None
-    ) -> str | None:
-        if cost_exposures:
-            return next(iter(cost_exposures.keys()))
-        return self.legs[0].leg_id if self.legs else None
 
     def open(
         self,
@@ -37,7 +26,6 @@ class StrategyStructure:
             "date": date,
             "unit_size_change": total_size,
             "cost_exposures": cost_exposures or {},
-            "cost_leg_id": self._cost_leg_id_from_exposures(cost_exposures),
             "cost_free": False,
         }
         self.event_log.append(event)
@@ -69,7 +57,6 @@ class StrategyStructure:
             "date": date,
             "unit_size_change": amount,
             "cost_exposures": cost_exposures or {},
-            "cost_leg_id": self._cost_leg_id_from_exposures(cost_exposures),
             "cost_free": False,
         }
         self.event_log.append(event)
@@ -92,7 +79,6 @@ class StrategyStructure:
             "date": date,
             "unit_size_change": amount_unwound,
             "cost_exposures": cost_exposures or {},
-            "cost_leg_id": self._cost_leg_id_from_exposures(cost_exposures),
             "cost_free": False,
         }
         self.event_log.append(event)

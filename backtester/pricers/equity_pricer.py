@@ -5,21 +5,22 @@ class EquityPricer(BasePricer):
     def __init__(self, provider):
         self.provider = provider
 
-    def price(self, instrument, date: str) -> float | None:
-        return self.provider.get_price(instrument.ticker, date)
+    def price(self, contract, date: str) -> float | None:
+        return self.provider.get_price(contract.ticker, date)
 
     def valuation_data(
-        self, instrument, date: str, measures: list[str]
+        self, contract, date: str, measures: list[str]
     ) -> dict[str, float] | None:
         return {}
 
-    def resolve_instrument(self, leg_dict: dict, date: str) -> dict | None:
-        return leg_dict
+    def resolve_instrument(self, leg_dict: dict, date: str):
+        return self._build_contract(leg_dict)
 
-    def pricing_inputs(self, instrument, date: str) -> dict[str, float] | None:
+    def pricing_inputs(self, contract, date: str) -> dict[str, float] | None:
         return {}
 
     def compute_cost_exposure(
-        self, instrument, date: str
+        self, contract, date: str
     ) -> dict[str, float]:
-        return {"notional_per_unit": instrument.current_price}
+        price = self.provider.get_price(contract.ticker, date)
+        return {"notional_per_unit": price}
