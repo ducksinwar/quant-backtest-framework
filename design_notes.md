@@ -159,7 +159,7 @@ The fields below describe the position-level data now held by `LegState`:
   - `ticker`, `size`, `multiplier`, `currency`, `asset_class`, `tags` – standard instrument‑level fields.
   - `structure_id`, `leg_id`, `cost_leg` – internal identifiers and flags used by the backtester; they are consumed during trade construction and filtered by `BasePricer._build_contract()`.
   All other keys from the leg dict are automatically stored in `params`.
-- The Instrument is a **pure data holder** for leg‑level P&L and risk. All P&L calculations are performed by the backtester (see Section 3.9). The pricer reads `params` to know what it is pricing.
+- The LegState is a **pure data holder** for leg‑level P&L and risk. All P&L calculations are performed by the backtester (see Section 3.9). The pricer reads `params` to know what it is pricing.
 
 - **Internal P&L tracking (populated by the backtester):**
   - `daily_total_pnl: list[float]` – a time series of the daily total P&L changes for this leg, recorded each day the leg is alive.  
@@ -174,11 +174,11 @@ The fields below describe the position-level data now held by `LegState`:
       The pricer internally accounts for the notional currency and applies the appropriate pricing formula; the backtester never needs to know whether the notional is in JPY, USD, or another currency.
   - `entry_price: float` – the weighted‑average entry price (or rate) of the open position. Updated by the backtester on partial adds (via weighted average); unaffected by partial unwinds.
 
-  No cumulative realized/unrealized P&L is stored on the Instrument. All derived P&L metrics (total gross, realized, unrealized) are computed on‑the‑fly by consumers (Summary, PortfolioState snapshot builder, DataExtractor) directly from the raw daily P&L series, `current_price`, `current_size`, and `entry_price`.
+  No cumulative realized/unrealized P&L is stored on the LegState. All derived P&L metrics (total gross, realized, unrealized) are computed on‑the‑fly by consumers (Summary, PortfolioState snapshot builder, DataExtractor) directly from the raw daily P&L series, `current_price`, `current_size`, and `entry_price`.
 
 - **Valuation data storage (for P&L decomposition, populated by the backtester):**
-  - For asset classes that support P&L decomposition, the backtester stores all requested valuation‑data measures as per‑measure time series on the Instrument. These include both **risk measures** (e.g., `delta_ts`, `gamma_ts`, `vega_ts`) and **non‑risk building blocks** needed for decomposition formulas (e.g., `price_T_curve_T‑1_ts` for FX forward MTM/carry, or `implied_vol_ts` for certain options).
-  - Each measure’s time series is stored in a list attribute named after the measure (e.g., `instrument.price_T_curve_T‑1_ts`, `instrument.delta_ts`).
+  - For asset classes that support P&L decomposition, the backtester stores all requested valuation‑data measures as per‑measure time series on the LegState. These include both **risk measures** (e.g., `delta_ts`, `gamma_ts`, `vega_ts`) and **non‑risk building blocks** needed for decomposition formulas (e.g., `price_T_curve_T‑1_ts` for FX forward MTM/carry, or `implied_vol_ts` for certain options).
+  - Each measure’s time series is stored in a list attribute named after the measure (e.g., `leg_state.price_T_curve_T‑1_ts`, `leg_state.delta_ts`).
   - On a valid trading day, the backtester appends the value returned by `pricer.valuation_data(...)` to each list.
   - On a day when the pricer returns `None` (data gap), **`NaN` is appended** to each list to keep them aligned with `daily_total_pnl`.
   - When component PnL is computed on the next valid day, the backtester retrieves the most recent **non‑NaN** entry from each relevant list (by scanning backwards). This provides the “T‑1” value for the P&L decomposition, which will be the last valid data before the gap.
@@ -225,17 +225,18 @@ It is the natural entity for cost quotation, execution, and rolling.
   - `partial add` – additional units (proportionally distributed).  
   - `partial unwind` – fraction removed.  
   - `roll` – units rolled (recorded on the old structure).  
+  - `leg_size_changes` – a dictionary mapping `leg_id` to the per‑leg size delta (`dict[str, float]`), recorded alongside `unit_size_change` so that cost computation for multi‑leg structures can use each leg's own delta. *(planned — see `docs/phase2_plan.md`)*  
 
-  Because every size change is logged, the complete time‑series of leg sizes can be derived by applying these events to the initial leg sizes. No separate daily size array is needed on the Instrument.
+  Because every size change is logged, the complete time‑series of leg sizes can be derived by applying these events to the initial leg sizes. No separate daily size array is needed on the LegState.
 
 - **Event log – cost exposure:**  
   Alongside the unit size change, each event **may** also record `cost_exposures` — a dictionary mapping `leg_id` to a dictionary of **per‑unit** risk metrics (e.g., `{"leg_abc": {"notional_per_unit": 450.0}}`, `{"leg_xyz": {"vega_per_contract": 0.03}}`).
   - These per‑unit metrics are combined with `unit_size_change` by the `CostModel` to compute the transacted exposure and the resulting cost.  
   - They are recorded only for the leg(s) and risk type(s) on which cost is actually quoted. For example, a call ratio spread might only store the vega of the 40‑delta leg, because cost is quoted in terms of that leg’s vega. A straddle, where both legs bear cost, stores entries for both legs.  
   - An event can be marked as **cost‑free** (e.g., the `open` event of a structure created by a roll); the `CostModel` skips such events entirely.  
-  - The dictionary key itself is the leg’s `leg_id`, so the `CostModel` can attribute the cost directly to that leg’s local P&L. The previous `cost_leg_id` field is retained for readability but is now redundant (it appears inside the `cost_exposures` key set).
+  - The dictionary key itself is the leg’s `leg_id`, so the `CostModel` can attribute the cost directly to that leg’s local P&L.
 
-  For multi‑leg structures, the transacted size of each leg is derived from the structure's total `unit_size_change` and the leg's fixed proportion. The `CostModel` multiplies the per‑unit risk metric for each leg by that leg's transacted size. No separate per‑leg `unit_size_change` is required inside `cost_exposures`.
+  For multi‑leg structures, the transacted size of each leg is read directly from `leg_size_changes` in the event log. The `CostModel` multiplies the per‑unit risk metric for each leg by that leg's size delta. *(planned — see `docs/phase2_plan.md`)*
 
 - **Lifecycle methods:**  
   - `open(date, cost_exposures=None)` – records the opening event with initial unit sizes for all legs and the provided `cost_exposures` (if any).  
@@ -244,8 +245,8 @@ It is the natural entity for cost quotation, execution, and rolling.
   - `roll(new_structure, date)` – records a single `roll` event (unit size and cost exposure) on the old structure, closes it, and opens the new structure with a cost‑free `open`. The new structure inherits the old structure’s `original_entry_date`. The new structure also inherits the old structure’s tags, unless the `new_structure` dict explicitly provides a `'tags'` key (which then replaces the inherited tags).
 
 - **Cost exposure:**  
-  The `StrategyStructure` is a **pure event recorder** — it performs no cost‑exposure computation of its own. The backtester calls `pricer.compute_cost_exposure()` (see §3.5) for each cost‑bearing leg at order‑execution time and passes the resulting `{leg_id: per_unit_dict}` mapping to the structure’s lifecycle methods. The structure stores this dict directly in the event log entry under the key `"cost_exposures"`.  
-  The set of cost‑bearing legs is determined once when the structure is created (see §3.7) and stored in `structure.cost_leg_ids`. The backtester uses this list to know which legs to call `compute_cost_exposure` for.  
+  The `StrategyStructure` is a **pure event recorder** — it performs no cost‑exposure computation of its own. The backtester calls `pricer.compute_cost_exposure()` (see §3.6) for each cost‑bearing leg at order‑execution time and passes the resulting `{leg_id: per_unit_dict}` mapping to the structure’s lifecycle methods. The structure stores this dict directly in the event log entry under the key `"cost_exposures"`.  
+  The set of cost‑bearing legs is determined at order‑execution time by checking each leg’s `cost_leg` flag. The backtester uses this flag to know which legs to call `compute_cost_exposure` for.  
   The `CostModel` only reads the logged `cost_exposures` values from the event log; it has no direct dependency on the pricer.
 
 - **Analytical grouping (optional):**  
@@ -369,34 +370,35 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
 ### 3.6 Pricer (BasePricer + concrete implementations)
 
 - **BasePricer** is an abstract class that defines the core interface:
-  - `price(instrument, date) -> float | None` – the mark‑to‑market price of the instrument on that date. Returns `None` if a required market data input is missing (beyond the forward‑fill limit).
-  - `valuation_data(instrument, date, measures: list[str]) -> dict[str, float] | None` – returns a dictionary of building‑block numbers required for PnL decomposition and risk attribution.  
+  - `price(contract, date) -> float | None` – the mark‑to‑market price of the contract on that date. Returns `None` if a required market data input is missing (beyond the forward‑fill limit).
+  - `valuation_data(contract, date, measures: list[str]) -> dict[str, float] | None` – returns a dictionary of building‑block numbers required for PnL decomposition and risk attribution.  
     The keys depend on the asset class and the requested measures (e.g., `'T_price_curve_T-1'`, `'delta'`, `'gamma'`, `'vega'`).  
     When no decomposition is needed, the method returns an empty dict. If the price is `None`, this method also returns `None`.
-  - `resolve_instrument(leg_dict: dict, date: str) -> dict | None` – takes a leg dictionary from a `TargetTrade` (which may be missing instrument‑specific contract parameters) and returns a completed leg dictionary with all required static parameters filled in. The returned dict is used to construct the `Instrument`. The entry price is **not** part of this method; it is obtained separately via `price()`. Returns `None` if the required market data is unavailable.
-    - For an equity, `leg_dict` might be `{'ticker': '0700.HK', 'size': 1000}`; the pricer returns the same dict unchanged (no extra parameters needed).
-    - For an exchange‑traded option, `leg_dict` already contains `'strike'`, and the pricer validates/returns it unchanged.
-    - For an OTC option, `leg_dict` contains `'delta'` and `'tenor'`; the pricer computes the strike from the vol surface and forward curve, and returns the dict with `'strike'` added and `'delta'`/`'tenor'` removed.
-    - For an FX forward, `leg_dict` contains no strike; the pricer fetches the current forward rate and returns the dict with `'strike'` set to that rate. If the leg_dict contains a `'tenor'` instead of an explicit `'maturity'`, the pricer resolves it to an absolute maturity date (see the general tenor resolution rule). When the backtester subsequently calls `pricer.price(instrument, date=T)`, the entry price will be **zero** (the instrument is struck at the prevailing market rate, so its MTM value is zero).
-    - **General tenor resolution:** For any instrument where a relative tenor is given (e.g., `'1M'`, `'3M'`), the pricer converts it to an absolute maturity date using the appropriate calendar and date‑rolling conventions. This includes options, forwards, swaps, and any other contract that can be specified by tenor. The resolved date is stored as `'maturity'` in the returned leg dictionary.
+  - `resolve_instrument(leg_dict: dict, date: str) -> Contract | None` – takes a leg dictionary from a `TargetTrade` (which may be missing instrument‑specific contract parameters) and returns a fully resolved `Contract`. The pricer constructs the `Contract` from the leg dictionary, filtering out infrastructure keys (e.g., `ticker`, `size`, `multiplier`, `currency`, `asset_class`, `structure_id`, `leg_id`, `cost_leg` — see §3.1) and preserving all instrument‑specific parameters in `Contract.params`. The entry price is **not** part of this method; it is obtained separately via `price()`. Returns `None` if the required market data is unavailable.
+    - For an equity, `leg_dict` might be `{'ticker': '0700.HK', 'size': 1000}`; the pricer returns a `Contract` with no extra `params` (the ticker is sufficient).
+    - For an exchange‑traded option, `leg_dict` already contains `'strike'`, and the pricer validates it and passes it into the `Contract`'s `params`.
+    - For an OTC option, `leg_dict` contains `'delta'` and `'tenor'`; the pricer computes the strike from the vol surface and forward curve, and the returned `Contract`'s `params` contain the original `'delta'` and `'tenor'` alongside the resolved `'strike'`.
+    - For an FX forward, `leg_dict` contains no strike; the pricer fetches the current forward rate and sets `'strike'` in the `Contract`'s `params` to that rate. If the `leg_dict` contains a `'tenor'` instead of an explicit `'maturity'`, the pricer resolves it to an absolute maturity date (see the general tenor resolution rule). When the backtester subsequently calls `pricer.price(contract, date=T)`, the entry price will be **zero** (the instrument is struck at the prevailing market rate, so its MTM value is zero).
+    - **General tenor resolution:** For any instrument where a relative tenor is given (e.g., `'1M'`, `'3M'`), the pricer converts it to an absolute maturity date using the appropriate calendar and date‑rolling conventions. This includes options, forwards, swaps, and any other contract that can be specified by tenor. The resolved date is stored as `'maturity'` in the `Contract`'s `params`.
 
      **Preserving the original trading intent**  
-     When `resolve_instrument` resolves a relative parameter into an absolute one, the pricer must preserve the original value alongside the resolved value in the returned dictionary. This applies to any parameter that undergoes resolution: a delta hedge specification (e.g., `"delta": 0.25`) that becomes a concrete strike, a relative tenor (e.g., `"tenor": "3M"`) that becomes an absolute maturity date, etc. The original key‑value pair must remain in the dictionary, and the resolved value is added under a new key (e.g., `"strike"`, `"maturity"`). This ensures that reports can display both the trader’s intent and the concrete contract details, both of which end up in `Instrument.params`.
+     When `resolve_instrument` resolves a relative parameter into an absolute one, the pricer must preserve the original value alongside the resolved value. This applies to any parameter that undergoes resolution: a delta hedge specification (e.g., `"delta": 0.25`) that becomes a concrete strike, a relative tenor (e.g., `"tenor": "3M"`) that becomes an absolute maturity date, etc. The original key‑value pair must remain in `Contract.params`, and the resolved value is added under a new key (e.g., `"strike"`, `"maturity"`). This ensures that reports can display both the trader’s intent and the concrete contract details, both of which end up in `Contract.params`.
+
+     **Design tension (deferred):** Because `Contract.params` holds original intent (e.g., `tenor`, `delta`) alongside the resolved values, two economically identical instruments can have different `params` and not compare equal. This is harmless for now, but will cause problems in later phases (risk aggregation, multi‑leg netting). The planned Phase 4 resolution is to move the original intent parameters out of `Contract.params` into `LegState.original_intent`, leaving `Contract.params` to hold only absolute, resolved instrument parameters and making `Contract` a pure, hashable instrument identity.
 
      This single method isolates all instrument‑specific parameter resolution inside the pricer, keeping the backtester completely generic.
-     - **Cost‑leg marking:** For multi‑leg structures where only some legs bear transaction cost (e.g., a swap where only the far leg incurs execution fees), the pricer may add a boolean field `"cost_leg"` to any leg dict. A value of `true` marks that leg as cost‑bearing; omitted or `false` means the leg is cost‑free.  
-       For single‑leg instruments the field is typically omitted; the backtester defaults to treating the sole leg as the cost leg.
-   - `pricing_inputs(instrument, date) -> dict[str, float] | None` – returns the raw market data values that the pricer used to compute the price on that date (e.g., `{'implied_vol': 20.5, 'forward_price': 1.23, 'rate': 0.05}`). This is entirely separate from `valuation_data`. The backtester calls this method only when `record_pricing_inputs = True` in the asset class configuration, and stores the resulting dictionary in `Instrument.pricing_inputs`. Returns `None` if the price could not be computed (data missing). This method is optional for pricers that do not support diagnostic recording (e.g., a simple `EquityPricer` may return an empty dict).
-   - `compute_cost_exposure(instrument, date: str) -> dict[str, float] | None` – returns a dictionary of **per‑unit** risk metrics that the `CostModel` uses to compute transaction costs.  
+     - **Cost‑leg marking:** For multi‑leg structures where only some legs bear transaction cost (e.g., a swap where only the far leg incurs execution fees), the leg dictionary may carry a boolean field `"cost_leg"`. A value of `true` marks that leg as cost‑bearing; omitted or `false` means the leg is cost‑free. `cost_leg` is an infrastructure key: it is filtered out when the pricer constructs the `Contract` (see §3.1 `_INFRA_KEYS`) and never appears in `Contract.params`. Instead, the backtester reads the flag directly from the leg dictionary and stores it on `LegState.cost_leg`. For single‑leg instruments the field is typically omitted; the backtester defaults to treating the sole leg as the cost leg.
+   - `pricing_inputs(contract, date) -> dict[str, float] | None` – returns the raw market data values that the pricer used to compute the price on that date (e.g., `{'implied_vol': 20.5, 'forward_price': 1.23, 'rate': 0.05}`). This is entirely separate from `valuation_data`. The backtester calls this method only when `record_pricing_inputs = True` in the asset class configuration, and stores the resulting dictionary in `LegState.pricing_inputs`. Returns `None` if the price could not be computed (data missing). This method is optional for pricers that do not support diagnostic recording (e.g., a simple `EquityPricer` may return an empty dict).
+   - `compute_cost_exposure(contract, date: str) -> dict[str, float] | None` – returns a dictionary of **per‑unit** risk metrics that the `CostModel` uses to compute transaction costs.  
      The key names are asset‑class‑specific (e.g., `"notional_per_unit"`, `"vega_per_contract"`, `"dv01_per_unit"`).  
-     The `CostModel` multiplies each per‑unit value by `event["unit_size_change"]` to obtain the transacted exposure.  
-     Returns `None` if the required market data is unavailable.  
+     The `CostModel` multiplies each per‑unit value by the leg's size delta in `event["leg_size_changes"]` to obtain the transacted exposure. *(planned — see `docs/phase2_plan.md`)*  
+     When the market price is unavailable, the method returns `None` itself (not a dict containing `None` values). *(planned — see `docs/phase2_plan.md`)*  
      **No default implementation** — every concrete pricer must implement this method.  
-     **This method is called only at order‑execution time (open, add, unwind, roll)**, never during the daily PnL loop. It uses the event date’s market data and the instrument’s pre‑event state (sizes, prices).  
+     **This method is called only at order‑execution time (open, add, unwind, roll)**, never during the daily PnL loop. It uses the event date’s market data and the leg’s pre‑event state (sizes, prices).  
      Examples:
-     - `EquityPricer`: `{"notional_per_unit": instrument.current_price}`
-     - `EquityOptionPricer`: `{"vega_per_contract": total_vega / instrument.current_size}`
-     - `FXForwardPricer`: `{"dv01_per_unit": computed_dv01 / instrument.current_size}`
+     - `EquityPricer`: `{"notional_per_unit": leg_state.current_price}`
+     - `EquityOptionPricer`: `{"vega_per_contract": total_vega / leg_state.current_size}`
+     - `FXForwardPricer`: `{"dv01_per_unit": computed_dv01 / leg_state.current_size}`
      - For multi‑leg structures (e.g., a straddle), the backtester calls this method once per cost‑bearing leg.
 - Concrete pricers (`EquityPricer`, `FXForwardPricer`, `EquityOptionPricer`, etc.) implement these methods using the appropriate typed data providers.
 
@@ -408,7 +410,7 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
 - On the first call for a given key, the pricer performs all expensive data fetching and model calculations. **Which values are computed and cached depends on the backtest configuration and which methods are called:**  
   - The pricer always computes and caches the base `price`.  
   - Risk measures (greeks) are **only** computed and cached if the asset class's `risk_measures` list in `asset_class_configs` is non‑empty. If no risk decomposition is requested, no greeks are calculated or stored.  
-  - `compute_cost_exposure` reuses the same shared cache. If a greek (e.g., vega) was already computed by `valuation_data` on the same `(instrument, date)`, the cost‑exposure call retrieves it instantly at zero extra cost, and vice versa.  
+   - `compute_cost_exposure` reuses the same shared cache. If a greek (e.g., vega) was already computed by `valuation_data` on the same `(contract, date)`, the cost‑exposure call retrieves it instantly at zero extra cost, and vice versa.  
   - This ensures that the cache does not waste memory or CPU on computations that will never be used.
 - If later calls (within the same backtest or validation fold) request additional measures that were not previously cached, the pricer uses the already‑available underlying data (from the instrument and data providers) to compute only the new values and updates the cache.
 - This design is essential for performance during walk‑forward validation: the same pricer instances are reused across all folds, so that heavy pricing operations are performed only once per instrument per date, and only for the measures actually needed.
@@ -467,7 +469,7 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
 - **Leg dictionary fields:**  
   Common fields (always present): `ticker`, `size` (for `NEW` or partial‑add).  
   Optional common fields: `multiplier`, `currency`, `tags`, `asset_class` (if not resolvable from a ticker‑to‑asset‑class mapping).  
-  All other fields are treated as **instrument‑specific parameters** and are stored in the `Instrument.params` dictionary. Examples:
+  All other fields are treated as **instrument‑specific parameters** and are stored in the `Contract.params` dictionary. Examples:
   - Equities: no extra fields needed.
   - Equity options: `'strike'`, `'expiry'`, `'option_type'` (and possibly `'exercise_style'`). Alternatively, `'delta'` and `'tenor'` may be given for OTC options.
   - FX forwards: `'maturity'` (an absolute date) **or** `'tenor'` (e.g., `'1M'`, `'3M'`), along with `'notional_currency'`, `'base_currency'`. The pricer resolves the tenor to an absolute maturity date.
@@ -489,10 +491,10 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
   - `date` – the “as of” date (T‑1).
   - `trades` – a tuple of `TradeSnapshot` objects.
   - Each `TradeSnapshot` holds a tuple of `StructureSnapshot` objects, and each `StructureSnapshot` holds a tuple of `LegSnapshot` objects.
-  - `LegSnapshot` includes: `ticker`, `instrument_type`, `size`, `entry_price`, `current_price` (as of T‑1 close), `daily_total_pnl` (the full time series up to T‑1), `component_pnls: dict`, and `risk_measures: dict`.
+  - `LegSnapshot` includes: `ticker`, `asset_class`, `size`, `entry_price`, `current_price` (as of T‑1 close), `daily_total_pnl` (the full time series up to T‑1), `component_pnls: dict`, and `risk_measures: dict`.
   - The snapshot provides **only the raw leg data**. It does not pre‑compute cumulative realized/unrealized P&L or any other derived metric. If a signal needs those values, it computes them on‑the‑fly from the raw fields (e.g., `total_gross = sum(daily_total_pnl)`, `unrealized = (current_price - entry_price) * size`).
   - `TradeSnapshot` may also include a `trade_id` field so the signal can reference trades.
-  - The snapshot contains **no** live references to `Trade`/`Instrument` objects.
+  - The snapshot contains **no** live references to `Trade`/`LegState` objects.
 
 - **TradeHistory snapshot (optional):**  
   When the backtester calls `generate_signals()`, if the signal’s `requires_trade_history` flag is `True`, the backtester also passes a `trade_history_snapshot` argument. This snapshot is a **tuple of `TradeRecord` dataclasses**, each an immutable, read‑only summary of one trade.  
@@ -505,7 +507,7 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
   - `tags: tuple[str, ...]` (frozen copy of the trade’s tags)
   - `is_open: bool` (convenience flag derived from `exit_date`)
 
-  No mutable references to live `Trade`, `Structure`, or `Instrument` objects are exposed. The signal can safely inspect this snapshot to enforce cooldowns, count trades, or apply any other logic that requires knowledge of past trading activity, without any risk of corrupting the backtester’s internal state.
+  No mutable references to live `Trade`, `Structure`, or `LegState` objects are exposed. The signal can safely inspect this snapshot to enforce cooldowns, count trades, or apply any other logic that requires knowledge of past trading activity, without any risk of corrupting the backtester’s internal state.
 
 - **SMACrossoverSignal** (example): parameters `short_window`, `long_window`, a list of `tickers`, and a target `notional`. It evaluates each ticker independently and converts the target notional into shares via `int(notional / price)`. Uses market data up to `current_date - 1`.  
   `requires_portfolio_state = True` – it checks the `PortfolioState` snapshot for any open trade holding a given ticker to determine whether it is currently in a position. No internal state is stored; the signal is fully stateless.  
@@ -532,6 +534,7 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
   - The alpha signal remains stateless and calendar‑unaware.
   - Existing helper modules (`ScalingModule`, `DeltaHedgeModule`, `RollModule`) will be migrated into `OrderRule` implementations within the OrderGenerator.
   These modules are not required in Phase 1 but are planned for Phase 2.
+  A truncated `DataView` will be provided to the signal by the Phase 2 `OrderGenerator`, structurally preventing access to data beyond T‑1 and making the no‑look‑ahead convention structural rather than conventional.
 
 ### 3.8 OrderGenerator
 
@@ -572,12 +575,12 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
     - `record_pricing_inputs` – an optional boolean (default `False`). If `True`, the pricer is instructed to return the raw pricing inputs (e.g., implied vol, forward price) that were used on each date. These are stored on `LegState.pricing_inputs`.
 
 - **No pre‑defined instrument universe.** The backtester does not hold a list of instruments ahead of time.  
-  Instruments are created dynamically by the signal when it returns `TargetTrade` dictionaries. Each `TargetTrade` specifies the `Instrument` (ticker, asset class, multiplier, etc.) that the backtester uses to open a new `Trade`.  
+  Instruments are created dynamically by the signal when it returns `TargetTrade` dictionaries. Each `TargetTrade` specifies the `Contract` (ticker, asset class, multiplier, etc.) that the backtester uses to open a new `Trade`.  
   If a signal generates an instrument whose `asset_class` is not recognised (i.e., not present in `asset_class_configs`), the backtester raises an error immediately.
 
 - **Internal state:**
   - `active_trades` – list of currently open `Trade` objects. These are the *only* positions that are marked to market each day.  
-    Each `Trade` object holds the relevant `StrategyStructure`(s) and their `Instrument` legs, and accumulates P&L, risk, and event history.
+    Each `Trade` object holds the relevant `StrategyStructure`(s) and their `LegState` legs, and accumulates P&L, risk, and event history.
   - `trade_history` – list of **all** trades ever opened. A trade is added to `trade_history` when it is first created and **never removed**.  
     After a trade is closed, it remains in `trade_history` in its final state; it is simply removed from `active_trades`.  
     `trade_history` provides the immutable, complete audit trail for post‑backtest analysis.
@@ -587,7 +590,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
 
   1. **Compute PnL (T‑1 → T):**  
      For every leg in every active structure of every active trade:
-       - Ask the pricer for `price_today` by calling `pricer.price(instrument, date=T)`.
+       - Ask the pricer for `price_today` by calling `pricer.price(contract, date=T)`.
        - **If the price is `None`** (critical data missing beyond the forward‑fill limit):
            - Append `NaN` to the leg’s `daily_total_pnl` list.
            - Do **not** change the leg’s `current_price` (the last valid mark is retained).
@@ -610,6 +613,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
              `NaN` to keep all lists aligned.  If a key appears for the first time
              mid‑backtest, backfill `NaN` for all prior days before appending today’s
              value.
+          - **Opening‑day alignment:** At trade creation, the backtester records a 0.0 P&L on the entry date and (when `record_pricing_inputs` is enabled) the entry‑day pricing inputs, so all per‑leg time series are aligned from day 1. *(planned — see `docs/phase2_plan.md`)*
 
   2. **Request and execute today’s orders:**  
       *(Phase 1:* calls `signal.generate_signals()` directly. *Phase 2:* calls signal to get alpha intents, then passes them through the OrderGenerator (§3.8) to obtain `TargetTrade` orders.*)
@@ -631,15 +635,15 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
 
      - **Instrument resolution (all `NEW` orders):**  
        For every `NEW` order, before creating any `Trade` or `StrategyStructure`, the backtester passes each leg dictionary to the appropriate pricer via `pricer.resolve_instrument(leg_dict, date=T)`.  
-        - If the pricer returns a completed dictionary, the backtester uses it to construct the `Instrument` (extracting common fields like `ticker`, `size`, `multiplier`, `currency`, `tags`, and placing all other keys into `params`).  
-        - **Infrastructure keys discarded:** The common‑keys filter (see §3.1) now also strips `"cost_leg"`, `"structure_id"`, and `"leg_id"` so they never appear in `Instrument.params`.  
-        - The backtester then calls `pricer.price(instrument, date=T)` to obtain the execution price. This value is set as both the `entry_price` and the initial `current_price` of the leg.  
+        - If the pricer returns a `Contract`, the backtester uses it to construct the `LegState`.  
+        - **Infrastructure keys discarded:** The common‑keys filter (see §3.1) now also strips `"cost_leg"`, `"structure_id"`, and `"leg_id"` so they never appear in `Contract.params`.  
+        - The backtester then calls `pricer.price(contract, date=T)` to obtain the execution price. This value is set as both the `entry_price` and the initial `current_price` of the leg.  
         - If the pricer returns `None` (required market data missing), the entire `NEW` order is rejected.  
         This step completely isolates all instrument‑specific parameter resolution inside the pricer. The backtester has no knowledge of how any missing fields were filled in.
 
-      - **Instrument construction, `leg_id`, and cost‑leg identification:** When the completed leg dictionary is returned by `resolve_instrument`, the backtester constructs the `Instrument` object. At this point, the backtester:  
-        1. Generates a globally unique `leg_id` (e.g., a UUID) and stores it on the `Instrument`. This `leg_id` remains unchanged for the lifetime of the leg object.  
-        2. Inspects the resolved leg dict for the `"cost_leg"` boolean. If `true` (or if the structure has only one leg and the field is omitted), the leg’s `leg_id` is added to the structure’s `cost_leg_ids` list — the set of legs for which the backtester will compute cost exposure at order‑execution time.
+      - **LegState construction, `leg_id`, and cost‑leg identification:** When the completed leg dictionary is returned by `resolve_instrument`, the backtester constructs the `LegState` object. At this point, the backtester:  
+        1. Generates a globally unique `leg_id` (e.g., a UUID) and stores it on the `LegState`. This `leg_id` remains unchanged for the lifetime of the leg object.  
+        2. Inspects the resolved leg dict for the `"cost_leg"` boolean. If `true` (or if the structure has only one leg and the field is omitted), the `cost_leg` flag is set on the `LegState`.
 
      - **`NEW` orders (Action = `'NEW'`):**  
        (Legs have already been resolved into complete instrument specifications with entry prices set.)  
@@ -672,16 +676,16 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
 
       - **Cost‑exposure computation (all order types):**  
         Before any `StrategyStructure` lifecycle method is called, the backtester computes the cost exposures for the transaction:
-        1. For each cost‑bearing leg in the affected structure(s) (identified by `structure.cost_leg_ids`), call `pricer.compute_cost_exposure(leg, date=T)`.  
-        2. **For NEW orders**, the exposure is computed on the freshly‑constructed `Instrument` using the entry price.  
-        3. **For UNWIND and partial‑add orders**, the exposure is computed on the **pre‑event** instrument state (before `current_size` or `entry_price` are modified).  
+        1. For each cost‑bearing leg in the affected structure(s) (identified by `leg_state.cost_leg`), call `pricer.compute_cost_exposure(leg, date=T)`.  
+        2. **For NEW orders**, the exposure is computed on the freshly‑constructed `LegState` using the entry price.  
+        3. **For UNWIND and partial‑add orders**, the exposure is computed on the **pre‑event** leg state (before `current_size` or `entry_price` are modified).  
         4. Collect the results into a `{leg_id: per_unit_dict}` mapping.  
         5. If any `compute_cost_exposure` call returns `None` (data unavailable), log a warning and exclude that leg from the `cost_exposures` map for this event (the event is still recorded; the affected leg is simply treated as cost‑free for this transaction).  
         6. Pass `cost_exposures` through `Trade` methods to the `StrategyStructure` lifecycle method, which stores it in the event log entry under `"cost_exposures"`.  
         **No cost arithmetic is performed by the backtester** — it only collects and forwards the raw per‑unit metrics.
 
   3. **Compute risk at T (forward‑looking):**  
-     After all trades have been updated, for each remaining structure in `active_trades`, call `pricer.valuation_data(...)` for each leg to obtain current Greeks and other risk metrics (skip if the pricer returns `None`). Store these values on the `Instrument`. They will be used for tomorrow’s PnL decomposition and, in future phases, for delta hedging decisions.
+     After all trades have been updated, for each remaining structure in `active_trades`, call `pricer.valuation_data(...)` for each leg to obtain current Greeks and other risk metrics (skip if the pricer returns `None`). Store these values on the `LegState`. They will be used for tomorrow’s PnL decomposition and, in future phases, for delta hedging decisions.
 
      *Implementation note:* This risk computation uses the **post‑trade** portfolio — after all `NEW`, `UNWIND`, and `ROLL` orders for day T have been executed. Positions opened or modified today are included, ensuring that the stored greeks accurately represent the portfolio’s risk at the close of day T. This is essential for correct PnL decomposition on day T+1 and for any future delta‑hedging logic.
 
@@ -718,7 +722,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
   - **General continuation** – a `run_continuation(new_end_date)` method will accept a previously saved `BacktestResult`, copy its state into the backtester, and run the daily loop to `new_end_date`. The signal is re‑instantiated from its type and parameters; any positional state is recovered from the initial `PortfolioState` (or `trade_history_snapshot`). The signal does not need to be serialized.  
   **The `Summary` does not need to change** — it simply consumes `trade_history` and `trading_days` from any `BacktestResult`, whether from a fresh run or a continuation.
 
-- **Immutability:** `BacktestResult` uses tuples to prevent accidental addition/removal of items after a run. The individual `Trade`, `StrategyStructure`, and `Instrument` objects are not yet recursively frozen. In Phase 2, a full freeze/re‑initialisation protocol will make these objects recursively immutable after the run (e.g., replacing mutable lists with tuples). When the deep‑freeze is added, the `Summary` will not require any changes because it only reads data.
+- **Immutability:** `BacktestResult` uses tuples to prevent accidental addition/removal of items after a run. The individual `Trade`, `StrategyStructure`, and `LegState` objects are not yet recursively frozen. In Phase 2, a full freeze/re‑initialisation protocol will make these objects recursively immutable after the run (e.g., replacing mutable lists with tuples). When the deep‑freeze is added, the `Summary` will not require any changes because it only reads data.
 
 ### 3.10 Summary
 
@@ -780,7 +784,7 @@ A hierarchical report that provides a multi‑level view of a trade's performanc
 Rows are output in a single table in the fixed nesting order `leg → structure → lot → underlying → trade`, but only the levels listed in `detail` appear. For example, `detail=["leg", "trade"]` shows only leg rows and the trade total; `detail=["leg"]` shows only leg rows with no aggregations.
 
 **Level details**
-- **Leg** – finest detail. Contains full P&L (in local currency and, after FX conversion, base currency), cost, component P&L (e.g., `delta_pnl`, `gamma_pnl`), risk exposures (initial/current/exit for each greek, with `_local`/`_base` variants after FX conversion), and all keys from `Instrument.params` as individual columns.
+- **Leg** – finest detail. Contains full P&L (in local currency and, after FX conversion, base currency), cost, component P&L (e.g., `delta_pnl`, `gamma_pnl`), risk exposures (initial/current/exit for each greek, with `_local`/`_base` variants after FX conversion), and all keys from `Contract.params` as individual columns.
 - **Structure** – aggregates all legs belonging to the same structure. Shows combined P&L, cost, and risk measures; leg‑specific parameter columns are omitted. Since all legs within a structure share the same underlying by definition, risk measures are shown as net (signed sum) only.
 - **Lot** – aggregates all structures that share the same `lot_id`. This groups the original position and its subsequent rolls into a single continuous alpha‑intent record. All rolled structures operate on the same underlying, so risk measures are shown as net only.
 - **Underlying** – aggregates across all structures/lots with the same ticker. Risk measures are shown as net only, providing the total directional exposure to that market. P&L up to this level can still be displayed in the leg's local currency, since all legs under the same underlying share the same local currency.
@@ -796,7 +800,7 @@ Rows are output in a single table in the fixed nesting order `leg → structure 
 **Additional display options**
 - `include` controls which metric groups (P&L, greeks, component P&L) appear at each level.
 - After FX conversion, all monetary values and risk measures automatically receive `_local` / `_base` variants. Drawdown, max adverse, and max favourable metrics also get base‑currency variants.
-- Instrument‑specific parameters (`Instrument.params`) are automatically expanded into individual columns at the leg level, keeping the `Summary` completely asset‑agnostic.
+- Instrument‑specific parameters (`Contract.params`) are automatically expanded into individual columns at the leg level, keeping the `Summary` completely asset‑agnostic.
 
 | `'hit_ratio'`     | Hit ratio over a configurable timeframe, computed per trade (by entry date), not per day. | `timeframe` (default `'yearly'`), `include` | When `include` is specified, it controls which columns are produced. Supported values: `'gross'`, `'net'`, `'total_trades'`. If omitted, all three are produced. `total_trades` shows the number of trades started in each period and the overall total. The output DataFrame is indexed by the time group (e.g., year) with an additional `"total"` row at the bottom that is the hit ratio computed across **all** trades (not the average of the group ratios). |
 | `'drawdown_table'`| Top N drawdowns with dates and underwater days. | `top_n` (default 10), `include` | Same `include` logic as `'hit_ratio'`: controls gross vs. net drawdowns. |
@@ -926,7 +930,7 @@ summary = Summary(spec)
 
 **Processing steps (inside `generate`):**
 
-  1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved.
+  1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved. The opening‑day 0.0 P&L (and any pricing inputs) are recorded by the backtester at trade creation, so the Summary no longer prepends a zero on the entry date. *(planned — see `docs/phase2_plan.md`)*
 
    2. **Aggregation and missing‑data handling:** Apply the `missing_data_mode` semantics defined earlier in this section (`'any'`, `'all'`, `'per_leg'`). In `'all'` mode, P&L on days where any leg of a trade has genuine missing data is zeroed across all legs of that trade — including single‑leg trades — and deferred to the next valid day via cumsum‑drop‑diff, while risk series (`*_ts`) are forward‑filled.
 
@@ -957,6 +961,7 @@ The adjustment logic in `'all'` mode automatically handles any new time‑series
 - Series ending in `_ts` (valuation‑data / risk time series) receive a forward‑fill on masked days.
 In `'any'` mode, all series are left raw.
 No changes to the `Summary` code are required when new decomposition or risk measures are added; only the pricer and backtester need to populate the new fields.
+A planned `cost_data_gaps` report will surface days where cost data was unavailable, complementing the existing warning.
 
 **Extending the Summary module:**
 
@@ -984,15 +989,15 @@ The constructor takes no arguments. The primary method is:
 
 The `spec` dictionary contains:
 
-- `'granularity'`: `'trade'`, `'structure'`, or `'instrument'`.  
+- `'granularity'`: `'trade'`, `'structure'`, or `'leg'`.  
   Defines the unit of output.
 - `'filter'` (optional): a **callable** that receives a `Trade` and returns `True`/`False`. If omitted, all trades are included.
 - `'attributes'`: a list of **attribute names** to extract from each output unit. These can be:
   - Simple scalar fields of the unit: `'trade_id'`, `'structure_id'`, `'entry_date'`, `'exit_date'`, `'tags'`, `'gross_pnl'`, `'entry_price'`, etc.
-  - **Parent attributes via dot‑notation** – when the granularity is `'instrument'`, attributes of the parent `Structure` or `Trade` are accessible using paths like `'structure.tags'`, `'structure.entry_date'`, `'trade.entry_date'`, `'trade.tags'`, etc. The special identifiers `'trade_id'` and `'structure_id'` are always available as shorthand for `'trade.trade_id'` and `'structure.structure_id'`.
-  - Convenience derived fields: `'underlying'` (the underlying ticker derived from the instrument’s `params`), `'asset_class'`, `'strike'`, `'expiry'`, etc.
+  - **Parent attributes via dot‑notation** – when the granularity is `'leg'`, attributes of the parent `Structure` or `Trade` are accessible using paths like `'structure.tags'`, `'structure.entry_date'`, `'trade.entry_date'`, `'trade.tags'`, etc. The special identifiers `'trade_id'` and `'structure_id'` are always available as shorthand for `'trade.trade_id'` and `'structure.structure_id'`.
+  - Convenience derived fields: `'underlying'` (the underlying ticker derived from the contract’s `params`), `'asset_class'`, `'strike'`, `'expiry'`, etc.
   - Time‑series fields: `'daily_total_pnl'`, `'delta_ts'`, `'gamma_ts'`, etc.
-  - **Structure event logs** – at `'structure'` granularity, the derived attribute `'event_log_flat'` returns a DataFrame where each row is a single event. Columns include `structure_id`, `trade_id`, and all fields from the event dictionary (`event_type`, `date`, `unit_size_change`, `cost_exposures`, `cost_free`).
+  - **Structure event logs** – at `'structure'` granularity, the derived attribute `'event_log_flat'` returns a DataFrame where each row is a single event. Columns include `structure_id`, `trade_id`, and all fields from the event dictionary (`event_type`, `date`, `unit_size_change`, `leg_size_changes`, `cost_exposures`, `cost_free`).
 
 **Output format:**
 
@@ -1008,11 +1013,11 @@ The method returns a **dictionary** where each key is one of the requested attri
 - `inspect(trade_history: list[Trade], unit_type: str, unit_id: str, cost_model: CostModel | None = None, fx_rates: dict[str, pd.Series] | None = None, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame`
 
 Returns a date‑indexed DataFrame containing every available raw P&L, risk, component P&L, and pricing‑input time series for the specified unit.  
-`unit_type` must be one of `'trade'`, `'structure'`, or `'instrument'`.  
+`unit_type` must be one of `'trade'`, `'structure'`, or `'leg'`.  
 `unit_id` is the unique identifier for that unit type:
   - For `'trade'`: the `trade_id`.
   - For `'structure'`: the `structure_id`.
-  - For `'instrument'`: the `leg_id`.
+  - For `'leg'`: the `leg_id`.
 
 `cost_model` and `fx_rates` are optional. They are only used to add derived columns (cumulative net P&L, USD‑converted series) and are not required for the raw data that `inspect()` returns. If omitted, only raw time‑series data from the leg is included.
 
@@ -1048,7 +1053,7 @@ This method is purely a convenience wrapper around `extract()`; you can always r
 2. **“Delta history for all legs of trades that started in January, with underlying and structure ID”**
   ```python
   'delta_jan': {
-    'granularity': 'instrument',
+    'granularity': 'leg',
     'filter': lambda t: t.entry_date >= '2025-01-01' and t.entry_date <= '2025-01-31',
     'attributes': ['delta_ts', 'underlying', 'structure_id']
   }
@@ -1066,7 +1071,7 @@ This method is purely a convenience wrapper around `extract()`; you can always r
 3. **“All delta history aggregated to structure level (no filter)”**
   ```python
   'delta_struct_all': {
-    'granularity': 'instrument',
+    'granularity': 'leg',
     'attributes': ['delta_ts', 'structure_id']
   }
   ```
@@ -1102,11 +1107,11 @@ jan_pnl = jan_pnl.sort_values(ascending=False)
 ```
 **2. Get the leg IDs belonging to the biggest contributor.**
 
-Pull instrument‑level data for that trade, so you know which legs to inspect.
+Pull leg‑level data for that trade, so you know which legs to inspect.
 ```python
 biggest_trade_id = jan_pnl.index[0]
 legs_info = extractor.extract(trade_history, {
-    'granularity': 'instrument',
+    'granularity': 'leg',
     'filter': lambda t: t.trade_id == biggest_trade_id,
     'attributes': ['trade_id', 'structure_id', 'ticker', 'underlying', 'gross_pnl']
 })
@@ -1120,7 +1125,7 @@ fx_rates = price_provider.get_fx_series(['USDJPY', 'USDHKD'])  # example
 for leg_id in leg_ids:
     leg_df = extractor.inspect(
         trade_history,
-        unit_type='instrument',
+        unit_type='leg',
         unit_id=leg_id,
         cost_model=cost_model,
         fx_rates=fx_rates,
@@ -1139,7 +1144,7 @@ This prints a DataFrame indexed by date for each leg, showing daily P&L, all ris
 # or aggregate the raw extractor data as shown below.
 
 all_legs = extractor.extract(trade_history, {
-    'granularity': 'instrument',
+    'granularity': 'leg',
     'attributes': ['daily_total_pnl', 'underlying']
 })
 jan_leg_pnl = all_legs['daily_total_pnl'].loc['2025-01-01':'2025-01-31'].sum()
@@ -1198,8 +1203,8 @@ A separate `CostModel` object converts those structure‑level events into a cos
   The backtest produces gross P&L and an event log per structure. Changing cost assumptions only requires re‑computing the cost series from those logs.
 - **Cost granularity matches the structure.**  
   Costs are incurred at the structure level – i.e., at trade entry, rolls, and each unwind event. Partial unwinds incur proportional costs.
-- **Per‑unit metrics × unit size change = transacted exposure.**  
-  The event log stores **per‑unit** risk metrics (e.g., `notional_per_unit`, `vega_per_contract`) alongside `unit_size_change`. The cost calculator multiplies them to obtain the transacted exposure, ensuring partial unwinds are charged correctly (50% unwind charges 50% of the exposure).  
+- **Per‑unit metrics × per‑leg size delta = transacted exposure.**  
+  The event log stores **per‑unit** risk metrics (e.g., `notional_per_unit`, `vega_per_contract`) alongside `unit_size_change`; each event also carries `leg_size_changes` (a `leg_id` → per‑leg delta map). The cost calculator multiplies each per‑unit metric by the leg‑specific delta — not the structure‑level total — ensuring partial unwinds are charged correctly (50% unwind charges 50% of the exposure). *(planned — see `docs/phase2_plan.md`)*  
 - **Cost calculators are asset‑class‑specific.**  
   For options, cost may be a function of total vega; for equities/futures, a function of notional; for interest rate swaps, a function of dv01. Each calculator knows the formula for its asset class.
 - **Extensible from fixed to dynamic models.**  
@@ -1220,12 +1225,14 @@ class BaseCostCalculator(ABC):
           - "date": str
           - "event_type": str
           - "unit_size_change": float
+          - "leg_size_changes": dict[str, float]  # leg_id -> per-leg size delta
           - "cost_exposures": dict[str, dict]  # leg_id -> per-unit metrics
           - "cost_free": bool
 
         The calculator:
           1. Reads event["cost_exposures"][leg_id] to get the per-unit metrics.
-          2. Multiplies each per-unit metric by event["unit_size_change"]
+          2. Multiplies each per-unit metric by event["leg_size_changes"][leg_id]
+             (the leg-specific delta, not the structure-level unit_size_change)
              to obtain the transacted exposure.
           3. Applies the asset-class cost formula (e.g., bps on notional).
 
@@ -1281,7 +1288,7 @@ class EquityCostCalculator(BaseCostCalculator):
                      data_feed: DataFeed | None = None) -> float:
         per_unit = event["cost_exposures"][leg_id]
         notional_per_unit = per_unit["notional_per_unit"]
-        transacted_notional = notional_per_unit * event["unit_size_change"]
+        transacted_notional = notional_per_unit * event["leg_size_changes"][leg_id]
         return transacted_notional * self._bps / 10000.0
 ```
 
@@ -1430,10 +1437,13 @@ Both tests are purely runner‑level: they use the existing `Backtester`, `Summa
 ### Phase 1: Core skeleton (minimal end‑to‑end)
 Build the following in order, each tested before moving on:
 
-1. **Instrument** – pure dataclass with `params`, P&L lists (`daily_total_pnl`, `current_price`, `current_size`, `entry_price`), valuation‑data and component‑PnL lists (initially empty), and `pricing_inputs`.
+1. **Contract & LegState** – `Contract` is a frozen dataclass for
+   static instrument identity; `LegState` is a mutable dataclass holding
+   `params`, P&L lists (`daily_total_pnl`, `current_price`,
+   `current_size`, `entry_price`), valuation-data, and `pricing_inputs`.
 2. **DataFeed and CsvBackend** – the `DataFeed` class with `get_value()` and `get_series()` methods, and a `CsvBackend` that reads a CSV of daily adjusted close prices. Also includes a thin `EquityPriceProvider` that wraps the `DataFeed` and exposes `get_price(ticker, date)`. The backtester and pricers depend only on the `DataFeed` interface; the backend is swappable.
 3. **EquityPricer** – implements `price()`, `valuation_data()` (empty for equities), `resolve_instrument()` (pass‑through for equities), and `pricing_inputs()` (returns an empty dict).
-4. **StrategyStructure** – a standalone class with `legs` (list of `Instrument`, always one leg in Phase 1), an event log for cost, and lifecycle methods `open(date)`, `unwind(date, fraction=1.0)`, and `roll(new_structure, date)` (stubbed – raises `NotImplementedError` in Phase 1). Building this as a real class from day one avoids any refactoring of `Trade`, the backtester, or signals when multi‑leg support is added later.
+4. **StrategyStructure** – a standalone class with `legs` (list of `LegState`, always one leg in Phase 1), an event log for cost, and lifecycle methods `open(date)`, `unwind(date, fraction=1.0)`, and `roll(new_structure, date)` (stubbed – raises `NotImplementedError` in Phase 1). Building this as a real class from day one avoids any refactoring of `Trade`, the backtester, or signals when multi‑leg support is added later.
 5. **Trade** – with `active_structures` / `structure_history`, lifecycle methods (`add_structure`, `unwind_structure`), tags, and cost‑event recording. In Phase 1 every trade contains exactly one structure with one leg. `roll_structure` may be implemented as a stub; it is not exercised by the SMA example.
 6. **CostModel** – `CostModel` with `EquityCostCalculator` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.13).
 7. **BaseSignal** and **SMACrossoverSignal** – signal returns `TargetTrade` dictionaries with `NEW` / `UNWIND` actions; one‑day lag handled internally.
@@ -1444,7 +1454,7 @@ Build the following in order, each tested before moving on:
     - Creates a `DataFeed` with a `CsvBackend`, an `EquityPriceProvider`, `EquityPricer`, a `CostModel` with `EquityCostCalculator`, `SMACrossoverSignal`, `Backtester`, and `Summary`.
     - Runs the backtest from 2020-01-01 to 2022-12-31.
     - Prints the equity curve and standard metrics.
-11. **Unit tests** – for Instrument, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.
+11. **Unit tests** – for Contract/LegState, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.
 
 ### Phase 2: Validation
 1. **CalendarProvider** (§3.5): Implement with CSV holiday files, union/intersection logic, and core methods (`trading_days`, `is_trading_day`, `next_trading_day`). Replace `BacktestConfig.calendar_ticker` with a CalendarProvider instance.
@@ -1469,9 +1479,9 @@ Build the following in order, each tested before moving on:
 
 - **Signal lag:** Signal output is always based on data up to T‑1, and orders are executed at T close. The signal itself handles the lag internally; the backtester never delays orders.
 - **Transaction costs:** Cost events are recorded on `StrategyStructure` objects at every lifecycle event (open, partial add, partial unwind, roll, full close). The `CostModel` converts those events into a daily cost series during the summary phase. Gross and net P&L are always separate.
-- **Instrument parameters:** All instrument‑specific fields beyond `ticker`, `asset_class`, `multiplier`, `currency`, and `tags` are stored in the `params` dictionary. The backtester never inspects `params`; only the pricer does.
+- **Contract parameters:** All instrument‑specific fields beyond `ticker`, `asset_class`, `multiplier`, `currency`, and `tags` are stored in the `params` dictionary. The backtester never inspects `params`; only the pricer does.
 - **Instrument resolution:** The leg dictionary in a `TargetTrade` may omit instrument‑specific parameters (e.g., strike, maturity). The pricer’s `resolve_instrument()` method fills in any missing fields at execution time.
-- **P&L is always return‑centric:** The Instrument stores daily P&L changes, not cumulative balances. Cumulative P&L, realized/unrealized splits, and other derived metrics are computed on‑the‑fly by the Summary.
+- **P&L is always return‑centric:** The LegState stores daily P&L changes, not cumulative balances. Cumulative P&L, realized/unrealized splits, and other derived metrics are computed on‑the‑fly by the Summary.
 - **Cost and FX are post‑processing:** The backtester never computes costs or converts currencies. Both are handled externally by the `CostModel` and the Summary (or the user), allowing assumptions to be changed without re‑running the simulation.
 - **Missing data:** Data providers forward‑fill short gaps (≤ configurable limit). For longer gaps, the pricer returns `None`, the backtester records `NaN` in the leg’s P&L, but `current_price` is not updated, preserving cumulative P&L integrity.
 - **T‑1 greeks for P&L attribution:** Greeks‑based P&L decomposition always uses T‑1 greeks to avoid look‑ahead bias.

@@ -692,3 +692,226 @@ fix: post-Task 2 review — unused imports, doc corrections, NaN-padding
   NaN-padding and mid-run key backfilling
 - All 130 tests pass
 ```
+
+---
+
+## 2026-07-31 -- Document correctness fixes for pre-Task 3
+
+### Prompt
+Finalise a set of correctness fixes to be applied before Task 3 (FX conversion)
+by recording them in the project documentation. Documentation only — no code
+changes. Pending behaviour in design_notes.md is marked "(planned — see
+`docs/phase2_plan.md`)".
+
+### Changes applied
+
+- **`docs/phase2_plan.md`** — Added a new sub-section "Correctness fixes
+  (pre-Task 3)" under Phase 2A, immediately before Task 3, with five
+  checkboxes:
+  - Multi-leg cost overcount: add `leg_size_changes` to event log and use
+    per-leg delta in cost calculator.
+  - Opening-day P&L / pricing-input alignment: record 0.0 P&L and pricing
+    inputs at trade creation; remove Summary prepend-zero.
+  - None inside compute_cost_exposure: return None from pricer when price is
+    missing.
+  - Float-equality unwind fraction: add range guard and tolerance check for
+    full close.
+  - pytest.raises(FrozenInstanceError) in frozen-snapshot test.
+
+- **`design_notes.md`** — Updated six sections to reflect the upcoming fixes
+  (pending behaviour marked "(planned — see `docs/phase2_plan.md`)"):
+  - §3.2 (Strategy Structure): added a `leg_size_changes` bullet alongside
+    `unit_size_change` in "Event log – unit size changes"; rewrote the
+    multi-leg transacted-size paragraph to read the per-leg delta directly
+    from `leg_size_changes`.
+  - §3.6 (Pricer): `compute_cost_exposure` now returns `None` itself (not a
+    dict containing `None`) when the market price is unavailable; CostModel
+    uses the leg's size delta in `event["leg_size_changes"]`.
+  - §3.9 (Backtester): added an opening-day alignment note — 0.0 P&L and
+    pricing inputs are recorded at trade creation, so per-leg time series are
+    aligned from day 1.
+  - §3.10 (Summary): processing step 1 clarified that the opening-day 0.0 P&L
+    is recorded at trade creation and the Summary no longer prepends a zero.
+  - §3.11 (Data Extractor): event-log column listing now includes
+    `leg_size_changes`.
+  - §3.13 (Cost Model): "Key design properties" bullet updated to
+    "per-unit metrics × per-leg size delta"; `compute_cost` docstring adds the
+    `leg_size_changes` event field and multiplies by
+    `event["leg_size_changes"][leg_id]`; EquityCostCalculator example updated.
+
+### Test impact
+None — documentation only. All tests pass.
+
+### Manual changes
+- Marked task 2 finished.
+
+### Suggested commit message
+```
+docs: record correctness fixes planned before Task 3
+
+- phase2_plan.md: add "Correctness fixes (pre-Task 3)" sub-section with five
+  checkboxes (leg_size_changes cost fix, opening-day P&L/pricing-input
+  alignment, compute_cost_exposure None, unwind-fraction guard,
+  FrozenInstanceError test)
+- design_notes.md: update §3.2/§3.6/§3.9/§3.10/§3.11/§3.13 to reflect the
+  upcoming fixes; mark pending behaviour as "(planned — see
+  docs/phase2_plan.md)"
+```
+
+---
+
+## 2026-07-31 -- Document deferred code-review findings
+
+### Prompt
+Record the triaged, deferred code-review findings in the project documentation so
+they are not lost. Immediate correctness fixes are already tracked in
+`docs/phase2_plan.md` under "Correctness fixes (pre-Task 3)".
+
+### Changes applied
+
+- **`docs/phase2_plan.md`**:
+  - Added a checkbox for a multi-leg proportional-add cost test validating the
+    `leg_size_changes` fix (finding 3.3) right after the "Multi-leg cost
+    overcount" line.
+  - Added a Task 5 deliverable bullet: the `OrderGenerator` introduces a
+    truncated `DataView` that prevents signals from accessing data beyond T-1,
+    making the no-look-ahead property structural (finding 1.2).
+  - Added a "Testing & hardening" task at the top of Phase 2B with checkboxes
+    for invariant/property tests (P&L conservation, time-series length
+    alignment, missing-data deferral — finding 3.2) and untested-branch coverage
+    (`total_size == 0`, `per_leg` mode — finding 3.4).
+  - Added two Phase 2C bullets: surface `cost_data_gaps` in Summary output
+    (finding 1.5) and populate `LegSnapshot` greeks once risk measures are
+    implemented (finding 2.4).
+  - Added a new "Phase 3+ (Future)" section with checkboxes for a `CostExposure`
+    TypedDict (finding 2.1), constructor-enforced signal requirement
+    declarations (finding 2.3), and a `MissingDataAligner` extraction from
+    `Summary` (finding 2.5).
+
+- **`design_notes.md`**:
+  - §3.6 (Pricer): changed abstract method signatures from `instrument` to
+    `contract` (`price`, `valuation_data`, `pricing_inputs`,
+    `compute_cost_exposure`); updated narrative references from `Instrument` to
+    `Contract`/`LegState`; updated `compute_cost_exposure` examples to use
+    `leg_state`.
+  - §3.7 (Signal): added a sentence in "Separation of alpha and execution" noting
+    the Phase 2 `OrderGenerator`'s `DataView` structurally enforces the
+    no-look-ahead convention.
+  - §3.10 (Summary): added a note under "Extensibility for future series types"
+    that a planned `cost_data_gaps` report will surface days where cost data was
+    unavailable, complementing the existing warning.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: record deferred code-review findings for Phase 2
+
+- phase2_plan.md: add multi-leg proportional-add cost test checkbox
+  (finding 3.3); add Task 5 DataView no-look-ahead deliverable (finding
+  1.2); add Phase 2B "Testing & hardening" task (findings 3.2, 3.4); add
+  Phase 2C bullets for cost_data_gaps in Summary and LegSnapshot greeks
+  (findings 1.5, 2.4); add Phase 3+ section (findings 2.1, 2.3, 2.5)
+- design_notes.md: switch §3.6 pricer signatures from instrument to
+  contract; replace stale Instrument references with Contract/LegState;
+  note §3.7 DataView and §3.10 cost_data_gaps report
+- worklog_phase2.md: append documentation-update entry
+```
+
+---
+
+## 2026-07-31 -- Fix §3.6 resolve_instrument docs (Contract, not dict)
+
+### Prompt
+§3.6 in design_notes.md still documented `resolve_instrument` as returning
+`dict | None` and described the old dict-based workflow. This was missed
+during the Task 2 documentation updates.
+
+### Changes applied
+- **`design_notes.md` §3.6**:
+  - Signature: `resolve_instrument(leg_dict, date) -> Contract | None`.
+  - Rewrote the description: the pricer constructs the fully resolved
+    `Contract` from the leg dictionary, filtering out infrastructure keys
+    and preserving instrument-specific parameters in `Contract.params`;
+    the entry price is still obtained separately via `price()`.
+  - Updated all examples (equity, exchange-traded option, OTC option,
+    FX forward) and the general tenor-resolution rule to describe a
+    returned `Contract` instead of a returned dict.
+  - Reworded "Preserving the original trading intent": original key-value
+    pairs remain in `Contract.params` alongside the resolved values.
+  - Added a short "Design tension (deferred)" note: mixed original-intent
+    and resolved params mean economically identical instruments may not
+    compare equal; Phase 4 will move original intent to
+    `LegState.original_intent`, making `Contract` a pure, hashable identity.
+  - Rewrote the cost-leg note: `cost_leg` is an infrastructure key, filtered
+    out of the `Contract`, and consumed by the backtester to set
+    `LegState.cost_leg`.
+- **`docs/phase2_plan.md`**: added a Phase 3+ checkbox to migrate original
+  trading intent from `Contract.params` to `LegState.original_intent`.
+
+### Test impact
+None -- documentation only.
+
+### Suggested commit message
+```
+docs: fix §3.6 resolve_instrument to return Contract; plan original_intent migration
+```
+
+---
+
+## 2026-07-31 -- Final documentation sweep: stale Instrument/cost_leg refs in design notes
+
+### Prompt
+Apply a final documentation sweep to design_notes.md to fix stale references
+missed during the Task 2 Contract/LegState split. Mechanical find-and-replace
+only -- no design decisions. Wait for "apply now" before writing.
+
+### Changes applied (design_notes.md)
+
+- **Category 1 -- removed `cost_leg_ids` references** (deleted in Task 2):
+  - §3.2 cost exposure: "stored in `structure.cost_leg_ids`" →
+    "determined at order-execution time by checking each leg's `cost_leg`
+    flag"; dropped the now-contradictory "determined once when the structure
+    is created (see §3.7)" clause.
+  - §3.9 construction: "the leg's `leg_id` is added to the structure's
+    `cost_leg_ids` list" → "the `cost_leg` flag is set on the `LegState`".
+  - §3.9 cost-exposure computation: "identified by `structure.cost_leg_ids`" →
+    "identified by `leg_state.cost_leg`".
+
+- **Category 2 -- removed the false `cost_leg_id` retention claim**:
+  - §3.2: deleted the sentence "The previous `cost_leg_id` field is retained
+    for readability but is now redundant (...)".
+
+- **Category 3 -- replaced remaining `Instrument` references** with `Contract`
+  or `LegState` as appropriate (§3.1, §3.2, §3.7, §3.9, §3.10, §5, §7).
+  §3.9 §price-call parenthetical dropped (Contract construction lives in §3.6).
+
+- **Category 4 -- Data Extractor granularity terminology**:
+  - §3.11 `'granularity'`/`unit_type` now use `'leg'` instead of
+    `'instrument'`; all 5 code examples updated.
+
+- **Three extra stale references (confirmed with user)**:
+  - §3.10 additional-display-options: `Instrument.params` → `Contract.params`.
+  - §3.11 example prose: "Pull instrument-level data" → "Pull leg-level data".
+  - §3.2 cost exposure: fixed stale cross-reference `(see §3.5)` → `(see §3.6)`
+    (compute_cost_exposure is documented in the Pricer section).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: final sweep -- remove stale cost_leg refs; Instrument -> Contract/LegState
+
+- Remove remaining cost_leg_ids references in §3.2/§3.9 (cost-leg set is now
+  derived from each LegState's cost_leg flag at order-execution time)
+- Delete the false cost_leg_id retention claim in §3.2 event log
+- Replace remaining Instrument references with Contract or LegState across
+  §3.1/§3.2/§3.7/§3.9/§3.10/§5/§7
+- Switch Data Extractor granularity terminology from 'instrument' to 'leg'
+  in §3.11 (spec, inspect(), and all code examples)
+- Fix extra stale refs: §3.10 Instrument.params, §3.11 example prose,
+  §3.2 §3.5->§3.6 cross-reference
+- Append worklog entry
+```
