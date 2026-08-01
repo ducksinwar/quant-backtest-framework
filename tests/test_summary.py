@@ -14,7 +14,7 @@ def _make_trade(trade_id, entry_date, exit_date, leg_id, pnl_list, tags=None, ti
         contract=contract, leg_id=leg_id,
         current_size=100.0, entry_price=450.0, current_price=455.0,
     )
-    leg.daily_total_pnl = pnl_list
+    leg.daily_total_pnl = [0.0] + pnl_list
 
     structure = StrategyStructure(
         structure_id=f"s_{trade_id}", legs=[leg],
@@ -53,7 +53,7 @@ class TestSummaryEquityCurve:
         assert "cost" in df.columns
         assert "net" in df.columns
         assert len(df) == 4
-        # PnL on 01-03, 01-04, 01-05; entry_date 01-02 prepended with 0
+        # Opening-day 0.0 P&L recorded at trade creation on 01-02
         expected_dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
         assert list(df.index) == expected_dates
 
@@ -76,14 +76,14 @@ class TestSummaryEquityCurve:
         result = summary.generate([trade], cost_model, trading_days=trading_days)
 
         df = result["equity_curve"]
-        # Entry date 01-02 prepended with PnL=0; cost on 01-02 makes net negative
-        assert df.loc["2024-01-02", "net"] < df.loc["2024-01-02", "gross"]
+        # Opening-day P&L is 0.0; cost event still occurs on the entry date
+        assert df.loc["2024-01-02", "gross"] == pytest.approx(0.0)
         # 450 * 100 * 2 / 10000 = 9.0 on entry date
         assert df.loc["2024-01-02", "cost"] == pytest.approx(9.0)
-        assert df.loc["2024-01-02", "net"] == pytest.approx(0.0 - 9.0)
+        assert df.loc["2024-01-02", "net"] == pytest.approx(-9.0)
         # PnL on 2024-01-03: gross=100, cost column is cumulative (9.0)
         assert df.loc["2024-01-03", "gross"] == pytest.approx(100.0)
-        assert df.loc["2024-01-03", "net"] == pytest.approx(100.0 - 9.0)
+        assert df.loc["2024-01-03", "net"] == pytest.approx(91.0)
 
     def test_equity_curve_include_subset(self):
         leg_id = "leg_001"

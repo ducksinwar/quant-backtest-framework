@@ -1,3 +1,4 @@
+import dataclasses
 from unittest.mock import MagicMock, PropertyMock
 
 import numpy as np
@@ -62,7 +63,7 @@ class TestSnapshots:
             ticker="SPY", asset_class="equity",
             size=100.0, entry_price=450.0, current_price=455.0,
         )
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             ls.size = 200.0
 
     def test_portfolio_state_builds_from_trades(self):
@@ -895,15 +896,16 @@ class TestBacktesterPricingInputsNanPadding:
 
         leg = history[0].structure_history[0].legs[0]
         spot = leg.pricing_inputs.get("spot", [])
-        assert len(spot) == 4
+        assert len(spot) == 5
         assert spot == pytest.approx(
-            [100.0, float("nan"), 102.0, 104.0], nan_ok=True,
+            [100.0, float("nan"), 102.0, 104.0, float("nan")], nan_ok=True,
         )
 
         rate = leg.pricing_inputs.get("rate", [])
-        assert len(rate) == 4
+        assert len(rate) == 5
         assert rate == pytest.approx(
-            [float("nan"), float("nan"), 0.05, float("nan")], nan_ok=True,
+            [float("nan"), float("nan"), 0.05, float("nan"), float("nan")],
+            nan_ok=True,
         )
 
 

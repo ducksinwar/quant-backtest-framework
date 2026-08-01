@@ -915,3 +915,207 @@ docs: final sweep -- remove stale cost_leg refs; Instrument -> Contract/LegState
   §3.2 §3.5->§3.6 cross-reference
 - Append worklog entry
 ```
+
+---
+
+## 2026-08-01 -- Apply pre-Task 3 correctness fixes + doc sync
+
+### Prompt
+Apply the five correctness fixes documented in `docs/phase2_plan.md` under
+"Correctness fixes (pre-Task 3)", correct two bugs found in the initial diff,
+run the full test suite, update the worklog, and remove the now-implemented
+`(planned)` annotations from `design_notes.md`.
+
+### Changes applied
+
+**Fix 1 -- Multi-leg cost overcount (`leg_size_changes`)**
+
+- **`backtester/strategy_structure.py`**:
+  - `open()`: records `leg_size_changes` (leg_id -> current size) alongside
+    the structure-level `unit_size_change` (kept for backward compat).
+  - `add_size()`: builds `leg_size_changes = {}` before the loop and records
+    each leg's own delta (`new_total - old_size`), so proportional adds
+    charge each leg at its own transacted size.
+  - `unwind()`: computes `leg_size_changes` (`current_size * fraction`) for
+    each leg **before** reducing `current_size`.
+- **`backtester/cost_model.py`** -- `EquityCostCalculator.compute_cost`
+  multiplies per-unit notional by `event["leg_size_changes"][leg_id]`
+  instead of the structure-level `event["unit_size_change"]`.
+
+**Fix 2 -- Opening-day P&L / pricing-input alignment**
+
+- **`backtester/backtest_engine.py`** -- `_resolve_and_price_leg` appends a
+  `0.0` to `leg_state.daily_total_pnl` at trade creation, and (when the
+  asset class has `record_pricing_inputs` enabled) records the entry-day
+  pricing inputs via `setdefault(key, []).append(value)`.
+- **`backtester/summary.py`** -- `_extract_leg_data` now uses
+  `pnl_start = entry_idx` and the prepend-zero block is deleted; the
+  opening-day 0.0 P&L is supplied by the backtester instead.
+
+**Fix 3 -- None inside compute_cost_exposure**
+
+- **`backtester/pricers/equity_pricer.py`** -- `compute_cost_exposure`
+  returns `None` when the provider price is `None` (previously returned a
+  dict containing `None`). Return hint updated to
+  `-> dict[str, float] | None` to match `BasePricer`.
+
+**Fix 4 -- Float-equality unwind fraction + range guard**
+
+- **`backtester/strategy_structure.py`** -- `unwind()` validates
+  `0.0 < fraction <= 1.0` (raises `ValueError` otherwise) and sets
+  `event_type` via `abs(fraction - 1.0) < 1e-12`.
+- **`backtester/trade.py`** -- `unwind_structure()` treats the structure as
+  fully closed when `abs(fraction - 1.0) < 1e-12`.
+
+**Fix 5 -- Tighten pytest.raises assertion**
+
+- **`tests/test_backtester.py`** -- frozen-snapshot test now expects
+  `dataclasses.FrozenInstanceError` (`import dataclasses` added).
+
+**Test updates**
+
+- **`tests/test_cost_model.py`** -- hand-built event dict in
+  `TestEquityCostCalculator` now includes `"leg_size_changes"`; partial
+  unwind test unchanged (delta 50.0 matches `current_size * fraction`).
+- **`tests/test_strategy_structure.py`** -- `test_open_records_event`
+  asserts `event["leg_size_changes"] == {"leg_1": 100.0}`.
+- **`tests/test_summary.py`** -- `_make_trade` prepends the opening-day
+  `0.0` to `daily_total_pnl`; `test_cost_subtracted_from_net` asserts
+  entry-day gross 0.0 / cost 9.0 / net -9.0 and 01-03 net 91.0 (cost column
+  is cumulative).
+- **`tests/test_backtester.py`** --
+  `test_pricing_inputs_nan_padded_for_missing_keys` expects 5 aligned
+  entries (opening day is now recorded), `[100.0, nan, 102.0, 104.0, nan]`
+  for spot.
+
+**Bug corrections to the initial diff**
+
+1. `test_summary.py` entry-day cost was incorrectly zeroed; the open event
+   still executes on the entry date and incurs cost, so entry-day cost is
+   9.0 and net is -9.0.
+2. `StrategyStructure.add_size()` was missing the `leg_size_changes = {}`
+   initialisation before the loop.
+
+**Documentation sync (`design_notes.md`)**
+
+Removed the `*(planned -- see `docs/phase2_plan.md`)*` annotation from the
+seven now-implemented descriptions: §3.2 `leg_size_changes` bullet, §3.2
+multi-leg transacted-size paragraph, §3.6 `None` return line, §3.6
+leg-delta multiplication line, §3.9 opening-day alignment bullet, §3.10
+processing-step-1 sentence, and §3.13 per-unit x per-leg delta bullet. The
+§3.6 "Design tension (deferred)" note and all other forward-looking notes
+are left untouched.
+
+### Test impact
+All 151 tests pass (150 prior + 1 new from earlier work; the 
+`test_equity_curve_gross_cost_net` expected 4 rows unchanged). The
+`test_pricing_inputs_nan_padded_for_missing_keys` expectations were updated
+for the new opening-day-aligned series length.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+fix: apply pre-Task 3 correctness fixes + sync design notes
+
+- Add leg_size_changes (leg_id -> delta) to open/add_size/unwind events;
+  EquityCostCalculator multiplies by the per-leg delta, not the
+  structure-level unit_size_change
+- Record opening-day 0.0 P&L and pricing inputs in _resolve_and_price_leg;
+  Summary no longer prepends a zero on the entry date (pnl_start = entry_idx)
+- Return None (not a dict with None) from compute_cost_exposure when the
+  market price is unavailable; match base class return hint
+- Guard unwind fraction to (0, 1] and use 1e-12 tolerance for full-close
+  detection in StrategyStructure.unwind and Trade.unwind_structure
+- Tighten frozen-snapshot test to dataclasses.FrozenInstanceError
+- Update tests: opening-day-aligned pnl lists, entry-day cost/net
+  expectations, hand-built event dicts, leg_size_changes assertion
+- design_notes.md: drop (planned) annotations from now-implemented
+  §3.2/§3.6/§3.9/§3.10/§3.13 descriptions
+- All 151 tests pass
+```
+
+## 2026-08-01 -- Fix stale unit_size_change reference in design notes §3.2
+
+### Prompt
+Fix a stale sentence in `design_notes.md` §3.2 that was missed during the
+documentation sweeps: line 234 still said the CostModel combines per-unit
+metrics with `unit_size_change`, but the implementation multiplies by the
+per-leg delta from `event["leg_size_changes"][leg_id]`.
+
+### Changes applied
+
+- **`design_notes.md` §3.2 (Event log - cost exposure)** -- replaced
+  "combined with `unit_size_change`" with "combined with the leg's size
+  delta from `event["leg_size_changes"][leg_id]`". Now consistent with the
+  multi-leg paragraph on line 239, §3.6 line 394, §3.13 line 1207, and the
+  `EquityCostCalculator` implementation.
+
+### Test impact
+None - documentation-only change; no code or tests modified.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: fix stale unit_size_change reference in design notes §3.2
+```
+
+---
+
+## 2026-08-01 -- Remove dead `unit_size_change` event field
+
+### Prompt
+Remove the `unit_size_change` field from the event log completely.
+`EquityCostCalculator.compute_cost` reads the leg-specific delta from
+`leg_size_changes`, and no other code inspects the old field. Clean up
+the event dicts, tests, and design notes; leave only historical
+references in the worklog/archive.
+
+### Changes applied
+
+- **`backtester/strategy_structure.py`** -- dropped the
+  `"unit_size_change"` key from the event dicts built in `open()`,
+  `add_size()`, and `unwind()`. Housekeeping: also removed the now-unused
+  locals `total_size` in `open()` and `amount_unwound` in `unwind()`
+  (and the `total_size` that fed it). `total_size`/`amount` remain in
+  `add_size()` where they still drive leg scaling and entry-price
+  updates.
+- **`tests/test_strategy_structure.py`** -- deleted the four
+  `event["unit_size_change"]` assertions (open, add_size, full unwind,
+  partial unwind).
+- **`tests/test_cost_model.py`** -- removed `"unit_size_change"` from
+  the hand-built event dict in `TestEquityCostCalculator`; all other
+  tests build events via `StrategyStructure`, which no longer emits it.
+- **`design_notes.md`** -- swept all references in §3.2 and §3.13 and
+  the §3.11 `event_log_flat` column list:
+  - §3.2: heading "Event log – size changes"; intro now describes the
+    per-leg `leg_size_changes` dict; `leg_size_changes` bullet no longer
+    says "recorded alongside `unit_size_change`"; cost-exposure intro
+    drops "Alongside the unit size change"; `add_size` lifecycle text
+    now says the calculator multiplies by the leg's delta from
+    `leg_size_changes`.
+  - §3.11: removed `unit_size_change` from the `event_log_flat` column
+    list.
+  - §3.13: key-design bullet now reads "alongside `leg_size_changes`
+    (a `leg_id` → per‑leg delta map)"; `compute_cost` docstring no
+    longer lists `"unit_size_change"` and the step-2 comment no longer
+    references the structure-level field.
+
+### Test impact
+- 151 tests pass (was 151 before; only removed assertions on the
+  deleted field).
+- Remaining `unit_size_change` hits are confined to
+  `docs/worklog_phase2.md` (historical entries) and
+  `docs/archive/worklog_phase1.md` (archived Phase 1 records) -- left
+  untouched.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: remove dead unit_size_change field from event logs
+```

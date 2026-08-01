@@ -41,7 +41,7 @@ class Trade:
         cost_exposures: dict[str, dict] | None = None,
     ):
         structure.unwind(date, fraction, cost_exposures)
-        if fraction == 1.0:
+        if abs(fraction - 1.0) < 1e-12:
             self._remove_from_active(structure)
             if len(self.active_structures) == 0:
                 self.exit_date = date

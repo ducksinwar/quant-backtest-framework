@@ -65,7 +65,7 @@ class Summary:
                                 f"{leg_state.leg_id} P&L."
                             )
                         entry_idx = trading_days.index(entry_date)
-                        pnl_start = entry_idx + 1
+                        pnl_start = entry_idx
 
                         if trade.exit_date is not None:
                             pnl_end = trading_days.index(trade.exit_date)
@@ -85,12 +85,6 @@ class Summary:
                                 f"but leg has {len(pnl_list)} P&L entries."
                             )
                         gross = pd.Series(pnl_list, index=pnl_dates, dtype=float)
-
-                        if entry_date not in gross.index:
-                            gross = pd.concat([
-                                pd.Series(0.0, index=[entry_date], dtype=float),
-                                gross,
-                            ])
                     else:
                         gross = pd.Series(pnl_list, dtype=float)
 

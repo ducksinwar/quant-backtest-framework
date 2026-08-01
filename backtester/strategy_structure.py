@@ -19,12 +19,14 @@ class StrategyStructure:
         if self.original_entry_date is None:
             self.original_entry_date = date
 
-        total_size = sum(leg.current_size for leg in self.legs)
+        leg_size_changes = {
+            leg.leg_id: leg.current_size for leg in self.legs
+        }
 
         event = {
             "event_type": "open",
             "date": date,
-            "unit_size_change": total_size,
+            "leg_size_changes": leg_size_changes,
             "cost_exposures": cost_exposures or {},
             "cost_free": False,
         }
@@ -37,6 +39,7 @@ class StrategyStructure:
         cost_exposures: dict[str, dict] | None = None,
     ):
         total_size = sum(leg.current_size for leg in self.legs)
+        leg_size_changes = {}
 
         for leg in self.legs:
             scale = (
@@ -47,6 +50,7 @@ class StrategyStructure:
             old_size = leg.current_size
             new_total = old_size + scale * amount
             leg.current_size = new_total
+            leg_size_changes[leg.leg_id] = new_total - old_size
             leg.entry_price = (
                 (leg.entry_price * old_size + leg.current_price * scale * amount)
                 / new_total
@@ -55,7 +59,7 @@ class StrategyStructure:
         event = {
             "event_type": "partial add",
             "date": date,
-            "unit_size_change": amount,
+            "leg_size_changes": leg_size_changes,
             "cost_exposures": cost_exposures or {},
             "cost_free": False,
         }
@@ -67,17 +71,26 @@ class StrategyStructure:
         fraction: float = 1.0,
         cost_exposures: dict[str, dict] | None = None,
     ):
-        total_size = sum(leg.current_size for leg in self.legs)
-        amount_unwound = total_size * fraction
+        if not (0.0 < fraction <= 1.0):
+            raise ValueError(
+                f"unwind fraction must be in (0, 1], got {fraction}"
+            )
 
+        total_size = sum(leg.current_size for leg in self.legs)
+        leg_size_changes = {
+            leg.leg_id: leg.current_size * fraction
+            for leg in self.legs
+        }
         for leg in self.legs:
             leg.current_size *= 1.0 - fraction
 
-        event_type = "full close" if fraction == 1.0 else "partial unwind"
+        event_type = (
+            "full close" if abs(fraction - 1.0) < 1e-12 else "partial unwind"
+        )
         event = {
             "event_type": event_type,
             "date": date,
-            "unit_size_change": amount_unwound,
+            "leg_size_changes": leg_size_changes,
             "cost_exposures": cost_exposures or {},
             "cost_free": False,
         }

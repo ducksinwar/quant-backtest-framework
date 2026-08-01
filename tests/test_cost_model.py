@@ -39,7 +39,7 @@ class TestEquityCostCalculator:
         event = {
             "date": "2024-01-15",
             "cost_exposures": {"leg_1": {"notional_per_unit": 450.0}},
-            "unit_size_change": 100.0,
+            "leg_size_changes": {"leg_1": 100.0},
             "cost_free": False,
         }
         cost = calculator.compute_cost("leg_1", event)

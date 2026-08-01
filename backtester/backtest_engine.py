@@ -511,6 +511,13 @@ class Backtester:
             tags=leg_dict.get("tags"),
         )
 
+        leg_state.daily_total_pnl.append(0.0)
+
+        if cfg.record_pricing_inputs:
+            inputs = pricer.pricing_inputs(contract, date) or {}
+            for key, value in inputs.items():
+                leg_state.pricing_inputs.setdefault(key, []).append(value)
+
         return leg_state
 
     # --- lookups --------------------------------------------------------

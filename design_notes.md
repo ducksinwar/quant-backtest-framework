@@ -218,29 +218,29 @@ It is the natural entity for cost quotation, execution, and rolling.
   - When a structure is **rolled**, the new structure inherits the `original_entry_date` of the old structure. This preserves the economic age of the position across contract changes.  
   - When unwinding using FIFO, the backtester (or signal) sorts active structures by `original_entry_date` and closes the oldest lots first. This ensures that rolled positions retain their correct priority.
 
-- **Event log – unit size changes:**  
+- **Event log – size changes:**  
   The structure maintains a chronological list of lifecycle events: `open`, `partial add`, `partial unwind`, `roll`, `full close`.  
-  Each event records the **unit size change** as an absolute number of contracts/shares or a fraction of the structure’s total size.  
+  Each event records the per‑leg size deltas in a `leg_size_changes` dictionary (`leg_id` → float), enabling accurate cost computation for both single‑leg and multi‑leg structures.  
   - `open` – initial unit sizes for every leg.  
   - `partial add` – additional units (proportionally distributed).  
   - `partial unwind` – fraction removed.  
   - `roll` – units rolled (recorded on the old structure).  
-  - `leg_size_changes` – a dictionary mapping `leg_id` to the per‑leg size delta (`dict[str, float]`), recorded alongside `unit_size_change` so that cost computation for multi‑leg structures can use each leg's own delta. *(planned — see `docs/phase2_plan.md`)*  
+  - `leg_size_changes` – a dictionary mapping `leg_id` to the per‑leg size delta (`dict[str, float]`), recorded so that cost computation for multi‑leg structures can use each leg's own delta.  
 
   Because every size change is logged, the complete time‑series of leg sizes can be derived by applying these events to the initial leg sizes. No separate daily size array is needed on the LegState.
 
 - **Event log – cost exposure:**  
-  Alongside the unit size change, each event **may** also record `cost_exposures` — a dictionary mapping `leg_id` to a dictionary of **per‑unit** risk metrics (e.g., `{"leg_abc": {"notional_per_unit": 450.0}}`, `{"leg_xyz": {"vega_per_contract": 0.03}}`).
-  - These per‑unit metrics are combined with `unit_size_change` by the `CostModel` to compute the transacted exposure and the resulting cost.  
+  Each event **may** also record `cost_exposures` — a dictionary mapping `leg_id` to a dictionary of **per‑unit** risk metrics (e.g., `{"leg_abc": {"notional_per_unit": 450.0}}`, `{"leg_xyz": {"vega_per_contract": 0.03}}`).
+  - These per‑unit metrics are combined with the leg's size delta from `event["leg_size_changes"][leg_id]` by the `CostModel` to compute the transacted exposure and the resulting cost.  
   - They are recorded only for the leg(s) and risk type(s) on which cost is actually quoted. For example, a call ratio spread might only store the vega of the 40‑delta leg, because cost is quoted in terms of that leg’s vega. A straddle, where both legs bear cost, stores entries for both legs.  
   - An event can be marked as **cost‑free** (e.g., the `open` event of a structure created by a roll); the `CostModel` skips such events entirely.  
   - The dictionary key itself is the leg’s `leg_id`, so the `CostModel` can attribute the cost directly to that leg’s local P&L.
 
-  For multi‑leg structures, the transacted size of each leg is read directly from `leg_size_changes` in the event log. The `CostModel` multiplies the per‑unit risk metric for each leg by that leg's size delta. *(planned — see `docs/phase2_plan.md`)*
+  For multi‑leg structures, the transacted size of each leg is read directly from `leg_size_changes` in the event log. The `CostModel` multiplies the per‑unit risk metric for each leg by that leg's size delta.
 
 - **Lifecycle methods:**  
   - `open(date, cost_exposures=None)` – records the opening event with initial unit sizes for all legs and the provided `cost_exposures` (if any).  
-  - `add_size(date, amount, cost_exposures=None)` – records a partial add event. Leg sizes are increased proportionally and the entry price is updated to a weighted average. The `cost_exposures` reflect the pre‑add state (the metrics are per‑unit, so the cost calculator will multiply by `amount` to get the transacted exposure).  
+  - `add_size(date, amount, cost_exposures=None)` – records a partial add event. Leg sizes are increased proportionally and the entry price is updated to a weighted average. The `cost_exposures` reflect the pre‑add state (the metrics are per‑unit, so the cost calculator will multiply by the leg's delta from `leg_size_changes` to get the transacted exposure).  
   - `unwind(date, fraction=1.0, cost_exposures=None)` – records a partial or full unwind event. **The `cost_exposures` must reflect the pre‑unwind state** (computed before leg sizes are reduced).  
   - `roll(new_structure, date)` – records a single `roll` event (unit size and cost exposure) on the old structure, closes it, and opens the new structure with a cost‑free `open`. The new structure inherits the old structure’s `original_entry_date`. The new structure also inherits the old structure’s tags, unless the `new_structure` dict explicitly provides a `'tags'` key (which then replaces the inherited tags).
 
@@ -391,8 +391,8 @@ Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary
    - `pricing_inputs(contract, date) -> dict[str, float] | None` – returns the raw market data values that the pricer used to compute the price on that date (e.g., `{'implied_vol': 20.5, 'forward_price': 1.23, 'rate': 0.05}`). This is entirely separate from `valuation_data`. The backtester calls this method only when `record_pricing_inputs = True` in the asset class configuration, and stores the resulting dictionary in `LegState.pricing_inputs`. Returns `None` if the price could not be computed (data missing). This method is optional for pricers that do not support diagnostic recording (e.g., a simple `EquityPricer` may return an empty dict).
    - `compute_cost_exposure(contract, date: str) -> dict[str, float] | None` – returns a dictionary of **per‑unit** risk metrics that the `CostModel` uses to compute transaction costs.  
      The key names are asset‑class‑specific (e.g., `"notional_per_unit"`, `"vega_per_contract"`, `"dv01_per_unit"`).  
-     The `CostModel` multiplies each per‑unit value by the leg's size delta in `event["leg_size_changes"]` to obtain the transacted exposure. *(planned — see `docs/phase2_plan.md`)*  
-     When the market price is unavailable, the method returns `None` itself (not a dict containing `None` values). *(planned — see `docs/phase2_plan.md`)*  
+     The `CostModel` multiplies each per‑unit value by the leg's size delta in `event["leg_size_changes"]` to obtain the transacted exposure.  
+     When the market price is unavailable, the method returns `None` itself (not a dict containing `None` values).  
      **No default implementation** — every concrete pricer must implement this method.  
      **This method is called only at order‑execution time (open, add, unwind, roll)**, never during the daily PnL loop. It uses the event date’s market data and the leg’s pre‑event state (sizes, prices).  
      Examples:
@@ -613,7 +613,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
              `NaN` to keep all lists aligned.  If a key appears for the first time
              mid‑backtest, backfill `NaN` for all prior days before appending today’s
              value.
-          - **Opening‑day alignment:** At trade creation, the backtester records a 0.0 P&L on the entry date and (when `record_pricing_inputs` is enabled) the entry‑day pricing inputs, so all per‑leg time series are aligned from day 1. *(planned — see `docs/phase2_plan.md`)*
+           - **Opening‑day alignment:** At trade creation, the backtester records a 0.0 P&L on the entry date and (when `record_pricing_inputs` is enabled) the entry‑day pricing inputs, so all per‑leg time series are aligned from day 1.
 
   2. **Request and execute today’s orders:**  
       *(Phase 1:* calls `signal.generate_signals()` directly. *Phase 2:* calls signal to get alpha intents, then passes them through the OrderGenerator (§3.8) to obtain `TargetTrade` orders.*)
@@ -930,7 +930,7 @@ summary = Summary(spec)
 
 **Processing steps (inside `generate`):**
 
-  1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved. The opening‑day 0.0 P&L (and any pricing inputs) are recorded by the backtester at trade creation, so the Summary no longer prepends a zero on the entry date. *(planned — see `docs/phase2_plan.md`)*
+   1. **Local‑currency gross P&L (per leg):** Read `daily_total_pnl` from every leg. `NaN` values are preserved. The opening‑day 0.0 P&L (and any pricing inputs) are recorded by the backtester at trade creation, so the Summary no longer prepends a zero on the entry date.
 
    2. **Aggregation and missing‑data handling:** Apply the `missing_data_mode` semantics defined earlier in this section (`'any'`, `'all'`, `'per_leg'`). In `'all'` mode, P&L on days where any leg of a trade has genuine missing data is zeroed across all legs of that trade — including single‑leg trades — and deferred to the next valid day via cumsum‑drop‑diff, while risk series (`*_ts`) are forward‑filled.
 
@@ -997,7 +997,7 @@ The `spec` dictionary contains:
   - **Parent attributes via dot‑notation** – when the granularity is `'leg'`, attributes of the parent `Structure` or `Trade` are accessible using paths like `'structure.tags'`, `'structure.entry_date'`, `'trade.entry_date'`, `'trade.tags'`, etc. The special identifiers `'trade_id'` and `'structure_id'` are always available as shorthand for `'trade.trade_id'` and `'structure.structure_id'`.
   - Convenience derived fields: `'underlying'` (the underlying ticker derived from the contract’s `params`), `'asset_class'`, `'strike'`, `'expiry'`, etc.
   - Time‑series fields: `'daily_total_pnl'`, `'delta_ts'`, `'gamma_ts'`, etc.
-  - **Structure event logs** – at `'structure'` granularity, the derived attribute `'event_log_flat'` returns a DataFrame where each row is a single event. Columns include `structure_id`, `trade_id`, and all fields from the event dictionary (`event_type`, `date`, `unit_size_change`, `leg_size_changes`, `cost_exposures`, `cost_free`).
+  - **Structure event logs** – at `'structure'` granularity, the derived attribute `'event_log_flat'` returns a DataFrame where each row is a single event. Columns include `structure_id`, `trade_id`, and all fields from the event dictionary (`event_type`, `date`, `leg_size_changes`, `cost_exposures`, `cost_free`).
 
 **Output format:**
 
@@ -1204,7 +1204,7 @@ A separate `CostModel` object converts those structure‑level events into a cos
 - **Cost granularity matches the structure.**  
   Costs are incurred at the structure level – i.e., at trade entry, rolls, and each unwind event. Partial unwinds incur proportional costs.
 - **Per‑unit metrics × per‑leg size delta = transacted exposure.**  
-  The event log stores **per‑unit** risk metrics (e.g., `notional_per_unit`, `vega_per_contract`) alongside `unit_size_change`; each event also carries `leg_size_changes` (a `leg_id` → per‑leg delta map). The cost calculator multiplies each per‑unit metric by the leg‑specific delta — not the structure‑level total — ensuring partial unwinds are charged correctly (50% unwind charges 50% of the exposure). *(planned — see `docs/phase2_plan.md`)*  
+  The event log stores **per‑unit** risk metrics (e.g., `notional_per_unit`, `vega_per_contract`) alongside `leg_size_changes` (a `leg_id` → per‑leg delta map). The cost calculator multiplies each per‑unit metric by the leg‑specific delta — not the structure‑level total — ensuring partial unwinds are charged correctly (50% unwind charges 50% of the exposure).  
 - **Cost calculators are asset‑class‑specific.**  
   For options, cost may be a function of total vega; for equities/futures, a function of notional; for interest rate swaps, a function of dv01. Each calculator knows the formula for its asset class.
 - **Extensible from fixed to dynamic models.**  
@@ -1224,7 +1224,6 @@ class BaseCostCalculator(ABC):
         The event dict contains:
           - "date": str
           - "event_type": str
-          - "unit_size_change": float
           - "leg_size_changes": dict[str, float]  # leg_id -> per-leg size delta
           - "cost_exposures": dict[str, dict]  # leg_id -> per-unit metrics
           - "cost_free": bool
@@ -1232,8 +1231,7 @@ class BaseCostCalculator(ABC):
         The calculator:
           1. Reads event["cost_exposures"][leg_id] to get the per-unit metrics.
           2. Multiplies each per-unit metric by event["leg_size_changes"][leg_id]
-             (the leg-specific delta, not the structure-level unit_size_change)
-             to obtain the transacted exposure.
+             (the leg-specific delta) to obtain the transacted exposure.
           3. Applies the asset-class cost formula (e.g., bps on notional).
 
         The event dict is READ-ONLY; calculators must not modify it.

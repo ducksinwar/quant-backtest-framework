@@ -21,7 +21,7 @@ class TestStrategyStructure:
         event = structure.event_log[0]
         assert event["event_type"] == "open"
         assert event["date"] == "2024-01-15"
-        assert event["unit_size_change"] == 100.0
+        assert event["leg_size_changes"] == {"leg_1": 100.0}
         assert event["cost_exposures"] == {"leg_1": {"notional_per_unit": 100.0}}
         assert event["cost_free"] is False
 
@@ -47,7 +47,6 @@ class TestStrategyStructure:
         event = structure.event_log[1]
         assert event["event_type"] == "partial add"
         assert event["date"] == "2024-01-20"
-        assert event["unit_size_change"] == 50.0
         assert event["cost_exposures"] == add_exposure
 
     def test_add_size_scales_legs(self, structure):
@@ -65,7 +64,6 @@ class TestStrategyStructure:
         event = structure.event_log[-1]
         assert event["event_type"] == "full close"
         assert event["date"] == "2024-01-25"
-        assert event["unit_size_change"] == 100.0
         assert event["cost_exposures"] == unwind_exposure
         assert event["cost_free"] is False
 
@@ -80,7 +78,6 @@ class TestStrategyStructure:
         event = structure.event_log[-1]
         assert event["event_type"] == "partial unwind"
         assert event["date"] == "2024-01-22"
-        assert event["unit_size_change"] == 50.0
 
     def test_unwind_partial_reduces_size_proportionally(self, structure):
         structure.open("2024-01-15")

@@ -86,5 +86,7 @@ class EquityCostCalculator(BaseCostCalculator):
     ) -> float:
         per_unit = event["cost_exposures"][leg_id]
         notional_per_unit = per_unit["notional_per_unit"]
-        transacted_notional = notional_per_unit * event["unit_size_change"]
+        transacted_notional = (
+            notional_per_unit * event["leg_size_changes"][leg_id]
+        )
         return transacted_notional * self._bps / 10000.0

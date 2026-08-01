@@ -21,6 +21,8 @@ class EquityPricer(BasePricer):
 
     def compute_cost_exposure(
         self, contract, date: str
-    ) -> dict[str, float]:
+    ) -> dict[str, float] | None:
         price = self.provider.get_price(contract.ticker, date)
+        if price is None:
+            return None
         return {"notional_per_unit": price}
