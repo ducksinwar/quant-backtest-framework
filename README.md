@@ -32,6 +32,7 @@ The framework is built around a daily event loop:
 - **Signals** are stateless, return target‑trade dictionaries, and only see information up to T‑1.  
 - **Backtester** computes daily P&L, executes orders, and records all lifecycle events.  
 - **CostModel** turns those events into a per‑leg cost series; the **Summary** is a thin data coordinator that dispatches report generation through a pluggable `BaseReport` registry, with individual metrics computed by reusable `BaseMetricCalculator` classes.  
+- **FX conversion** – a post‑processing step inside `Summary` (`FxRateProvider` wraps the `DataFeed`), consolidating multi‑currency legs into a configurable base currency via cumulative‑spot conversion; portfolio reports, equity‑curve `fx_<pair>` columns, and per‑underlying local/base/dual output are all supported.  
 
 Everything is fully decoupled – you can swap a pricer, change the cost model, or add a new report without touching the backtester loop.
 

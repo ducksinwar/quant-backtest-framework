@@ -13,8 +13,8 @@ class DataFeed:
     def get_series(
         self,
         dataset: str,
-        start: str,
-        end: str,
+        start: str | None,
+        end: str | None,
         ticker: str = None,
         **params,
     ) -> pd.Series:

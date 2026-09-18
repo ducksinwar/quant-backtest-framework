@@ -9,7 +9,8 @@ _EXCLUDED_METRICS = {"hit_ratio"}
 
 
 class PeriodicMetricsReport(BaseReport):
-    def build(self, summary, trades, leg_data, report_config, fx_rates, output_name):
+    def build(self, summary, trades, leg_data, report_config, output_name,
+              fx_series):
         cfg = summary._normalize_config(report_config)
         include = cfg.get("include")
         timeframe = cfg.get("timeframe", "yearly")

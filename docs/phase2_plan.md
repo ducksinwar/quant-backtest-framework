@@ -1,7 +1,7 @@
 # Phase 2 Plan
 
-**Status:** Planning  
-**Start date:** TBD  
+**Status:** Working on Phase 2A  
+**Start date:** 2026-07-25 
 **Target:** Complete core backtester enhancements (Phase 2A), then build validation pipeline (Phase 2B). Risk bridge deferred to Phase 2C (future).
 
 ---
@@ -31,18 +31,18 @@
 - **Dependencies:** Task 1 (to avoid merge conflicts in Summary)
 
 ### Correctness fixes (pre‑Task 3)
-- [ ] **Multi‑leg cost overcount:** add `leg_size_changes` to event log and use per‑leg delta in cost calculator.
-- [ ] Add multi‑leg proportional‑add cost test to validate the `leg_size_changes` fix (finding 3.3).
-- [ ] **Opening‑day P&L / pricing‑input alignment:** record 0.0 P&L and pricing inputs at trade creation; remove Summary prepend‑zero.
-- [ ] **None inside compute_cost_exposure:** return None from pricer when price is missing.
-- [ ] **Float‑equality unwind fraction:** add range guard and tolerance check for full close.
-- [ ] **pytest.raises(FrozenInstanceError) in frozen‑snapshot test.**
+- [x] **Multi‑leg cost overcount:** add `leg_size_changes` to event log and use per‑leg delta in cost calculator.
+- [x] Add multi‑leg proportional‑add cost test to validate the `leg_size_changes` fix (finding 3.3).
+- [x] **Opening‑day P&L / pricing‑input alignment:** record 0.0 P&L and pricing inputs at trade creation; remove Summary prepend‑zero.
+- [x] **None inside compute_cost_exposure:** return None from pricer when price is missing.
+- [x] **Float‑equality unwind fraction:** add range guard and tolerance check for full close.
+- [x] **pytest.raises(FrozenInstanceError) in frozen‑snapshot test.**
 
 ### Task 3: FX Conversion (Multi‑Currency Equities)
 - [ ] **Goal:** Enable backtesting non‑USD equities and consolidate P&L into a base currency.
 - **Deliverables:**
   - `FxRateProvider` wrapping `DataFeed` for spot rates.
-  - Cumulative‑spot conversion logic in `Summary.generate()` (already has `fx_rates` parameter).
+  - Cumulative‑spot conversion logic in `Summary.generate()` (via `fx_provider` + `base_currency`).
   - Converted P&L, component PnL, and risk series; equity curve gains `fx_<pair>` column.
   - All aggregated reports work with mixed‑currency legs.
 - **Dependencies:** Task 2 (legs carry `currency` from `Contract`)

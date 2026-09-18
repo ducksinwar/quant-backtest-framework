@@ -6,6 +6,7 @@ from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
 from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider
+from backtester.data.typed_providers.fx_rate_provider import FxRateProvider
 from backtester.pricers.equity_pricer import EquityPricer
 from backtester.signals.sma_crossover import SMACrossoverSignal
 from backtester.summary import Summary
@@ -48,14 +49,16 @@ def main():
     equity_pricer = EquityPricer(provider)
 
     # 3. Signal
-    tickers = ["SPY", "QQQ"]
+    tickers = ["SPY", "QQQ", "2800.HK", "SXRT.DE"]
     notional = 100_000
+    ticker_currency = {"2800.HK": "HKD", "SXRT.DE": "EUR"}
     signal = SMACrossoverSignal(
         short_window=20,
         long_window=50,
         tickers=tickers,
         notional=notional,
         data_feed=data_feed,
+        ticker_currency=ticker_currency,
     )
 
     # 4. Backtester config
@@ -93,7 +96,7 @@ def main():
             "hit_ratio": True,
             "drawdown_table": True,
             "periodic_metrics": True,
-            "by_underlying": True,
+            "by_underlying": {"currency": "both"},
             "filtered_sma_group": {
                 "filter": _make_sma_filter(threshold=1.0),
                 "reports": {
@@ -110,9 +113,12 @@ def main():
     capital = len(tickers) * notional
 
     summary = Summary(spec)
+    fx_provider = FxRateProvider(data_feed)
     results = summary.generate(
         trade_history, cost_model,
         trading_days=list(result.trading_days),
+        base_currency="USD",
+        fx_provider=fx_provider,
         capital=capital
     )
 

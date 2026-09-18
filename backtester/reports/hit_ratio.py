@@ -6,7 +6,8 @@ from backtester.reports._base import BaseReport
 
 
 class HitRatioReport(BaseReport):
-    def build(self, summary, trades, leg_data, report_config, fx_rates, output_name):
+    def build(self, summary, trades, leg_data, report_config, output_name,
+              fx_series):
         cfg = summary._normalize_config(report_config)
         timeframe = cfg.get("timeframe", "yearly")
         include = cfg.get("include")

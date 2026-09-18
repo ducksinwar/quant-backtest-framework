@@ -379,7 +379,8 @@ class TestSummaryRegistryExtensibility:
             METRIC_CALCULATORS["dummy_metric"] = DummyMetricCalculator()
 
             class DummyReport(BaseReport):
-                def build(self, summary, trades, leg_data, report_config, fx_rates, output_name):
+                def build(self, summary, trades, leg_data, report_config,
+                          output_name, fx_series):
                     return {output_name: pd.DataFrame([{"dummy": 42}])}
 
             REPORTS["dummy_report"] = DummyReport
@@ -402,3 +403,349 @@ class TestSummaryRegistryExtensibility:
             METRIC_CALCULATORS.update(original_calcs)
             REPORTS.clear()
             REPORTS.update(original_reports)
+
+
+class _FakeFxProvider:
+    """Deterministic fake FxRateProvider for Summary-level tests."""
+
+    def __init__(self, factor_series):
+        self._factor = factor_series
+
+    def get_conversion_series(self, from_currency, to_currency, start, end):
+        if (from_currency, to_currency) == ("EUR", "USD"):
+            return self._factor
+        return None
+
+
+def _make_trade_currency(trade_id, entry_date, exit_date, leg_id, pnl_list,
+                         currency="EUR", ticker="SXRT"):
+    contract = Contract(
+        ticker=ticker, asset_class="equity", currency=currency,
+    )
+    leg = LegState(
+        contract=contract, leg_id=leg_id,
+        current_size=100.0, entry_price=30.0, current_price=31.0,
+    )
+    leg.daily_total_pnl = [0.0] + pnl_list
+    structure = StrategyStructure(structure_id=f"s_{trade_id}", legs=[leg])
+    structure.original_entry_date = entry_date
+    structure.open(entry_date)
+    if exit_date:
+        structure.unwind(exit_date, fraction=1.0)
+    trade = Trade(trade_id=trade_id, tags=None)
+    trade.entry_date = entry_date
+    trade.exit_date = exit_date
+    trade.structure_history = [structure]
+    trade.active_structures = [] if exit_date else [structure]
+    return trade, leg
+
+
+class TestSummaryReportDispatch:
+    TRADING_DAYS = [
+        "2024-01-02", "2024-01-03", "2024-01-04",
+    ]
+
+    def test_local_currency_report_receives_local_data_and_fx(
+        self, monkeypatch,
+    ):
+        from backtester.reports import REPORTS, BaseReport
+
+        captured = {}
+
+        class LocalCurrencyReport(BaseReport):
+            requires_local_currency = True
+
+            def build(self, summary, trades, leg_data, report_config,
+                      output_name, fx_series):
+                captured["leg_data"] = leg_data
+                captured["fx_series"] = fx_series
+                return {output_name: pd.DataFrame([{"dummy": 42}])}
+
+        monkeypatch.setitem(
+            REPORTS, "local_currency_report", LocalCurrencyReport,
+        )
+
+        factor = pd.Series(
+            [1.10, 1.12, 1.14], index=self.TRADING_DAYS, dtype=float,
+        )
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"local_currency_report": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+
+        assert "local_currency_report" in result
+        assert captured["fx_series"] is summary._aligned_fx_factors
+        assert list(captured["fx_series"]) == ["fx_EURUSD"]
+        assert captured["fx_series"]["fx_EURUSD"].tolist() == pytest.approx(
+            [1.10, 1.12, 1.14]
+        )
+        assert captured["leg_data"][0] is not summary._base_leg_data[0]
+        assert captured["leg_data"][0]["gross"].tolist() == pytest.approx(
+            [0.0, 10.0, 5.0]
+        )
+
+
+class TestSummaryFXConversion:
+    TRADING_DAYS = [
+        "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
+    ]
+
+    def _factor(self):
+        return pd.Series(
+            [1.10, 1.12, 1.11, 1.13],
+            index=self.TRADING_DAYS, dtype=float,
+        )
+
+    def test_eur_equity_to_base_usd(self):
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", "2024-01-05", "leg_1",
+            [100.0, -50.0, 25.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        spec = {"reports": {"equity_curve": True}}
+        summary = Summary(spec)
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(self._factor()),
+        )
+        ec = result["equity_curve"]
+        assert ec.loc["2024-01-02", "gross"] == pytest.approx(0.0)
+        assert ec.loc["2024-01-03", "gross"] == pytest.approx(112.0)
+        assert ec.loc["2024-01-04", "gross"] == pytest.approx(55.5)
+        assert ec.loc["2024-01-05", "gross"] == pytest.approx(84.75)
+        assert not any(c.startswith("fx_") for c in ec.columns)
+
+    def test_no_fx_columns_in_overall_equity_curve(self):
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0, -3.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"equity_curve": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(self._factor()),
+        )
+        ec = result["equity_curve"]
+        assert not any(c.startswith("fx_") for c in ec.columns)
+
+    def test_no_fx_provider_matches_today(self):
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0, -3.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"equity_curve": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+        )
+        ec = result["equity_curve"]
+        assert ec["gross"].tolist() == pytest.approx([0.0, 10.0, 15.0, 12.0])
+        assert not any(c.startswith("fx_") for c in ec.columns)
+
+    def test_missing_rate_skips_leg_with_warning(self):
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0, 3.0],
+            currency="GBP", ticker="BARC",
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"equity_curve": True}})
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            result = summary.generate(
+                [trade], cost_model, trading_days=self.TRADING_DAYS,
+                base_currency="USD",
+                fx_provider=_FakeFxProvider(self._factor()),
+            )
+        assert any("No FX series" in str(w.message) for w in caught)
+        ec = result["equity_curve"]
+        assert ec["gross"].tolist() == pytest.approx([0.0, 10.0, 15.0, 18.0])
+
+    def test_missing_rate_nan_gap_ffill_recovery(self):
+        factor = pd.Series(
+            [1.10, float("nan"), 1.11, 1.13],
+            index=self.TRADING_DAYS, dtype=float,
+        )
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [100.0, 50.0, 25.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        # 'any' mode (default): NaN daily base P&L on the gap day aggregates to
+        # 0.0, keeping the equity curve continuous; the fx column preserves the
+        # genuine NaN on the gap day (no forward-fill).
+        summary = Summary({"reports": {"by_underlying": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        ec = result["SXRT_equity_curve"]
+        assert ec["gross"].tolist() == pytest.approx([0.0, 0.0, 166.5, 197.75])
+        assert not ec["gross"].isna().any()
+        assert pd.isna(ec["fx_EURUSD"].loc["2024-01-03"])
+        assert ec["fx_EURUSD"].loc["2024-01-02"] == pytest.approx(1.10)
+        assert ec["fx_EURUSD"].loc["2024-01-04"] == pytest.approx(1.11)
+        assert ec["fx_EURUSD"].loc["2024-01-05"] == pytest.approx(1.13)
+
+    def test_missing_rate_nan_gap_all_mode(self):
+        factor = pd.Series(
+            [1.10, float("nan"), 1.11, 1.13],
+            index=self.TRADING_DAYS, dtype=float,
+        )
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [100.0, 50.0, 25.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({
+            "reports": {"equity_curve": True},
+            "missing_data_mode": "all",
+        })
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        ec = result["equity_curve"]
+        assert ec["gross"].tolist() == pytest.approx([0.0, 0.0, 166.5, 197.75])
+        assert not ec["gross"].isna().any()
+
+    def test_missing_rate_nan_gap_per_leg_mode(self):
+        factor = pd.Series(
+            [1.10, float("nan"), 1.11, 1.13],
+            index=self.TRADING_DAYS, dtype=float,
+        )
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [100.0, 50.0, 25.0],
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({
+            "reports": {"trade_summary": True},
+            "missing_data_mode": "per_leg",
+        })
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        daily = summary.get_daily_series(summary._base_leg_data, "gross")
+        assert pd.isna(daily.loc["2024-01-03", "leg_1"])
+        assert daily.loc["2024-01-02", "leg_1"] == pytest.approx(0.0)
+        assert daily.loc["2024-01-04", "leg_1"] == pytest.approx(166.5)
+        assert daily.loc["2024-01-05", "leg_1"] == pytest.approx(31.25)
+
+    def test_hkd_equity_to_base_hkd(self):
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0, 3.0],
+            currency="HKD", ticker="HSI",
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"equity_curve": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="HKD", fx_provider=_FakeFxProvider(None),
+        )
+        ec = result["equity_curve"]
+        assert ec["gross"].tolist() == pytest.approx([0.0, 10.0, 15.0, 18.0])
+        assert not any(c.startswith("fx_") for c in ec.columns)
+
+
+class TestSummaryByUnderlyingCurrency:
+    TRADING_DAYS = [
+        "2024-01-02", "2024-01-03", "2024-01-04",
+    ]
+
+    def _make(self):
+        t1, l1 = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0],
+            currency="USD", ticker="SPY",
+        )
+        t2, l2 = _make_trade_currency(
+            "t2", "2024-01-02", None, "leg_2", [10.0, 5.0],
+            currency="EUR", ticker="SXRT",
+        )
+        factor = pd.Series(
+            [1.10, 1.12], index=self.TRADING_DAYS[:2], dtype=float,
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        return [t1, t2], cost_model, factor
+
+    def test_currency_both_produces_local_and_base(self):
+        trades, cost_model, factor = self._make()
+        summary = Summary({
+            "reports": {
+                "by_underlying": {
+                    "currency": "both",
+                    "include": {"equity_curve": {}},
+                },
+            },
+        })
+        result = summary.generate(
+            trades, cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        assert "SPY_equity_curve" in result
+        assert "SPY_equity_curve_local" not in result
+        assert "SXRT_equity_curve" in result
+        assert "SXRT_equity_curve_local" in result
+        assert "fx_EURUSD" in result["SXRT_equity_curve"].columns
+        assert not any(
+            c.startswith("fx_") for c in result["SXRT_equity_curve_local"].columns
+        )
+        assert result["SXRT_equity_curve_local"]["gross"].tolist() == pytest.approx(
+            [0.0, 10.0, 15.0]
+        )
+
+    def test_currency_both_skips_local_duplicate_for_base_currency_ticker(self):
+        t1, l1 = _make_trade_currency(
+            "t1", "2024-01-02", None, "leg_1", [10.0, 5.0],
+            currency="USD", ticker="SPY",
+        )
+        factor = pd.Series(
+            [1.10, 1.12], index=self.TRADING_DAYS[:2], dtype=float,
+        )
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({
+            "reports": {
+                "by_underlying": {
+                    "currency": "both",
+                    "include": {"equity_curve": {}},
+                },
+            },
+        })
+        result = summary.generate(
+            [t1], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        assert "SPY_equity_curve" in result
+        assert "SPY_equity_curve_local" not in result
+
+    def test_currency_base_default(self):
+        trades, cost_model, factor = self._make()
+        summary = Summary({"reports": {"by_underlying": True}})
+        result = summary.generate(
+            trades, cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        assert "SPY_equity_curve" in result
+        assert "SXRT_equity_curve" in result
+        assert "SXRT_equity_curve_local" not in result
+        assert "fx_EURUSD" in result["SXRT_equity_curve"].columns
+
+    def test_currency_local(self):
+        trades, cost_model, factor = self._make()
+        summary = Summary({
+            "reports": {"by_underlying": {"currency": "local"}},
+        })
+        result = summary.generate(
+            trades, cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(factor),
+        )
+        assert "SXRT_equity_curve" in result
+        assert "SXRT_equity_curve_local" not in result
+        assert not any(
+            c.startswith("fx_") for c in result["SXRT_equity_curve"].columns
+        )
+        assert result["SXRT_equity_curve"]["gross"].tolist() == pytest.approx(
+            [0.0, 10.0, 15.0]
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import pandas as pd
 
 
@@ -8,6 +10,10 @@ class Summary:
         self._spec = spec
         self._reports_spec = spec.get("reports", {})
         self._missing_mode = spec.get("missing_data_mode", "any")
+        # Cached per generate() run, keyed by f"fx_{local}{base}": the
+        # trading-day-aligned FX factor is reused across legs during
+        # conversion and exposed for reporting (e.g. the fx_<pair> column).
+        self._aligned_fx_factors: dict[str, pd.Series] = {}
         self._capital = None
         self._output = spec.get("output")
 
@@ -20,12 +26,15 @@ class Summary:
         trade_history: list,
         cost_model,
         trading_days: list[str],
-        fx_rates: dict[str, pd.Series] | None = None,
+        base_currency: str = "USD",
+        fx_provider=None,
         capital: float | None = None,
     ) -> dict | None:
         self._trading_days = trading_days
         self._agg_cache: dict[tuple, pd.Series] = {}
         self._cache: dict[tuple, object] = {}
+        self._aligned_fx_factors = {}
+        self._base_currency = base_currency
         self._capital = capital
         cost_map = cost_model.compute_costs(trade_history) if cost_model else {}
 
@@ -34,10 +43,19 @@ class Summary:
         if self._missing_mode == "all":
             self._adjust_for_missing_legs(leg_data, trading_days)
 
+        base_leg_data = list(leg_data)
+        if fx_provider is not None:
+            base_leg_data = self._build_base_leg_data(
+                leg_data, base_currency, fx_provider, trading_days
+            )
+            if self._missing_mode == "all":
+                self._adjust_for_missing_legs(base_leg_data, trading_days)
+        self._base_leg_data = base_leg_data
+
         results: dict[str, pd.DataFrame] = {}
         self._generate_report_tree(
             self._reports_spec, trade_history, leg_data, cost_map,
-            fx_rates, [], results,
+            base_leg_data, [], results,
         )
 
         if self._output:
@@ -186,7 +204,7 @@ class Summary:
     def _generate_report_tree(
         self, reports_spec: dict, trade_history: list,
         leg_data: list[dict], cost_map: dict,
-        fx_rates: dict | None, path: list[str],
+        base_leg_data: list[dict], path: list[str],
         results: dict[str, pd.DataFrame],
         parent_filter=None,
     ):
@@ -215,16 +233,19 @@ class Summary:
 
                 self._generate_report_tree(
                     value["reports"], trade_history, leg_data, cost_map,
-                    fx_rates, path + [key], results, combined,
+                    base_leg_data, path + [key], results, combined,
                 )
             else:
                 filtered_trades = self._filter_trades(trade_history, effective_filter)
                 filtered_leg_data = [d for d in leg_data if d["trade"] in filtered_trades]
+                filtered_base_leg_data = [
+                    d for d in base_leg_data if d["trade"] in filtered_trades
+                ]
 
                 report_name = "_".join(path + [key])
                 self._build_report(
                     key, value, filtered_trades, filtered_leg_data,
-                    fx_rates, report_name, results,
+                    filtered_base_leg_data, report_name, results,
                 )
 
     def _filter_trades(self, trades: list, filter_fn) -> list:
@@ -234,7 +255,7 @@ class Summary:
 
     def _build_report(
         self, report_name: str, config, trades: list,
-        leg_data: list[dict], fx_rates: dict | None,
+        leg_data: list[dict], base_leg_data: list[dict],
         output_name: str, results: dict,
     ):
         from backtester.reports import REPORTS
@@ -243,16 +264,25 @@ class Summary:
         if report_cls is None:
             return
         report = report_cls()
-        dfs = report.build(self, trades, leg_data, config, fx_rates, output_name)
+        if report_cls.requires_local_currency:
+            dfs = report.build(
+                self, trades, leg_data, config, output_name,
+                self._aligned_fx_factors,
+            )
+        else:
+            dfs = report.build(
+                self, trades, base_leg_data, config, output_name,
+                None,
+            )
         results.update(dfs)
 
     def get_daily_series(
-        self, leg_data: list[dict], key: str, fx_rates: dict | None = None,
+        self, leg_data: list[dict], key: str,
     ) -> pd.Series:
         if not leg_data:
             return pd.Series(dtype=float)
 
-        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        legs_key = tuple(sorted(id(d) for d in leg_data))
         cache_key = (legs_key, key, self._missing_mode)
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
@@ -276,7 +306,7 @@ class Summary:
     def get_cumulative_series(
         self, leg_data: list[dict], key: str
     ) -> pd.Series:
-        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        legs_key = tuple(sorted(id(d) for d in leg_data))
         cache_key = ("cum", legs_key, key)
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -289,7 +319,7 @@ class Summary:
     def get_trade_totals(
         self, leg_data: list[dict]
     ) -> dict[str, dict[str, float]]:
-        legs_key = tuple(sorted(d['leg_id'] for d in leg_data))
+        legs_key = tuple(sorted(id(d) for d in leg_data))
         cache_key = ("trade_totals", legs_key)
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -319,6 +349,88 @@ class Summary:
         if isinstance(config, dict):
             return config
         return {}
+
+    def _build_base_leg_data(
+        self, leg_data: list[dict], base_currency: str,
+        fx_provider, trading_days: list[str],
+    ) -> list[dict]:
+        """Convert every non-base leg to the base currency (post-processing).
+
+        Runs after missing-data handling and cost application have already
+        been applied to the local-currency leg data (design_notes.md 3.10
+        step 4). Legs already in the base currency are copied through.
+        """
+        td_index = pd.Index(trading_days, dtype=object)
+        base_leg_data: list[dict] = []
+
+        for d in leg_data:
+            leg_currency = d.get("currency", "USD")
+            if leg_currency == base_currency:
+                base_leg_data.append(dict(d))
+                continue
+
+            converted = self._convert_leg_to_base(
+                d, leg_currency, base_currency, fx_provider, td_index
+            )
+            base_leg_data.append(converted if converted is not None else dict(d))
+
+        return base_leg_data
+
+    def _convert_leg_to_base(
+        self, leg: dict, leg_currency: str, base_currency: str,
+        fx_provider, td_index: pd.Index,
+    ) -> dict | None:
+        """Convert one leg's P&L / cost / component-PnL / risk series to base.
+
+        P&L and cost series use the cumulative-spot method (convert the
+        cumulative local series to base, then difference back to daily).
+        Risk measures (``*_ts``) are multiplied by the spot factor directly.
+
+        Returns ``None`` when the FX provider has no series for the pair, so
+        the caller keeps the leg unconverted (with a warning) rather than
+        producing an all-zeros series.
+        """
+        pair_key = f"fx_{leg_currency}{base_currency}"
+        if pair_key in self._aligned_fx_factors:
+            factor_aligned = self._aligned_fx_factors[pair_key]
+        else:
+            factor = fx_provider.get_conversion_series(
+                leg_currency, base_currency, str(td_index[0]), str(td_index[-1])
+            )
+            if factor is None:
+                warnings.warn(
+                    f"No FX series for {leg_currency}{base_currency}; "
+                    f"leg {leg['leg_id']} ({leg['ticker']}) left in "
+                    f"{leg_currency}."
+                )
+                return None
+            factor_aligned = factor.reindex(td_index)
+            self._aligned_fx_factors[pair_key] = factor_aligned
+
+        out = dict(leg)
+        for key in ("gross", "cost", "net"):
+            out[key] = self._cumulative_spot_convert(leg[key], factor_aligned)
+        for key in list(out.keys()):
+            if key.endswith("_pnl"):
+                out[key] = self._cumulative_spot_convert(out[key], factor_aligned)
+            elif key.endswith("_ts"):
+                out[key] = out[key].reindex(td_index) * factor_aligned
+
+        return out
+
+    @staticmethod
+    def _cumulative_spot_convert(
+        series: pd.Series, factor_aligned: pd.Series
+    ) -> pd.Series:
+        nan_mask = factor_aligned.reindex(series.index).isna()
+        cum_local = series.fillna(0.0).cumsum()
+        cum_base = (cum_local * factor_aligned).ffill()
+        daily_base = cum_base.diff().fillna(0.0)
+        if len(daily_base) > 0:
+            daily_base.iloc[0] = cum_base.iloc[0]
+        daily_base = daily_base.reindex(series.index)
+        daily_base[nan_mask] = float("nan")
+        return daily_base
 
     def _write_output(self, results: dict):
         fmt = self._output.get("format", "csv")

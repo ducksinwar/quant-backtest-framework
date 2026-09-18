@@ -8,7 +8,6 @@
 |------|------|-------|---------|
 | 1 | 06‑18 | Design notes: CalendarProvider + OrderGenerator + Phase 2 plan | [§ Design notes](#2026-06-18--design-notes-calendarprovider-ordergenerator-phase2-plan) |
 | 2 | 07‑25 | Documentation restructuring: archive Phase 1, rename + move docs | [§ Docs restructure](#2026-07-25--documentation-restructuring-archive-phase1-rename--move-docs) |
-
 ---
 
 ## 2026-06-18 – Design notes: CalendarProvider, OrderGenerator, Phase 2 plan
@@ -1118,4 +1117,744 @@ references in the worklog/archive.
 ### Suggested commit message
 ```
 refactor: remove dead unit_size_change field from event logs
+```
+
+## 2026-08-02 -- Task 3: FX Conversion (multi-currency equities)
+
+### Prompt
+Implement Task 3 of Phase 2: FX conversion for multi-currency equities as a
+post-processing step inside Summary. Add FxRateProvider (typed DataFeed
+wrapper), cumulative-spot conversion in Summary.generate() keyed off each
+leg's contract currency, dual local/base leg datasets, per-underlying
+currency modes, and equity-curve fx_<pair> columns. Add sample data,
+update the example, write unit/integration tests, and sync documentation.
+
+### Changes applied
+- backtester/data/typed_providers/fx_rate_provider.py (new): FxRateProvider
+  with get_conversion_factor (point) and get_conversion_series (vectorized).
+  Lookup order: same-currency -> 1.0, direct {from}{to}, inverse {to}{from},
+  USD triangulation, else None. Direct/inverse checks extracted into
+  _try_direct_or_inverse / _try_series_direct_or_inverse to avoid recursion.
+  Identity pair uses a business-day _range_index (no DataFeed.trading_days).
+  Series reindexed to the requested (start, end) range; entirely-missing
+  pairs return None; gappy data returned with NaN for caller forward-fill.
+- backtester/data/typed_providers/__init__.py: re-export FxRateProvider.
+- backtester/summary.py:
+  - generate(): removed dead fx_rates dict param; added base_currency="USD"
+    and fx_provider=None. capital is always assumed to be in base currency.
+  - Conversion runs after missing-data handling and cost application on the
+    local-currency leg data (step-4 ordering). _build_base_leg_data converts
+    every non-base leg via _convert_leg_to_base; unconvertible legs stay
+    local with a warning.
+  - _convert_leg_to_base: cumulative-spot method for gross/cost/net and
+    *_pnl; direct factor multiplication for *_ts; factor reindexed to
+    trading days then ffill'd; builds self._fx_series (fx_{local}{base}).
+  - Report tree carries both local_leg_data and base_leg_data. _build_report
+    passes base data to portfolio-level reports and both datasets to
+    by_underlying.
+  - Cache keys now use leg-dict object ids (not leg_ids) so base and local
+    variants of the same legs don't collide in by_underlying "both" mode.
+- backtester/reports/:
+  - _base.py: BaseReport.build signature extended to
+    (summary, trades, leg_data, report_config, output_name, base_leg_data,
+    fx_series); fx_rates removed.
+  - equity_curve.py: adds fx_<pair> columns (ffilled to trading days) when
+    fx_series is non-empty; consumes the dataset it is handed.
+  - by_underlying.py: accepts "currency" config key ("base" default,
+    "local", "both"); "both" emits suffixed "_local" sheets; local sheets
+    never carry fx columns.
+  - trade_summary / metrics / periodic_metrics / hit_ratio / drawdown_table:
+    signature updated, bodies unchanged.
+- backtester/signals/sma_crossover.py: optional ticker_currency map; NEW
+  leg dicts carry "currency" so non-USD tickers resolve correctly.
+- examples/sma_crossover_example.py: trades SPY/QQQ/2800.HK/SXRT.DE with
+  2800.HK->HKD, SXRT.DE->EUR; instantiates FxRateProvider and passes it
+  with base_currency="USD" to Summary.generate(); by_underlying uses
+  currency="both".
+- market_data/: user-supplied HSI data shipped as 2800.HK_eod.csv (Tracker
+  Fund of HK, HKD) and EUR data as SXRT.DE_eod.csv (iShares EURO STOXX 50
+  UCITS ETF Acc, EUR), plus EURUSD_eod.csv and USDHKD_eod.csv.
+- tests/test_fx_rate_provider.py (new): direct, inverse, triangulation,
+  missing rates, series reindexing, same-currency.
+- tests/test_summary.py: registry dummy report signature updated to 8 args;
+  new TestSummaryFXConversion (EUR->USD math, fx column, no-provider
+  regression, missing-rate skip + warning, NaN gap ffill recovery, HKD
+  custom base) and TestSummaryByUnderlyingCurrency (base/local/both).
+- design_notes.md: §3.10 generate() signature now shows fx_provider and
+  base_currency; processing step 4 rewritten as implemented (cumulative
+  spot, forward-fill, skip-on-None, hedged-notional assumption, step
+  ordering); stale _aggregate_series/fx_rates references removed.
+- README.md: architecture summary mentions FX conversion.
+- docs/phase2_plan.md: Task 3 marked complete.
+
+### Test impact
+All 171 tests pass (151 existing + 8 TestFxRateProvider +
+7 TestSummaryFXConversion + 4 TestSummaryByUnderlyingCurrency +
+1 updated registry dummy). Only the registry dummy report signature in
+test_summary.py changed; the dummy build() now takes the 8-arg signature.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+feat: Task 3 - FX conversion for multi-currency equities
+
+- Add FxRateProvider (direct/inverse/USD-triangulation lookup, vectorized
+  get_conversion_series) wrapping DataFeed; no backend changes
+- Summary.generate(): replace dead fx_rates dict with base_currency +
+  fx_provider; convert non-base legs after missing-data + cost steps via
+  cumulative-spot method; dual local/base leg datasets through the report
+  tree; cache keys keyed by leg-dict identity
+- Extend BaseReport.build to 8 args; equity_curve emits fx_<pair> columns;
+  by_underlying supports currency base/local/both
+- SMACrossoverSignal gains ticker_currency map; example trades SPY/QQQ/
+  2800.HK/SXRT.DE with FX provider and by_underlying currency="both"
+- Add EURUSD/USDHKD/2800.HK/SXRT.DE sample data (user-supplied)
+- Unit + integration tests for provider, conversion math, missing-rate
+  handling, by-underlying currency modes; all 171 tests pass
+```
+
+## 2026-08-05 -- FX reporting cleanup: relevant pairs, no duplicate local sheets
+
+### Prompt
+Clean up three FX reporting issues: base-currency by-underlying sub-reports
+received the full fx_series dict (irrelevant fx_ columns), currency="both"
+produced duplicate local sub-reports for base-currency tickers, and the overall
+portfolio equity curve carried unhelpful fx_ columns.
+
+### Changes applied
+- backtester/summary.py: generate() now stores self._base_currency; _build_report
+  passes fx_series=None to overall portfolio reports (by_underlying still gets the
+  full self._fx_series so it can filter per underlying). base_leg_data is now a
+  fresh list(leg_data) when no fx_provider, preventing identity aliasing with
+  leg_data that would break the by_underlying is_local check.
+- backtester/reports/by_underlying.py: base-currency sub-reports filter fx_series
+  to the single fx_{leg_currency}{base_currency} pair for that underlying (None
+  when absent); currency="both" skips local sub-reports for tickers whose currency
+  equals the base currency; currency="local" unaffected (always produces).
+- tests/test_summary.py: overall equity curve asserts no fx_ columns (renamed
+  test_no_fx_columns_in_overall_equity_curve); both-mode SPY local duplicate
+  suppressed; new test for base-currency duplicate suppression; local-mode guard
+  keeps producing local reports.
+
+### Test impact
+All 172 tests pass (171 prior + 1 new
+test_currency_both_skips_local_duplicate_for_base_currency_ticker).
+
+### Manual changes
+- Update design notes on fx conversion series for equity curve (now only show in by underlying reports)
+
+### Suggested commit message
+```
+fix: FX reporting cleanup - relevant pairs only, no duplicate local sheets
+
+- summary._build_report: pass fx_series=None to overall portfolio reports so
+  the aggregate equity curve stops carrying unhelpful fx_ columns
+- by_underlying: filter the full fx_series to each underlying's single
+  fx_{local}{base} pair for base-currency sub-reports (None when absent)
+- by_underlying: in currency="both", suppress local sub-reports that would
+  duplicate the base report for tickers whose currency equals the base
+  currency; currency="local" still always produces local reports
+- summary.generate: copy base_leg_data when no fx_provider to avoid identity
+  aliasing with leg_data
+- tests updated accordingly; all pass
+```
+
+## 2026-08-08 -- BaseReport.build: remove redundant base_leg_data parameter
+
+### Prompt
+Remove `base_leg_data` from `BaseReport.build()` and store it on the Summary
+instance (`summary._base_leg_data`), because six of seven reports already
+receive the same list as `leg_data`. Keep `fx_series` in the signature since
+`ByUnderlyingReport` filters it per underlying and must pass the filtered
+single-pair dict to sub-reports.
+
+### Changes applied
+- backtester/reports/_base.py: BaseReport.build signature reduced from
+  (summary, trades, leg_data, report_config, output_name, base_leg_data,
+  fx_series) to (summary, trades, leg_data, report_config, output_name,
+  fx_series).
+- backtester/reports/equity_curve.py / trade_summary.py / metrics.py /
+  hit_ratio.py / periodic_metrics.py / drawdown_table.py: dropped the
+  unused base_leg_data parameter; bodies unchanged (equity_curve still
+  consumes fx_series).
+- backtester/reports/by_underlying.py:
+  - Dropped base_leg_data from build(); sub-reports are now called as
+    (summary, sub_trades, ticker_leg_data, sub_cfg, name, ticker_fx).
+  - Derives the base dataset from summary._base_leg_data scoped to the
+    current filter group via the trades it already receives:
+    `trade_ids = {t.trade_id for t in trades}` then filters
+    summary._base_leg_data by trade_id. Falls back to leg_data when
+    summary._base_leg_data is empty.
+- backtester/summary.py:
+  - generate() stores self._base_leg_data = base_leg_data (global,
+    unfiltered) after FX conversion.
+  - _build_report no longer passes base_leg_data to by_underlying; the
+    by_underlying branch passes (leg_data, self._fx_series) and the
+    portfolio branch passes (base_leg_data, None) as before.
+- tests/test_summary.py: registry dummy report signature updated to the new
+  7-arg form (output_name, fx_series).
+
+### Scope-filtering note
+ByUnderlyingReport filters summary._base_leg_data itself (instead of
+Summary passing a filtered copy) to avoid mutating instance state in
+_build_report. Because the trades argument is already scoped to the active
+report-group filter, this keeps by_underlying reports inside a filtered
+group. When no filter is active the derived dataset equals the full base
+dataset. Filters operate on trades, and leg dicts carry exactly one
+trade/trade_id, so filtering by trade_id matches the report tree's
+membership criterion.
+
+### Test impact
+All 172 tests pass, including the FX by-underlying currency-mode and
+filtered-group tests.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: drop redundant base_leg_data from BaseReport.build()
+
+- Remove base_leg_data parameter from BaseReport.build(); the six
+  portfolio-level reports already received the same list as leg_data
+- Store the base dataset on Summary as summary._base_leg_data (set once
+  in generate() after FX conversion)
+- ByUnderlyingReport now derives its base dataset from
+  summary._base_leg_data, scoped to the current filter group via the
+  trades it already receives (pure functional derivation, no instance
+  mutation)
+- Keep fx_series as an explicit parameter: ByUnderlyingReport filters it
+  per underlying and must pass the single relevant pair to sub-reports
+- Update registry-extensibility dummy report signature to 7 args
+- All 172 tests pass
+```
+
+## 2026-08-08 -- Fix FX conversion: surface genuine missing-rate days
+
+### Prompt
+Fix three related issues in the FX conversion logic: (1) the FX factor is
+forward-filled before conversion (and again in the equity-curve FX column),
+hiding genuine missing-rate days; (2) the cumulative-spot formula freezes the
+cumulative base on a missing-rate day, producing a misleading 0.0 daily base
+P&L instead of NaN; (3) missing-data mode only ran on local `leg_data`, never
+on the converted `base_leg_data`, which can contain new NaNs introduced by
+missing FX rates.
+
+### Changes applied
+
+- **`backtester/summary.py` -- `_convert_leg_to_base`**: dropped the
+  forward-fill (`factor.reindex(td_index).ffill()` -> `factor.reindex(td_index)`)
+  so genuine NaN rates survive alignment and are visible in the fx column.
+
+- **`backtester/summary.py` -- `_cumulative_spot_convert`**: added a
+  `nan_mask = factor_aligned.reindex(series.index).isna()` computed before the
+  conversion. The cumulative-spot conversion still bridges the gap internally
+  (ffill on the cumulative product), but after conversion the missing days are
+  restored to `NaN` via `daily_base[nan_mask] = float("nan")` instead of being
+  left at a frozen 0.0. The mask is reindexed to `series.index` (a subset of
+  the trading-day index) to avoid a pandas index-alignment error.
+
+- **`backtester/summary.py` -- `generate()`**: after FX conversion, when
+  `fx_provider is not None` and `missing_data_mode == "all"`, run a second
+  `_adjust_for_missing_legs(base_leg_data, trading_days)` pass so missing-FX
+  NaNs are deferred consistently with local missing-data handling. `'any'` is
+  handled by `get_daily_series` `fillna(0.0)`; `'per_leg'` preserves NaN by
+  design.
+
+- **`backtester/reports/equity_curve.py`**: the FX column now uses the stored
+  factor directly (already aligned to trading days) instead of reindexing +
+  forward-filling, so the fx column shows NaN on gap days.
+
+### Test impact
+Rewrote `test_missing_rate_nan_gap_ffill_recovery` for `'any'` mode (default):
+the by-underlying equity curve is continuous (gap-day NaN aggregates to 0.0)
+with cumulative gross `[0.0, 0.0, 166.5, 197.75]`, and `fx_EURUSD` is NaN on
+the gap day. Added `test_missing_rate_nan_gap_all_mode` (gap day deferred, no
+NaN leaks into the equity curve) and `test_missing_rate_nan_gap_per_leg_mode`
+(raw per-leg base series keeps NaN on the gap day). All 174 tests pass (172
+prior + 2 new; the rewritten test replaces the old one).
+
+### Manual changes
+- Add comment on the fx loop in equity curve; update phase2_plan status
+
+### Suggested commit message
+```
+fix: surface genuine FX-rate gaps; NaN daily base P&L on missing-rate days
+
+- summary._convert_leg_to_base: drop factor forward-fill so genuine
+  missing-rate days stay NaN and are visible in the fx column
+- summary._cumulative_spot_convert: restore NaN on gap days via a
+  factor_aligned nan_mask reindexed to the series index (cumulative-spot
+  conversion still bridges the gap internally); daily base P&L is now NaN,
+  not a frozen 0.0
+- summary.generate: after FX conversion, run _adjust_for_missing_legs on
+  base_leg_data in 'all' mode so missing-FX NaNs are deferred consistently
+  with local missing-data handling ('any' handled by get_daily_series
+  fillna, 'per_leg' preserves NaN by design)
+- equity_curve report: use the stored factor directly (already aligned to
+  trading days) so the fx column shows NaN on gap days
+- tests: rewrite test_missing_rate_nan_gap_ffill_recovery for 'any' mode
+  (continuous curve + fx NaN via by_underlying); add 'all' (deferred gap)
+  and 'per_leg' (raw-series NaN) tests
+- All 174 tests pass
+```
+
+## 2026-08-08 -- Fix stale design-notes statements about FX conversion and missing-data ordering
+
+### Prompt
+Update `design_notes.md` §3.10 step 4 to fix two statements that contradict
+the current implementation: (1) the FX factor forward-fill claim; (2) the
+claim that missing-data handling only runs once before conversion.
+
+### Changes applied
+
+- **`design_notes.md` §3.10 step 4**: replaced the claim that FX factor
+  gaps are forward-filled. The text now states that genuine gaps are *not*
+  forward-filled (factor retains NaN for diagnostic transparency); the
+  cumulative product `(cum_local × factor)` is forward-filled internally,
+  with NaN restored on missing-rate days in the daily series via a mask.
+  The resulting NaNs are processed by the missing-data mode (`'any'` →
+  aggregated to zero, `'all'` → gap day deferred, `'per_leg'` → preserved).
+  The missing-pair-file (provider returns `None`) behavior is unchanged:
+  leg stays in local currency with a warning.
+
+- **`design_notes.md` §3.10 step 4**: replaced the claim that conversion
+  runs after missing-data handling/cost and that NaNs are already processed
+  before conversion. The text now documents that missing-data handling is
+  applied a *second* time to the converted base-currency leg data because
+  FX conversion can introduce new NaNs from missing FX rates:
+  `'all'` → `_adjust_for_missing_legs` called on the base dataset to defer
+  gap days; `'any'` → implicit via aggregation `fillna(0.0)`;
+  `'per_leg'` → NaN preserved by design.
+
+### Suggested commit message
+```
+docs: correct design_notes §3.10 step 4 FX conversion and missing-data wording
+
+- step 4: FX factor gaps are not forward-filled; only the cumulative
+  product (cum_local × factor) is forward-filled internally, with NaN
+  restored on gap days via a mask and processed per missing-data mode
+  ('any' -> 0, 'all' -> deferred, 'per_leg' -> preserved)
+- step 4: missing-data handling is applied a second time to the
+  converted base-currency leg data since FX conversion can introduce
+  new NaNs; document the second _adjust_for_missing_legs pass in 'all'
+  mode, fillna(0.0) for 'any', NaN preservation for 'per_leg'
+```
+
+## 2026-09-08 -- FxRateProvider series caching: fix recursion, None bounds, Summary dedup
+
+### Prompt
+Refactor the FxRateProvider around a cached, full-range conversion-factor
+series so repeated lookups over overlapping simulation windows resolve each
+currency pair once instead of per-call. Three problems in the draft were
+reviewed and fixed before applying: (1) a recursion bug in the initial
+design, (2) extending `get_series` to accept `None` bounds, and (3)
+Summary deduplicating its `_fx_series` factor reuse. Wait for "apply now"
+before writing.
+
+### Assessment (pre-apply review)
+
+**Problem 1 -- infinite recursion.** The draft `_get_factor_series("X","USD")`
+recursing when both direct and inverse pairs were missing re-entered
+triangulation with the same pair. Fix: a non-recursive
+`_try_full_direct_or_inverse(from, to)` that resolves direct then inverse on
+the full available range and never triangulates. `_get_factor_series` uses it
+for its own direct/inverse attempt and for both USD legs, so `(X,USD)` and
+`(USD,Y)` resolve only via direct/inverse (which never recurses) and no
+recursion path exists. This exactly preserves the original lookup-order
+semantics, since the original `get_conversion_series` also used the scoped
+direct/inverse-only helper for its USD legs.
+
+**Problem 2 -- `start=None`/`end=None` safety.** `CsvBackend.get_series`
+already in-memory caches each ticker's full series, so
+`series.loc[None:None]` is a full slice (mask) -- no range materialization,
+and no backtester consumer passes `None` today (all call sites pass string
+dates). The `_MockFeed.get_series` in the tests slices `self._data.get(ticker)`
+and also tolerates `None`. `get_value` is deliberately left untouched
+(`.loc[date]` on `None` would raise). Only `get_series` (both `DataFeed` and
+`CsvBackend`) accepts `None`.
+
+**Problem 3 -- Summary dedup correctness.** The Summary caches only
+successful aligned factors in `_fx_series`, so `if pair_key in
+self._fx_series` unambiguously means "already computed". A missing pair is
+simply absent and re-fetches from the provider each time (the provider
+returns `None` quickly and records the pair in its own `_missing_pairs` set),
+preserving the current warn-per-leg behaviour. Caching `None` in `_fx_series`
+would require a separate sentinel and is avoided. The HKD/`_FakeFxProvider`
+edge is unchanged: a leg whose currency equals the base currency is copied
+through and never reaches the provider.
+
+### Changes applied
+
+- **`backtester/data/typed_providers/fx_rate_provider.py`**:
+  - Added `_factor_cache: dict[(from, to), pd.Series]` and
+    `_missing_pairs: set[(from, to)]` on `__init__`.
+  - Added `_get_factor_series(from, to)`: returns the cached full derived
+    factor series (direct -> inverse -> USD triangulation), keyed by the pair
+    and independent of any simulation window; records truly-absent pairs in
+    `_missing_pairs` and returns `None`; never caches the intermediate USD
+    legs, only the final requested pair.
+  - Added `_try_full_direct_or_inverse(from, to)`: fetches the direct pair on
+    the full available range (`get_series(..., None, None, ...)`), then the
+    inverse pair as `1.0 / inverse`; never triangulates, so recursion is
+    structurally impossible.
+  - `get_conversion_series` and `get_conversion_factor` now route through
+    `_get_factor_series` and slice/reindex or `.loc[date]` on cache hits.
+    `get_conversion_factor` output is identical for the CSV backend (the full
+    series is ticker-cached) and all existing point-lookup tests pass
+    unchanged.
+  - Removed the per-call `_try_direct_or_inverse` /
+    `_try_series_direct_or_inverse` helpers (superseded by the cache path).
+
+- **`backtester/data/csv_backend.py`** / **`backtester/data/data_feed.py`**:
+  `get_series` signatures widened to `start: str | None, end: str | None`.
+  `CsvBackend.get_series` returns the full cached series when both are
+  `None` (a `series.loc[None:None]` full slice); otherwise unchanged.
+  `get_value` is untouched (a `None` date would crash `.loc[date]`).
+
+- **`backtester/summary.py` -- `_convert_leg_to_base`**: hoisted the
+  `pair_key in self._fx_series` check to the top of the method. On a cache
+  hit the stored aligned factor is reused directly; on a miss the provider
+  is called, the warning + `None` short-circuit preserved, and the aligned
+  factor is stored once. The store now happens exactly where the factor is
+  produced (never for a missing pair), making the presence check
+  unambiguous.
+
+- **`tests/test_fx_rate_provider.py`**:
+  - `_MockFeed.get_series` accepts `start=None, end=None` and returns the
+    full stored series when both are `None`.
+  - Added `TestProviderCache`: `test_semantic_series_cached_and_reused`
+    (two overlapping windows read the same cached full series),
+    `test_missing_pair_cached_in_missing_set` (absent pair returns `None`
+    and is recorded in `_missing_pairs`), and
+    `test_triangulated_pair_is_cached_only_as_final` (a triangulated pair is
+    cached as `("JPY","HKD")` only -- the intermediate `("JPY","USD")` and
+    `("USD","HKD")` legs are never cached).
+
+- **`design_notes.md` §8.1**: `DataFeed.get_series` signature annotated
+  `start: str | None, end: str | None` and a new bullet added under "Key
+  features": `start=None`/`end=None` requests the full available series for
+  that ticker; both `None` returns the entire cached series. The existing
+  backend-protocol bullet is preserved.
+
+### Test impact
+All 177 tests pass (174 prior + 3 new provider-cache tests).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: cache full-range FX factor series per pair in FxRateProvider
+
+- Add _get_factor_series keyed by (from, to): resolve once over the full
+  available range (direct -> inverse -> USD triangulation), cache the
+  result, and slice on windowed get_conversion_series / point
+  get_conversion_factor calls; record truly-absent pairs in _missing_pairs
+- Add non-recursive _try_full_direct_or_inverse (never triangulates),
+  eliminating the draft's infinite-recursion path for missing pairs
+- Widen get_series bounds to str | None on CsvBackend and DataFeed;
+  both None returns the full cached series (get_value untouched)
+- Summary._convert_leg_to_base: check the _fx_series cache up front and
+  store the aligned factor exactly where produced (never for missing
+  pairs), so cached-only-successful is unambiguous
+- Update _MockFeed.get_series for None bounds; add TestProviderCache
+  (cached reuse, missing-pair set, final-pair-only triangulation caching)
+- design_notes.md §8.1: annotate get_series with str | None and document
+  the full-range None-bounds semantics
+- All 177 tests pass
+```
+
+---
+
+## 2026-09-08 -- Docs: add planned Portfolio Layer spec (design_notes.md §10)
+
+### Prompt
+Document the planned Portfolio Layer as forward-looking design only; no code
+changes. Insert a new §10 after the existing §9 (Overall System Architecture),
+leaving every existing section and all numbering untouched.
+
+### Change
+- `design_notes.md`: appended new **§10. Portfolio Layer (Planned)** directly
+  after §9 (document grew 1637 -> 2125 lines). Inserted verbatim as specified,
+  including the status note, the terminology mapping, subsections 10.1-10.11,
+  every Python/ASCII code block and every table:
+  - 10.1 Core Design Principles (P-1..P-5)
+  - 10.2 Two Parallel State Tracks (`StrategyPortfolioState` vs
+    `ActualPortfolioState`)
+  - 10.3 End-to-End Data Flow (Layer 2 -> Layer 4 -> Summary/Report/Validation)
+  - 10.4 Component Specifications (10.4.1-10.4.10): NettingEngine,
+    PortfolioAllocator, StrategySizer, RiskConstraint, ExecutionRecord,
+    BaseExecutionHandler, MarginCalculator, CashFlowTracker,
+    PortfolioCostModel, StrategyContribution
+  - 10.5 Unified Performance Interface (`PerformanceData` + adapters)
+  - 10.6 BasePricer Extension (`expected_cash_flows()`)
+  - 10.7 Backtest / Live Consistency
+  - 10.8 Order Rejection Handling
+  - 10.9 Nested Validation
+  - 10.10 Hard Constraints (C-1..C-5)
+  - 10.11 Implementation Priority (P0..P5)
+- Nothing else in the document was touched: §1-§9 are unchanged and were not
+  renumbered. Verified as a single +489/-1 hunk at the end of the file.
+
+### Notes
+- The spec names `BacktesterResult` and `BaseCostModel` do not exist yet. The
+  section carries an explicit terminology mapping to the current
+  `BacktestResult` (`backtester/backtest_engine.py:36`) and
+  `BaseCostCalculator` / `CostModel` (`backtester/cost_model.py:6,17`).
+  Checked against the codebase -- the mapping is accurate.
+- Character conventions matched to the rest of the document: U+2011
+  non-breaking hyphen (e.g. `forward-looking`, `post-processing`) and U+202F
+  narrow no-break space (`Phase 1`, `Phase 2`). No ASCII substitutions.
+- Deliberately **not** done, because it would alter another part of the
+  document: the Table of Contents still ends at §9, so §10 is not linked
+  from it. Worth a follow-up if you want §10 reachable from the TOC.
+
+### Test impact
+None -- docs-only change. All 177 tests pass.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: add planned Portfolio Layer specification as design_notes.md §10
+
+Forward-looking design documentation only; no code changes.
+
+- Add §10 Portfolio Layer (Planned) after §9, covering:
+  - core design principles P-1..P-5 (intent/execution separation,
+    post-simulation computation, no retroactive signal correction, cost on
+    net trades, signal/capital decoupling)
+  - the two parallel state tracks (StrategyPortfolioState vs
+    ActualPortfolioState) and the end-to-end Layer 2 -> Layer 4 data flow
+  - component specs 10.4.1-10.4.10: NettingEngine, PortfolioAllocator,
+    StrategySizer, RiskConstraint, ExecutionRecord, BaseExecutionHandler,
+    MarginCalculator, CashFlowTracker, PortfolioCostModel,
+    StrategyContribution
+  - unified PerformanceData interface, BasePricer.expected_cash_flows(),
+    backtest/live consistency, order rejection handling, nested validation
+  - hard constraints C-1..C-5 and implementation priority P0..P5
+- Add terminology mapping: spec BacktesterResult/BaseCostModel correspond to
+  current BacktestResult and BaseCostCalculator/CostModel
+- Existing §1-§9 untouched and not renumbered; TOC unchanged
+- All 177 tests pass
+```
+
+---
+
+## 2026-09-09 -- Docs: add AGENT.md with environment instructions
+
+### Prompt
+Add an `AGENT.md` at the project root so AI agents and collaborators know how
+to run the project correctly. Content was supplied verbatim and written
+directly (no diff requested). No other files to be modified.
+
+### Change
+- Created `AGENT.md` (33 lines) at the project root, documenting:
+  - Environment: use the conda env `backtest` (Python 3.12), never system
+    Python; all Python commands must run inside that environment
+  - Initial setup: `conda create -n backtest python=3.12 pandas numpy
+    matplotlib pyyaml pytest -y`
+  - Running commands via `conda run -n backtest ...` -- tests and
+    `examples/sma_crossover_example.py`
+  - Fallback when `conda run` is unavailable: locate the env with
+    `conda env list` and invoke its interpreter directly (POSIX and Windows
+    forms given)
+  - Dependency management: install only into `backtest`, never globally or
+    into another environment
+
+### Notes
+- Content written exactly as supplied. The leading and trailing `---` rules in
+  the request were treated as block delimiters, not as file content.
+- **Open caveat:** conda is not actually installed on this machine (no `conda`
+  on PATH, no anaconda/miniconda directories found), so the documented
+  commands cannot be executed as written here and the `backtest` env does not
+  exist. The suite currently runs via the managed venv at
+  `C:/Users/chank/.workbuddy/binaries/python/envs/default/Scripts/python.exe`.
+  Follow-up: either install conda and create `backtest`, or amend AGENT.md to
+  describe the environment actually in use.
+
+### Test impact
+None -- new documentation file, no code touched. All 177 tests pass (re-run
+after the addition as a sanity check).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: add AGENT.md with conda environment and command instructions
+
+- Document the `backtest` conda environment (Python 3.12) as the only
+  supported interpreter for this project
+- Add initial setup via `conda create -n backtest ...`
+- Add `conda run -n backtest` for tests and example scripts
+- Add fallback: locate the env with `conda env list` and call its Python
+  directly (POSIX + Windows forms)
+- Add dependency rule: install only into `backtest`, never globally
+- Docs-only; all 177 tests pass
+```
+
+---
+
+## 2026-09-09 -- Docs: AGENT.md -- robust conda discovery when conda is not on PATH
+
+### Prompt
+Make conda discovery more robust for agent environments where conda is not on
+PATH. Replace the "If `conda run` is unavailable" section with an expanded
+version and keep the rest of the file unchanged.
+
+### Change
+- `AGENT.md` (33 -> 43 lines): replaced the "If conda run is unavailable"
+  section. The previous two-step fallback (run `conda env list`, then call
+  `<env_path>/bin/python` or `<env_path>\python.exe`) is replaced by:
+  - a list of common conda roots to probe: `C:\Users\<username>\anaconda3`,
+    `C:\Users\<username>\miniconda3`, `C:\ProgramData\Anaconda3`,
+    `D:\anaconda3`, `/opt/anaconda3`, `~/anaconda3`, `~/miniconda3`
+  - running via the full conda path:
+    `<conda_root>\Scripts\conda.exe run -n backtest python -m pytest`
+  - calling the environment interpreter directly:
+    `<conda_root>\envs\backtest\python.exe` (Windows) and
+    `<conda_root>/envs/backtest/bin/python` (Linux / macOS)
+  - an explicit instruction to ask the user when conda still cannot be found
+- Everything else is unchanged: lines 1-17 and the Dependency Management
+  section are byte-for-byte identical to the previous version.
+
+### Notes
+- The `---` rules in the request were again treated as block delimiters, not
+  as file content.
+- Still unresolved: conda is not installed on this machine, so none of the
+  documented paths resolve here. Re-verified this session -- no `conda` on
+  PATH and no anaconda/miniconda directories. The suite was therefore run
+  with the managed venv at
+  `C:/Users/chank/.workbuddy/binaries/python/envs/default/Scripts/python.exe`,
+  as the new AGENT.md instructs for the not-found case.
+
+### Test impact
+None -- docs-only change. All 177 tests pass.
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+docs: make conda discovery robust in AGENT.md when conda is not on PATH
+
+- Probe common conda roots (Windows per-user, ProgramData, D:\, /opt, ~)
+  before giving up
+- Prefer running via the full conda path: <conda_root>\Scripts\conda.exe run
+- Add direct environment-interpreter invocation for Windows and POSIX
+- Instruct agents to ask the user when conda cannot be located
+- Docs-only; all 177 tests pass
+```
+
+## 2026-09-18 -- Design cleanup: declarative local-currency report dispatch and aligned FX factor naming
+
+### Prompt
+Two small, related design cleanups:
+
+1. Replace `Summary._build_report`'s hardcoded
+   `report_name == "by_underlying"` check with a declarative
+   `requires_local_currency` class attribute on `BaseReport`, overridden by
+   `ByUnderlyingReport`, mirroring the existing declarative pattern in
+   `BaseSignal` (`requires_portfolio_state`, `requires_trade_history`).
+2. Rename `Summary._fx_series` to `Summary._aligned_fx_factors` and document
+   its dual role: a per-`generate()` cache of trading-day-aligned conversion
+   factors reused across legs during conversion and exposed for reporting
+   (`fx_<pair>` columns). `FxRateProvider`'s cache is a different object and
+   must not be renamed.
+
+### Changes applied
+- `backtester/reports/_base.py`: added
+  `requires_local_currency: bool = False`.
+- `backtester/reports/by_underlying.py`: declared
+  `requires_local_currency = True`.
+- `backtester/summary.py`:
+  - `_build_report` now selects `leg_data` +
+    `self._aligned_fx_factors` for reports whose
+    `requires_local_currency` is `True`; all other reports still receive
+    `base_leg_data` + `None`.
+  - renamed `_fx_series` to `_aligned_fx_factors` at every initialization,
+    reset, read, and write site.
+  - added a comment on `_aligned_fx_factors` documenting its dual role
+    (keyed by f"fx_{local}{base}", reused for conversion, exposed for
+    reporting).
+- `tests/test_summary.py`: added `TestSummaryReportDispatch`, which registers
+  a dummy `BaseReport` subclass with `requires_local_currency = True` and
+  asserts it receives local leg dictionaries plus the exact aligned FX factor
+  dict through `_build_report`.
+- No test code referenced `summary._fx_series` directly, so no existing test
+  renames were required; the new dispatch test references
+  `_aligned_fx_factors`.
+
+### Test impact
+All 178 tests pass (177 prior + 1 new dispatch test).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: declarative local-currency report dispatch; name aligned FX cache
+
+- BaseReport: add requires_local_currency = False, mirroring BaseSignal's
+  declarative capability flags
+- ByUnderlyingReport: declare requires_local_currency = True
+- Summary._build_report: dispatch on the report class capability instead of
+  comparing the configured report key to "by_underlying"
+- Rename Summary._fx_series to _aligned_fx_factors and document its dual role
+  as the per-run trading-day-aligned factor cache used for conversion reuse
+  and reporting
+- Add TestSummaryReportDispatch covering local leg_data + FX factor dispatch
+- All 178 tests pass
+```
+
+## 2026-09-19 -- Readability: rename `is_local` to `is_secondary_local_pass` in by_underlying
+
+### Prompt
+`ByUnderlyingReport.build` computed
+`is_local = dataset is leg_data and currency == "both"`. The name reads as
+"the current dataset is in local currency", but it is `True` only during the
+secondary local pass of a `currency="both"` run -- in `currency="local"` mode
+the dataset *is* local and the flag is `False`. Rename it to state what it
+actually flags. Pure rename, no behaviour change.
+
+### Changes applied
+- `backtester/reports/by_underlying.py`: renamed `is_local` to
+  `is_secondary_local_pass` at all four sites --
+  - the assignment (`dataset is leg_data and currency == "both"`),
+  - the duplicate-suppression check (skip local sub-reports for tickers whose
+    currency equals the base currency),
+  - the FX-attachment check (skip FX conversion on the local pass),
+  - the key-suffix assignment (`_{ticker}_{sub_name}_local`).
+- No other file referenced the name; no logic, signature, or output key
+  changed.
+
+### Naming rationale
+Verified against all three currency modes: `currency="local"` builds
+`datasets = [(None, leg_data)]` so the flag is `False`; `currency="base"`
+builds `[(fx_series, base_dataset)]` where `base_dataset` is a freshly built
+list (never identical to `leg_data`), so the identity test is `False`; only
+`currency="both"` produces a second `(None, leg_data)` pass, which is the one
+case the flag marks.
+
+### Test impact
+All 178 tests pass (unchanged -- same 178 as before the rename).
+
+### Manual changes
+- None
+
+### Suggested commit message
+```
+refactor: rename is_local to is_secondary_local_pass in by_underlying
+
+is_local read as "this dataset is in local currency", but it was only
+True on the secondary local pass of a currency="both" run -- in
+currency="local" mode the dataset is local and the flag was False.
+Rename to state what it actually flags. Pure rename (assignment,
+duplicate-suppression check, FX-attachment check, key-suffix check);
+no behaviour change. All 178 tests pass.
 ```

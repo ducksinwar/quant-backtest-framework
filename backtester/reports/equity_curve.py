@@ -6,7 +6,8 @@ from backtester.reports._base import BaseReport
 
 
 class EquityCurveReport(BaseReport):
-    def build(self, summary, trades, leg_data, report_config, fx_rates, output_name):
+    def build(self, summary, trades, leg_data, report_config, output_name,
+              fx_series):
         cfg = summary._normalize_config(report_config)
         include = cfg.get("include")
 
@@ -17,6 +18,12 @@ class EquityCurveReport(BaseReport):
             cols["cost"] = summary.get_cumulative_series(leg_data, "cost")
         if include is None or "net" in include:
             cols["net"] = summary.get_cumulative_series(leg_data, "net")
+
+        if fx_series:
+            # After per-ticker filtering in ByUnderlyingReport, fx_series
+            # contains exactly one pair for this underlying's currency.
+            for pair_key, factor in fx_series.items():
+                cols[pair_key] = factor
 
         if summary.capital is not None and summary.capital > 0:
             if include is None or "gross_pct" in include:

@@ -921,12 +921,14 @@ summary = Summary(spec)
 ```
 **Primary method:**
 
-- `generate(trade_history: list[Trade], cost_model: CostModel, trading_days: list[str], fx_rates: dict[str, pd.Series] | None = None, capital: float | None = None) -> dict | None`
+- `generate(trade_history: list[Trade], cost_model: CostModel, trading_days: list[str], base_currency: str = "USD", fx_provider: FxRateProvider | None = None, capital: float | None = None) -> dict | None`
   Applies the cost model (for standard reports that need it), handles missing data, and produces the requested reports.  
-  `fx_rates` is an optional dictionary mapping currency pairs (e.g., `'USDJPY'`) to a `pd.Series` of daily spot rates.  
+  `base_currency` is the currency in which portfolio-level reports are consolidated (default `'USD'`).  
+  `fx_provider` is an optional `FxRateProvider` wrapping the `DataFeed`; when provided, every leg whose `currency` differs from `base_currency` is converted (cumulative-spot method for P&L/cost/component PnL, direct spot multiplication for risk measures).  
   `capital` is an optional parameter that enables percentage versions of return, drawdown, and annualised return. When provided and positive, `annualized_return` is expressed as a percentage of capital, and `return_pct`, `max_drawdown_pct`, and `drawdown_pct` (in drawdown tables) are added. When omitted, `annualized_return` and all `_pct` columns are not produced; `return` (total absolute P&L) is always available.  
-  - **If `fx_rates` is provided**, local‑currency P&L is converted to the base currency (USD) and portfolio‑level metrics are computed.
-  - **If `fx_rates` is omitted**, no cross‑currency aggregation is performed. Reports that require a single‑currency portfolio are either omitted or broken down by underlying/currency.
+  - **If `fx_provider` is provided**, local‑currency P&L is converted to the base currency and portfolio‑level metrics are computed.
+  - **If `fx_provider` is omitted**, no cross‑currency aggregation is performed. Reports that require a single‑currency portfolio are either omitted or broken down by underlying/currency.
+  `capital` is always assumed to be denominated in `base_currency`.
 
 **Processing steps (inside `generate`):**
 
@@ -936,19 +938,20 @@ summary = Summary(spec)
 
   3. **Cost application:** The `CostModel.compute_costs()` returns a dictionary mapping `leg_id` to a per‑leg daily cost series, each in the leg’s local currency. For each leg in the trade history, the `Summary` uses the leg’s `leg_id` to look up the corresponding cost series and computes its local net P&L as `net_local = gross_local - cost_local` (with missing cost treated as zero).
 
-  4. **Base‑currency conversion (if `fx_rates` provided):**  
-     If `fx_rates` is not `None`, for each leg whose `currency` differs from the base currency (USD):
-       - The cumulative local net P&L series (i.e., local gross P&L minus the local cost series produced by the `CostModel`) is taken.
-       - This cumulative net series is multiplied by the corresponding spot FX series (e.g., `USDJPY` for JPY‑denominated legs).
-       - The daily USD net P&L is obtained by differencing the resulting cumulative USD series.
-       - Any **component PnL** series (e.g., `delta_pnl`, `gamma_pnl`) are also converted to USD using the same cumulative method.
-       - **Risk measures** (e.g., `delta_ts`, `gamma_ts`) are converted to USD by multiplying each day’s value by the day’s spot rate, producing dollar greeks that are directly comparable across all legs.
-     The USD net P&L series, converted component series, and dollar‑greek series from all legs are then aggregated to form the single portfolio‑level equity curve, attribution tables, and risk summaries.  
-     The FX spot rate used for each conversion is included in the equity curve DataFrame (as an additional column, e.g., `fx_USDJPY`), so that the user can distinguish FX‑driven P&L from underlying‑driven P&L.
+  4. **Base‑currency conversion (if `fx_provider` provided):**  
+     If `fx_provider` is not `None`, for each leg whose `currency` differs from `base_currency` (default USD):
+       - The cumulative local P&L series (gross and net) and the local cost series are converted by the **cumulative‑spot method**: `cum_base = (cum_local * factor).ffill()`, then daily values are recovered by differencing. This makes the conversion path‑independent and preserves the true economic P&L.
+       - Any **component PnL** series (e.g., `delta_pnl`, `gamma_pnl`) are converted with the same cumulative method.
+       - **Risk measures** (e.g., `delta_ts`, `gamma_ts`) are converted by multiplying each day’s value by the day’s spot factor, producing base‑currency greeks that are directly comparable across all legs.
+       - Genuine gaps in the FX factor series are not forward‑filled; the factor retains NaN to preserve diagnostic transparency.  The cumulative product `(cum_local × factor)` is forward‑filled internally to prevent NaN from corrupting subsequent days, then NaN is restored on the missing‑rate days in the daily series via a mask.  The resulting NaN values are processed by the missing‑data mode: `'any'` aggregates them to zero, `'all'` defers the gap day, `'per_leg'` preserves them.  A missing pair file (provider returns `None`) leaves the leg in its local currency with a warning rather than producing an all‑zeros series.
+       - Conversion runs **after** missing‑data handling and cost application have been applied to the local‑currency leg data (steps 2 and 3).  Because FX conversion may introduce new NaN values from missing FX rates, missing‑data handling is applied a second time to the converted base‑currency leg data: in `'all'` mode, `_adjust_for_missing_legs` is called on the base dataset to defer gap days consistently; in `'any'` mode, NaN is handled implicitly by aggregation (`fillna(0.0)`); in `'per_leg'` mode, NaN is preserved by design.
+     The base‑currency series from all legs are then aggregated to form the single portfolio‑level equity curve, attribution tables, and risk summaries. Portfolio‑level reports (`equity_curve`, `metrics`, `drawdown_table`, `hit_ratio`, `periodic_metrics`, `trade_summary`) always consume the base‑currency dataset.
+     The FX spot factor used for each conversion is included in the by‑underlying base‑currency sub‑reports (as an additional column, e.g., `fx_EURUSD`), so that the user can distinguish FX‑driven P&L from underlying‑driven P&L.  The overall portfolio equity curve does not carry FX columns.
+     `by_underlying` accepts a `currency` key (`"base"` default, `"local"`, or `"both"`) to emit base‑currency, local‑currency, or dual (suffixed `_local`) per‑underlying sheets.
 
-     If `fx_rates` is `None`, no cross‑currency aggregation is performed. Local‑currency series are kept separate, and any report that inherently requires a single‑currency portfolio (e.g., `'equity_curve'`, `'metrics'`, `'drawdown_table'`) will either be omitted or produced in a per‑underlying/currency breakdown.
+     If `fx_provider` is `None`, no cross‑currency aggregation is performed. Local‑currency series are kept separate, and any report that inherently requires a single‑currency portfolio (e.g., `'equity_curve'`, `'metrics'`, `'drawdown_table'`) will either be omitted or produced in a per‑underlying/currency breakdown.
 
-     **Phase 1:** This conversion logic is deferred to Phase 2, when multi‑currency instruments are added. In Phase 1, all legs are USD‑denominated, so no conversion is required. The `_aggregate_series` function accepts an `fx_rates` parameter but does not yet use it.
+     **Hedged‑notional assumption:** the initial notional is assumed to be hedged, so FX movements affect only the profit and loss of the position, not the principal. The `capital` parameter is always in the base currency.
 
   5. **Report generation:**  
      - Standard reports are built using predefined logic. Filters from the root `reports` dict and from any containing groups are applied. Reports do not have their own `'filter'`; all filtering is handled by the root and group levels. The data is then aggregated according to the report’s `include` spec.
@@ -1503,12 +1506,13 @@ class DataFeed:
     def get_value(self, dataset: str, date: str, ticker: str = None, **params) -> float:
         return self._backend.get_value(dataset, date, ticker, **params)
 
-    def get_series(self, dataset: str, start: str, end: str, ticker: str = None, **params) -> pd.Series:
+    def get_series(self, dataset: str, start: str | None, end: str | None, ticker: str = None, **params) -> pd.Series:
         return self._backend.get_series(dataset, start, end, ticker, **params)
 ```
 **Key features:**
 - `dataset` is a logical name (e.g., `eod_prices`, `spx_vol_surface`, `trump_likes_24h`).
 - The backend protocol requires only `get_value` and `get_series`; any object implementing those can serve as a backend.
+- `start=None` / `end=None` in `get_series` requests the full available series for that ticker; both `None` returns the entire cached series.
 - The `DataFeed` is the **only** piece of code that knows whether data lives in a CSV, a SQLite database, a PostgreSQL cluster, or a Bloomberg session.
 - It can be configured to select between multiple sources (`source='bloomberg'` vs `'refinitiv'`) and observation times (`observation_time='ny_close'`), enabling point‑in‑time backtests and vendor‑robustness checks.
 - New methods (e.g., for point‑in‑time data) can be added to the `DataFeed` class without affecting existing consumers.
@@ -1631,3 +1635,491 @@ The same leg‑structure‑trade hierarchy used in the backtester carries throug
 After execution, the `OrderGenerator` (see §3.8) produces any mechanical adjustments (rolls, hedge orders, scheduled unwinds, and other scheduled future events) which are fed to the trade lifecycle management application. In that application, the `lot_id` grouping is used to visually connect rolled structures together, so a trader can see the full history of a position across contract rolls.
 
 This architectural continuity—from backtest to OMS to lifecycle monitoring—ensures that the same data structures and risk metrics are used consistently, reducing translation errors between research and production.
+
+## 10. Portfolio Layer (Planned)
+
+> **Status:** This section specifies the planned Portfolio Layer, a coordination layer that spans the Research, Risk, and Execution pillars. It is **forward‑looking and not part of the current Phase 1 or Phase 2 implementation**. It builds on the existing Backtester, Event Log, CostModel, Pricer, and Trade/Structure/Instrument classes.
+
+> **Terminology mapping:** The Portfolio Layer specification below uses `BacktesterResult` and `BaseCostModel`; in the current codebase these correspond to `BacktestResult` and `BaseCostCalculator`/`CostModel`, respectively. When the Portfolio Layer is implemented, these names will be aligned with the existing code.
+
+### 10.1 Core Design Principles
+
+| ID | Principle | Rationale |
+|---|---|---|
+| P-1 | **Intent / Execution separation** | The strategy layer records *what it wants* (`StrategyPortfolioState`). The portfolio layer records *what actually happened* (`ActualPortfolioState`). The gap is captured in `ExecutionRecord`. |
+| P-2 | **Post‑simulation computation** | All strategy backtests run independently first. The Portfolio Layer operates as a post‑processing step. Changing allocation rules, margin assumptions, or cost models **never requires re‑running any strategy backtest**. |
+| P-3 | **No retroactive signal correction** | A strategy's T+1 signal is still generated against its "ideal‑world" state. When the portfolio layer rejects an order, the strategy's `PortfolioState` is **not** modified. The cost of portfolio constraints is quantified via `StrategyContribution.constraint_cost`. |
+| P-4 | **Cost on net trades** | When multiple strategies trade the same instrument, transaction costs are computed on the **netted** trade, not on the sum of individual trades. |
+| P-5 | **Signal / capital decoupling** | Strategy signals express target positions as **percentages only**. Absolute capital allocation is handled exclusively by the `PortfolioAllocator`. |
+
+### 10.2 Two Parallel State Tracks
+
+```
+StrategyPortfolioState  (intent)
+  = "What I would hold if every signal were executed"
+  = Raw output of the strategy backtester — never mutated
+  = Produced by Backtester (Layer 2)
+
+ActualPortfolioState  (execution)
+  = "What the portfolio actually holds after risk constraints"
+  = Produced by Portfolio Layer (Layer 4)
+```
+
+**The delta between the two = rejected / scaled orders = the cost of portfolio constraints.**
+
+### 10.3 End‑to‑End Data Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Layer 2 — Strategy Layer  (parallel, mutually unaware)          │
+│                                                                  │
+│  Strategy 1 → Backtester → StrategyPortfolioState series         │
+│                           → Event Log (intent)                   │
+│  Strategy 2 → Backtester → StrategyPortfolioState series         │
+│                           → Event Log (intent)                   │
+│  …                                                               │
+│  Strategy N → Backtester → StrategyPortfolioState series         │
+│                           → Event Log (intent)                   │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         │  N state series + N event logs
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Layer 4 — Portfolio Layer  (post‑processing, day‑by‑day)        │
+│                                                                  │
+│  Step 1  NettingEngine                                           │
+│          Merge N event logs → net trade per (date, symbol)       │
+│                                                                  │
+│  Step 2  PortfolioAllocator                                      │
+│          Total capital × allocation rules → per‑strategy capital │
+│                                                                  │
+│  Step 3  StrategySizer                                           │
+│          Signal × allocated capital × sizing rules → target pos  │
+│                                                                  │
+│  Step 4  RiskConstraint                                          │
+│          Validate net positions against limits → ExecutionRecord │
+│                                                                  │
+│  Step 5  BaseExecutionHandler.execute()                          │
+│          Execute netted orders → Fill                            │
+│                                                                  │
+│  Step 6  PortfolioCostModel                                      │
+│          Compute costs on netted trades                          │
+│                                                                  │
+│  Step 7  MarginCalculator + CashFlowTracker                      │
+│          Compute margin requirements + cash flows                │
+│                                                                  │
+│  Outputs:                                                        │
+│  ├── ActualPortfolioState series                                 │
+│  ├── ExecutionRecord list                                        │
+│  ├── NettedOrder list                                            │
+│  ├── PortfolioCostResult                                         │
+│  ├── MarginHistory time series                                   │
+│  ├── CashFlowHistory time series                                 │
+│  └── StrategyContribution list                                   │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         │  Converted to unified PerformanceData
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Summary / Report / Validation  (shared, source‑agnostic)        │
+│                                                                  │
+│  Input: PerformanceData                                          │
+│  ├── From single strategy  → SingleStrategyAdapter               │
+│  └── From portfolio        → PortfolioAdapter                    │
+│                                                                  │
+│  Summary Engine    → metric computation                          │
+│  Report Engine     → report generation                           │
+│  Validation Engine → Purged WF / Deflated Sharpe                 │
+│  (Validation supports two modes: SINGLE_STRATEGY / PORTFOLIO)    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 10.4 Component Specifications
+
+#### 10.4.1 NettingEngine
+
+```python
+class NettingEngine:
+    """
+    Merges event logs from N strategies into net trades
+    grouped by (date, symbol).
+
+    Problem solved:
+      Strategy 1 buys SPX $1M, Strategy 2 sells SPX $0.8M
+      → net trade = buy $0.2M (not $1.8M gross).
+    """
+
+    def net_orders(
+        self,
+        event_logs: dict[str, list[EventLogEntry]],
+    ) -> list[NettedOrder]: ...
+
+
+@dataclass(frozen=True)
+class NettedOrder:
+    timestamp: date
+    symbol: str
+    net_quantity: float
+    net_direction: Direction          # BUY / SELL
+    net_notional: float
+    original_orders: tuple[OriginalOrder, ...]  # preserved for cost allocation
+```
+
+#### 10.4.2 PortfolioAllocator
+
+```python
+class BasePortfolioAllocator(ABC):
+    """Decides how much capital each strategy receives.
+    Fully decoupled from signal generation."""
+
+    @abstractmethod
+    def allocate(
+        self,
+        total_capital: float,
+        strategy_signals: dict[str, StrategySignal],
+        strategy_risk_profiles: dict[str, RiskProfile],
+        allocation_rules: AllocationRuleSet,
+    ) -> dict[str, float]:
+        """Returns {strategy_id: allocated_capital}"""
+        ...
+
+# Built-in implementations
+class EqualWeightAllocator(BasePortfolioAllocator): ...
+class RiskParityAllocator(BasePortfolioAllocator): ...
+class MaxSharpeAllocator(BasePortfolioAllocator): ...
+```
+
+#### 10.4.3 StrategySizer
+
+```python
+class BaseStrategySizer(ABC):
+    """Within allocated capital, decides how much to actually deploy."""
+
+    @abstractmethod
+    def size(
+        self,
+        signal: StrategySignal,
+        allocated_capital: float,
+        market_data: MarketSnapshot,
+        sizing_rules: SizingRuleSet,
+    ) -> SizedPosition: ...
+
+# Built-in implementations
+class FullAllocationSizer(BaseStrategySizer): ...
+class VolTargetSizer(BaseStrategySizer): ...
+```
+
+#### 10.4.4 RiskConstraint
+
+```python
+class BaseRiskConstraint(ABC):
+    """Portfolio-level risk gate. Last checkpoint before execution."""
+
+    @abstractmethod
+    def check(
+        self,
+        sized_positions: list[SizedPosition],
+        portfolio_state: ActualPortfolioState,
+        margin_calculator: MarginCalculator,
+        risk_limits: RiskLimitSet,
+    ) -> RiskCheckResult:
+        """
+        Checks:
+        - Margin requirement > available capital?
+        - Single-name concentration > threshold?
+        - Leverage > cap?
+        - Sector / regional exposure > threshold?
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class RiskCheckResult:
+    passed: bool
+    violations: tuple[RiskViolation, ...]
+    adjusted_positions: list[SizedPosition] | None
+```
+
+#### 10.4.5 ExecutionRecord
+
+```python
+@dataclass(frozen=True)
+class ExecutionRecord:
+    """Bridges strategy intent and portfolio execution."""
+    timestamp: date
+    strategy_id: str
+    signal: StrategySignal
+    status: ExecutionStatus
+    requested_quantity: float
+    filled_quantity: float
+    rejected_quantity: float
+    rejection_reason: str | None
+
+
+class ExecutionStatus(Enum):
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partial"
+    REJECTED = "rejected"
+```
+
+#### 10.4.6 BaseExecutionHandler
+
+```python
+class BaseExecutionHandler(ABC):
+    """
+    Unified execution interface.
+    All upstream logic (netting, risk check, cost model) is identical
+    for backtest and live. Only the handler implementation swaps.
+    """
+
+    @abstractmethod
+    def execute(self, orders: list[NettedOrder]) -> list[Fill]: ...
+
+
+class SimulatedExecutionHandler(BaseExecutionHandler):
+    """Backtest: fills against historical prices + slippage model."""
+    def __init__(self, market_data: DataFeed, slippage: SlippageModel): ...
+
+
+class LiveExecutionHandler(BaseExecutionHandler):
+    """Live: routes to broker / exchange API."""
+    def __init__(self, broker_api: BrokerAPI): ...
+```
+
+#### 10.4.7 MarginCalculator
+
+```python
+class BaseMarginCalculator(ABC):
+    """
+    Standalone margin calculator. Lives in Portfolio Layer, NOT in Backtester.
+    Margin is a portfolio-level concept: single-strategy margin is meaningless
+    because it ignores cross-strategy hedging effects.
+    """
+
+    @abstractmethod
+    def calculate_margin(
+        self,
+        portfolio_state: ActualPortfolioState,
+        market_data: MarketSnapshot,
+        margin_rules: MarginRuleSet,       # Reg T / Portfolio Margin / SPAN
+        vol_estimator: VolatilityEstimator,
+    ) -> MarginRequirement: ...
+
+
+@dataclass(frozen=True)
+class MarginRequirement:
+    initial_margin: float
+    maintenance_margin: float
+    variation_margin: float
+    margin_call_triggered: bool
+```
+
+#### 10.4.8 CashFlowTracker
+
+```python
+class BaseCashFlowTracker(ABC):
+    """
+    Cash flows are NOT produced by the Backtester.
+    They are derived by the Pricer from holdings + contract terms.
+    Portfolio Layer reads holdings, then calls Pricer.expected_cash_flows().
+    """
+
+    @abstractmethod
+    def process(
+        self,
+        positions: dict[str, float],
+        date: date,
+        market_data: MarketSnapshot,
+        pricer: BasePricer,
+    ) -> CashFlowStatement: ...
+
+
+@dataclass(frozen=True)
+class CashFlowStatement:
+    dividends_received: float
+    coupon_payments: float
+    swap_payments: float
+    margin_settlements: float
+    net_cash: float
+```
+
+#### 10.4.9 PortfolioCostModel
+
+```python
+class PortfolioCostModel:
+    """
+    Computes costs on netted trades, reusing the existing BaseCostModel.
+    Input changes from raw EventLog to NettedOrder.
+
+    Cost allocation options:
+      A. Pro-rata by net contribution
+      B. No allocation — deduct at portfolio level
+      C. Discount each strategy by its offset ratio
+    """
+
+    def calculate_cost(
+        self,
+        netted_orders: list[NettedOrder],
+        cost_model: BaseCostModel,
+    ) -> PortfolioCostResult: ...
+```
+
+#### 10.4.10 StrategyContribution
+
+```python
+@dataclass(frozen=True)
+class StrategyContribution:
+    """Measures a strategy's real contribution within the portfolio."""
+    strategy_id: str
+
+    # Theoretical (standalone backtest)
+    theoretical_sharpe: float
+    theoretical_return: float
+
+    # Actual (within portfolio)
+    actual_sharpe: float
+    actual_return: float
+
+    # Execution statistics
+    total_signals: int
+    filled_signals: int
+    rejected_signals: int
+    fill_rate: float              # filled / total
+
+    # Constraint impact
+    constraint_cost: float        # return lost to portfolio constraints
+```
+
+### 10.5 Unified Performance Interface
+
+```python
+@dataclass(frozen=True)
+class PerformanceData:
+    """
+    Unified performance data contract.
+    Regardless of source (single strategy or portfolio),
+    everything is converted to this format before entering
+    Summary / Report / Validation.
+    """
+    returns: pd.Series
+    equity_curve: pd.Series
+    trades: tuple[Trade, ...]
+    positions: pd.DataFrame
+    benchmark: pd.Series | None
+    metadata: dict[str, Any]
+
+
+class SingleStrategyAdapter:
+    def to_performance_data(self, result: BacktesterResult) -> PerformanceData: ...
+
+class PortfolioAdapter:
+    def to_performance_data(self, result: PortfolioResult) -> PerformanceData: ...
+```
+
+> **Summary, Report, and Validation engines consume only `PerformanceData`.**
+> They are completely agnostic to whether the data came from a single strategy or a portfolio.
+
+### 10.6 BasePricer Extension
+
+```python
+class BasePricer(ABC):
+    # Existing interfaces unchanged
+    @abstractmethod
+    def price(self, contract: Contract, market_data: MarketSnapshot) -> float: ...
+
+    @abstractmethod
+    def greeks(self, contract: Contract, market_data: MarketSnapshot) -> Greeks: ...
+
+    # ═══ NEW ═══
+    @abstractmethod
+    def expected_cash_flows(
+        self,
+        contract: Contract,
+        start_date: date,
+        end_date: date,
+        market_data: MarketSnapshot,
+    ) -> list[CashFlowEvent]:
+        """
+        Equity   → dividend events
+        Bond     → coupon events
+        IRS      → periodic swap leg payments
+        Futures  → daily mark-to-market settlements
+        """
+        ...
+```
+
+> **`expected_cash_flows()` is called by the Portfolio Layer, never by the Backtester.**
+
+### 10.7 Backtest / Live Consistency
+
+The entire pipeline from `NettingEngine` through `RiskConstraint` through `PortfolioCostModel` is **identical** in backtest and live. The only switch is the execution handler:
+
+```
+Backtest:  SimulatedExecutionHandler  (historical prices + slippage model)
+Live:      LiveExecutionHandler       (broker / exchange API)
+```
+
+The `Event Log` records intent with `status = PENDING_EXECUTION`.
+The `Fill` produced by `BaseExecutionHandler` confirms execution.
+The `ExecutionRecord` format is identical in both modes.
+
+### 10.8 Order Rejection Handling
+
+```
+Day T:
+  Strategy 1 signal: BUY SPX
+      │
+      ▼
+  Portfolio Layer checks risk limits
+      ├── Pass → ExecutionRecord(status=FILLED, filled=100)
+      └── Fail → ExecutionRecord(status=REJECTED, filled=0,
+                   rejected=100,
+                   reason="SPX concentration limit exceeded")
+
+  ActualPortfolioState:  SPX unchanged (order was rejected)
+  StrategyPortfolioState: SPX +100  (strategy is unaware of rejection)
+
+Day T+1:
+  Strategy 1 signal: based on "I hold SPX" (ideal-world behaviour)
+  Portfolio Layer checks again → rejects again (no actual holding)
+  → Divergence between theoretical and actual performance
+  → Quantified via StrategyContribution.constraint_cost
+```
+
+### 10.9 Nested Validation
+
+```
+Step 1: Validate each strategy independently (SINGLE_STRATEGY mode)
+        → Eliminate overfit strategies
+
+Step 2: Combine validated strategies
+        → Produce portfolio-level PerformanceData
+
+Step 3: Validate the portfolio (PORTFOLIO mode)
+        → Check whether the combination introduces new overfitting
+        → Check cross-strategy correlation stability
+        → Check weight-allocation robustness
+```
+
+Both steps use the **same** `ValidationEngine` with different mode flags.
+
+### 10.10 Hard Constraints
+
+| ID | Constraint | Rationale |
+|---|---|---|
+| C-1 | **Never add margin checks inside the Backtester loop** | Pollutes strategy alpha, breaks reproducibility |
+| C-2 | **Never embed cash-flow data inside StrategyPortfolioState** | Cash flows are derived from holdings, not owned by them |
+| C-3 | **Never compute margin at the single-strategy level** | Margin is a portfolio concept (hedging effects) |
+| C-4 | **Never retroactively modify strategy signals** | Violates stateless design and reproducibility |
+| C-5 | **Changing portfolio constraints must not require re-running backtests** | Core value of post-simulation architecture |
+
+### 10.11 Implementation Priority
+
+| Priority | Component | Rationale |
+|---|---|---|
+| **P0** | `PerformanceData` + `SingleStrategyAdapter` + `PortfolioAdapter` | Unlocks shared Summary / Report / Validation pipeline |
+| **P1** | `NettingEngine` + `PortfolioCostModel` | Solves multi-strategy cost offset |
+| **P2** | `RiskConstraint` + `ExecutionRecord` | Solves order rejection and state divergence |
+| **P3** | `PortfolioAllocator` + `StrategySizer` | Enables capital allocation and position scaling |
+| **P4** | `MarginCalculator` + `CashFlowTracker` | Required before live deployment |
+| **P5** | `BaseExecutionHandler` + `SimulatedExecutionHandler` | Unifies backtest / live interface |

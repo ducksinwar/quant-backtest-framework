@@ -14,12 +14,14 @@ class SMACrossoverSignal(BaseSignal):
         tickers: list[str],
         notional: float,
         data_feed,
+        ticker_currency: dict[str, str] | None = None,
     ):
         self.short_window = short_window
         self.long_window = long_window
         self.tickers = tickers
         self.notional = notional
         self._data_feed = data_feed
+        self.ticker_currency = ticker_currency or {}
 
     def generate_signals(
         self,
@@ -84,6 +86,9 @@ class SMACrossoverSignal(BaseSignal):
                                 "ticker": ticker,
                                 "size": shares,
                                 "asset_class": "equity",
+                                "currency": self.ticker_currency.get(
+                                    ticker, "USD"
+                                ),
                             }
                         ],
                     }

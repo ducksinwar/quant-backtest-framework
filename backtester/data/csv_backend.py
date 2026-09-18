@@ -52,8 +52,8 @@ class CsvBackend:
     def get_series(
         self,
         dataset: str,
-        start: str,
-        end: str,
+        start: str | None,
+        end: str | None,
         ticker: str = None,
         **params,
     ) -> pd.Series:
@@ -65,4 +65,6 @@ class CsvBackend:
         series = self._load_csv(ticker)
         if series is None:
             return pd.Series(dtype=float)
+        if start is None and end is None:
+            return series
         return series.loc[start:end]

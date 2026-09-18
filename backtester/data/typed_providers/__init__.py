@@ -1,0 +1,2 @@
+from backtester.data.typed_providers.fx_rate_provider import FxRateProvider
+from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider

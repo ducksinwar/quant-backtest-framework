@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 
 
 class BaseReport(ABC):
+    requires_local_currency: bool = False
+
     @abstractmethod
     def build(
         self,
@@ -17,7 +19,7 @@ class BaseReport(ABC):
         trades: list,
         leg_data: list[dict],
         report_config: dict,
-        fx_rates: dict | None,
         output_name: str,
+        fx_series: dict | None,
     ) -> dict[str, pd.DataFrame]:
         ...
