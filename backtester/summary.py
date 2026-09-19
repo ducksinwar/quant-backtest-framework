@@ -425,9 +425,15 @@ class Summary:
         nan_mask = factor_aligned.reindex(series.index).isna()
         cum_local = series.fillna(0.0).cumsum()
         cum_base = (cum_local * factor_aligned).ffill()
-        daily_base = cum_base.diff().fillna(0.0)
-        if len(daily_base) > 0:
-            daily_base.iloc[0] = cum_base.iloc[0]
+        daily_base = cum_base.diff()
+        # cum_base is aligned to td_index, so it is NaN before the leg's entry
+        # date; diff() therefore yields NaN at the entry date as well. Anchor
+        # the first converted increment on the first VALID label (the entry
+        # date), not on position 0 (which may precede the leg).
+        first_valid = cum_base.first_valid_index()
+        if first_valid is not None:
+            daily_base.loc[first_valid] = cum_base.loc[first_valid]
+        daily_base = daily_base.fillna(0.0)
         daily_base = daily_base.reindex(series.index)
         daily_base[nan_mask] = float("nan")
         return daily_base

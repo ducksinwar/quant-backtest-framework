@@ -1858,3 +1858,124 @@ Rename to state what it actually flags. Pure rename (assignment,
 duplicate-suppression check, FX-attachment check, key-suffix check);
 no behaviour change. All 178 tests pass.
 ```
+
+---
+
+## 2026-09-19 -- Fix: entry-date cost dropped by `_cumulative_spot_convert`
+
+### Prompt
+`Summary._cumulative_spot_convert` silently lost the entry-date increment of the
+converted series whenever a leg does not start on `trading_days[0]`. For gross
+P&L that is invisible (a position opens with 0.0 P&L), but `cost` carries a
+non-zero step on the entry date, so every non-USD trade reported a base cost of
+`local_cost * fx(exit) - entry_cost * fx(entry)` instead of
+`local_cost * fx(exit)`. Fix the conversion, add a regression test, leave every
+other file alone.
+
+### Root cause
+`cum_base` is aligned to the trading-day index, so it is NaN on every date
+before the leg's entry date. `cum_base.diff()` therefore yields NaN *at* the
+entry date (`cum_base[entry] - NaN`), and the following `.fillna(0.0)` turned
+that NaN into 0.0 -- exactly the entry-day increment. The guard that came next,
+
+    if len(daily_base) > 0:
+        daily_base.iloc[0] = cum_base.iloc[0]
+
+anchored on position 0 of the trading-day-aligned series, i.e.
+`trading_days[0]` -- a date on which the leg does not exist -- where `cum_base`
+is NaN, so the assignment was a NaN-to-NaN no-op.
+
+Traced on a cost series `[20, 0, 0, 20]` indexed `[entry, entry+1, entry+2,
+exit]` with `entry > trading_days[0]`: (1) `cum_base` is NaN before the entry
+date, (2) `diff()` is NaN on the entry date, (3) `fillna(0.0)` makes it 0.0,
+(4) `iloc[0]` labels the assignment `trading_days[0]` with a NaN value. The
+converted total came to `local_cum * fx(exit) - entry_cost * fx(entry)` -- the
+residual the verification script had been reporting.
+
+### Changes applied
+- `backtester/summary.py` -- `_cumulative_spot_convert`: anchor the first
+  converted increment on `cum_base.first_valid_index()` (the entry date) rather
+  than on `iloc[0]`, and fill NaNs only after that assignment:
+
+      daily_base = cum_base.diff()
+      first_valid = cum_base.first_valid_index()
+      if first_valid is not None:
+          daily_base.loc[first_valid] = cum_base.loc[first_valid]
+      daily_base = daily_base.fillna(0.0)
+      daily_base = daily_base.reindex(series.index)
+
+  The entry-day increment is now converted at the entry-date rate, and the
+  telescoping sum gives `cum_local[exit] * fx[exit]`, the expected lock-in value.
+
+- Backward compatible: when the series starts at `trading_days[0]`,
+  `first_valid_index()` returns `trading_days[0]`, identical to the old
+  `iloc[0]`; for an empty series it returns `None` and the fix is a no-op;
+  all-NaN factors and NaN-rate gap days are unchanged.
+
+- `tests/test_summary.py`: added
+  `TestSummaryFXConversion.test_entry_date_cost_is_converted` -- an EUR leg that
+  enters on `TRADING_DAYS[1]` with a 9.0 cost on the entry event; asserts the
+  entry-day increment converts at fx(entry) and that the cumulative base cost
+  equals `local_cost * fx(exit)`. It fails on the unfixed code (0.0 on the entry
+  date, `local_cost * fx(exit) - entry_cost * fx(entry)` at the exit date).
+
+### Test impact
+179 tests collected: 157 pass, including the new one. The 22 tests in
+`tests/test_backtester.py` that use the `tmp_path` fixture error at setup in this
+sandbox (see Notes) -- the same 22 errored before the change and no test body
+runs. `git stash` check: the new test fails without the fix, passes with it.
+
+### Verification
+- Old-vs-new converter compared over nine scenarios (empty series; start at
+  `trading_days[0]` with zero and non-zero first day; mid-index start; NaN-rate
+  gap; all-NaN factor; leading NaN): identical everywhere except the bug case
+  (mid-index start with a non-zero entry value), which now keeps the entry step.
+- `scripts/verify_fx_conversion.py` against a regenerated
+  `results/backtest_results.xlsx` (`examples/sma_crossover_example.py`): the
+  entry-date shortfall diagnostic drops from 47/48 (2800.HK) and 48/48 (SXRT.DE)
+  to 0/48 and 0/48. SXRT.DE Check A now passes for gross, cost and net (49/49
+  each); 2800.HK passes 47/48 for each. The one remaining trade exits on
+  2012-12-04, a date with no FX rate, so its final increment is a missing-rate
+  NaN by design (see `test_missing_rate_nan_gap_ffill_recovery`): its base cost
+  equals local cumulative cost through 2012-12-03 (19.998521877670157) times
+  fx(2012-12-03) (0.1290339252794517) = 2.5804877776627713, matching the reported
+  2.580487777662789 to 1e-12. The script's overall verdict stays FAIL for that
+  pre-existing missing-rate case and two pre-existing FX-data completeness gaps
+  in Check C, neither related to this bug.
+
+### Notes
+- `pytest tests/` errors 22 tests in this sandbox: pytest creates its temporary
+  directories with mode 0o700, and directories with that mode cannot be scanned
+  or removed under the DSH file sandbox (`PermissionError` from `os.scandir` at
+  `_pytest/pathlib.py:229`, which fails the `tmp_path` fixture at setup).
+  Demonstrated independent of this change: mode-0o700 directories are
+  unreadable while mode-0o777 ones are fine, at any location, and the identical
+  22 errors occur on the unmodified code. `tests/test_backtester.py` is the only
+  test file that uses `tmp_path`.
+
+### Manual changes
+- Updated Agent.md to target sandbox problem when running pytest
+
+### Suggested commit message
+```
+fix: convert the entry-day increment in _cumulative_spot_convert
+
+_cumulative_spot_convert dropped the first converted increment for any leg
+not starting on trading_days[0]. cum_base is trading-day aligned, so it is
+NaN before the entry date; diff() then yields NaN at the entry date and
+fillna(0.0) turned it into 0.0. The follow-up guard assigned iloc[0] --
+trading_days[0], a date where cum_base is NaN -- so the entry-day cost step
+was silently lost on every non-USD leg (invisible for gross, whose first
+day is 0.0).
+
+- summary._cumulative_spot_convert: anchor the first increment on
+  cum_base.first_valid_index() (the entry date) instead of iloc[0], and
+  fill NaNs after that assignment; the telescoping sum now gives
+  cum_local[exit] * fx[exit]
+- backward compatible: start-at-trading_days[0] and empty series behave
+  exactly as before (verified old-vs-new over nine scenarios)
+- tests: add TestSummaryFXConversion.test_entry_date_cost_is_converted
+  (fails before the fix, passes after)
+- verification: entry-date shortfall diagnostic 47/48 + 48/48 -> 0/48 + 0/48;
+  SXRT.DE Check A passes for gross/cost/net
+```

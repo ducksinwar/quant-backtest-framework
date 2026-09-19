@@ -39,7 +39,7 @@
 - [x] **pytest.raises(FrozenInstanceError) in frozen‑snapshot test.**
 
 ### Task 3: FX Conversion (Multi‑Currency Equities)
-- [ ] **Goal:** Enable backtesting non‑USD equities and consolidate P&L into a base currency.
+- [x] **Goal:** Enable backtesting non‑USD equities and consolidate P&L into a base currency.
 - **Deliverables:**
   - `FxRateProvider` wrapping `DataFeed` for spot rates.
   - Cumulative‑spot conversion logic in `Summary.generate()` (via `fx_provider` + `base_currency`).

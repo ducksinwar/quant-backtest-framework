@@ -649,6 +649,55 @@ class TestSummaryFXConversion:
         assert ec["gross"].tolist() == pytest.approx([0.0, 10.0, 15.0, 18.0])
         assert not any(c.startswith("fx_") for c in ec.columns)
 
+    def test_entry_date_cost_is_converted(self):
+        """A cost charged on the entry date must survive the FX conversion.
+
+        The leg enters on TRADING_DAYS[1], not TRADING_DAYS[0].  Inside
+        ``Summary._cumulative_spot_convert`` the base-currency cumulative
+        series is therefore NaN before the entry date, so ``diff()`` yields
+        NaN -- and then 0.0 -- on the entry date itself.  The entry-date cost
+        step used to be dropped that way, leaving the converted cost equal to
+        ``local_cost * fx(exit) - entry_cost * fx(entry)`` instead of
+        ``local_cost * fx(exit)``.
+        """
+        trade, leg = _make_trade_currency(
+            "t1", "2024-01-03", "2024-01-05", "leg_1", [100.0, 5.0],
+        )
+        # Charge a cost on the ENTRY event only: 450 * 100 * 2/10000 = 9.0.
+        trade.structure_history[0].event_log[0]["cost_exposures"] = {
+            "leg_1": {"notional_per_unit": 450.0},
+        }
+
+        cost_model = CostModel({"equity": EquityCostCalculator(bps=2.0)})
+        summary = Summary({"reports": {"equity_curve": True}})
+        result = summary.generate(
+            [trade], cost_model, trading_days=self.TRADING_DAYS,
+            base_currency="USD", fx_provider=_FakeFxProvider(self._factor()),
+        )
+        ec = result["equity_curve"]
+
+        local_cost = 9.0                 # charged on 2024-01-03
+        fx_entry, fx_exit = 1.12, 1.13   # 2024-01-03, 2024-01-05
+
+        # Entry-day increment is converted at the entry-date rate ...
+        assert ec.loc["2024-01-03", "cost"] == pytest.approx(
+            local_cost * fx_entry
+        )
+        # ... and the cumulative base cost is the local cost locked in at the
+        # exit rate -- NOT the pre-fix value that omitted the entry step.
+        assert ec.loc["2024-01-05", "cost"] == pytest.approx(
+            local_cost * fx_exit
+        )
+        assert ec.loc["2024-01-05", "cost"] != pytest.approx(
+            local_cost * fx_exit - local_cost * fx_entry
+        )
+        # A zero entry-day gross P&L is unaffected by the fix.
+        assert ec.loc["2024-01-05", "gross"] == pytest.approx(105.0 * fx_exit)
+        # net = gross - cost, converted with the same lock-in.
+        assert ec.loc["2024-01-05", "net"] == pytest.approx(
+            (105.0 - local_cost) * fx_exit
+        )
+
 
 class TestSummaryByUnderlyingCurrency:
     TRADING_DAYS = [

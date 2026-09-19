@@ -11,10 +11,15 @@ conda create -n backtest python=3.12 pandas numpy matplotlib pyyaml pytest -y
 Always use `conda run`:
 ```bash
 # Run tests
-conda run -n backtest python -m pytest
+conda run -n backtest python -m pytest --basetemp=./.pytest_tmp
 # Run example scripts
 conda run -n backtest python examples/sma_crossover_example.py
 ```
+Note: Always include --basetemp=./.pytest_tmp when running pytest.
+This avoids sandbox permission errors (WinError 5) with pytest's
+tmp_path fixture on Windows by creating temp directories inside the
+project workspace instead of the system temp folder.
+
 ## If `conda run` is unavailable
 First, locate conda. Common installation locations include:
 - `C:\Users\<username>\anaconda3`
@@ -26,12 +31,12 @@ First, locate conda. Common installation locations include:
 - `~/miniconda3`
 Then run commands with the full conda path:
 ```bash
-<conda_root>\Scripts\conda.exe run -n backtest python -m pytest
+<conda_root>\Scripts\conda.exe run -n backtest python -m pytest --basetemp=./.pytest_tmp
 ```
 Or call the environment's Python directly:
 ```bash
-<conda_root>\envs\backtest\python.exe -m pytest   # Windows
-<conda_root>/envs/backtest/bin/python -m pytest     # Linux / macOS
+<conda_root>\envs\backtest\python.exe -m pytest --basetemp=./.pytest_tmp   # Windows
+<conda_root>/envs/backtest/bin/python -m pytest --basetemp=./.pytest_tmp   # Linux / macOS
 ```
 If conda cannot be found, ask the user for the correct conda path.
 ## Dependency Management
