@@ -1,0 +1,3 @@
+date,name,note
+2024-01-04,test_holiday,extra columns are warned about but ignored
+2024-01-06,weekend_holiday,ignored because it is not a business day

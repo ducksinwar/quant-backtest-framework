@@ -1,10 +1,12 @@
 import dataclasses
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 import numpy as np
 import pandas as pd
 import pytest
 from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester, BacktestResult
+from backtester.calendar_provider import CalendarProvider
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
 from backtester.data.typed_providers.equity_price_provider import EquityPriceProvider
@@ -19,6 +21,10 @@ from backtester.snapshots import (
 )
 from backtester.strategy_structure import StrategyStructure
 from backtester.trade import Trade
+
+# Committed holiday fixtures (mirrors the tests/test_data/SPY_eod.csv pattern).
+# US.csv marks 2024-01-04 and 2024-02-02 as non-trading days.
+HOLIDAY_DIR = Path(__file__).parent / "test_data" / "holidays"
 
 
 def _make_mock_signal(orders_lookup=None, requires_portfolio=False, requires_history=False):
@@ -132,10 +138,11 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
 
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -158,9 +165,10 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
         assert history == []
@@ -199,9 +207,10 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -239,9 +248,10 @@ class TestBacktesterPnl:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -285,9 +295,10 @@ class TestBacktesterPnl:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -296,12 +307,8 @@ class TestBacktesterPnl:
         assert leg.contract.multiplier == 50.0
         assert len(leg.daily_total_pnl) > 0
 
-    def test_pnl_nan_on_missing_price(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        data_feed = DataFeed(backend)
-
-        dates = ["2024-02-01", "2024-02-02", "2024-02-05"]
-
+    def test_pnl_nan_on_missing_price(self):
+        """A genuine data gap on a trading day still produces NaN."""
         class GappyProvider:
             def get_price(self, ticker, date):
                 if date == "2024-02-02":
@@ -310,10 +317,6 @@ class TestBacktesterPnl:
 
         pricer = EquityPricer(GappyProvider())
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
-
-        class FakeDataFeed:
-            def trading_days(self, ticker, start, end):
-                return dates
 
         signal = _make_mock_signal(
             orders_lookup={
@@ -328,14 +331,18 @@ class TestBacktesterPnl:
             requires_portfolio=False,
         )
 
+        # Business-days-only calendar (no holiday_dir), so 2024-02-02 -- a
+        # Friday on which the provider has no price -- is a simulated day and
+        # exercises the genuine missing-price path.
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-02-01",
             end_date="2024-02-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="X",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, FakeDataFeed())
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -359,9 +366,10 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         bt.run()
 
         for call in signal.generate_signals.call_args_list:
@@ -384,9 +392,10 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         bt.run()
 
         for call in signal.generate_signals.call_args_list:
@@ -409,9 +418,10 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         bt.run()
 
         for call in signal.generate_signals.call_args_list:
@@ -448,9 +458,10 @@ class TestBacktesterUnknownAssetClass:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         with pytest.raises(ValueError, match="Unknown asset class"):
             bt.run()
 
@@ -474,9 +485,10 @@ class TestBacktesterRoll:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         with pytest.raises(NotImplementedError):
             bt.run()
 
@@ -529,9 +541,10 @@ class TestBacktesterDataAvailability:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
         assert history == []
@@ -568,9 +581,10 @@ class TestBacktesterDataAvailability:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
         assert len(history) == 1
@@ -628,9 +642,10 @@ class TestBacktesterSnapshotSemantics:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         bt.run()
 
         assert len(captured_states) >= 2
@@ -654,15 +669,6 @@ class TestBacktesterSnapshotSemantics:
                             f"(100.0), got {leg.current_price}"
                         )
         assert found_position, "PortfolioState should contain the opened position"
-
-
-class TestTradingDaysStrings:
-    def test_trading_days_return_strings(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        days = backend.trading_days("TEST", "2024-01-02", "2024-01-05")
-        assert len(days) > 0
-        assert all(isinstance(d, str) for d in days)
-        assert all("-" in d for d in days)
 
 
 class TestBacktesterCostExposure:
@@ -695,9 +701,10 @@ class TestBacktesterCostExposure:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -743,9 +750,10 @@ class TestBacktesterCostExposure:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -788,9 +796,10 @@ class TestBacktesterRecordPricingInputs:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -826,9 +835,10 @@ class TestBacktesterRecordPricingInputs:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -888,9 +898,11 @@ class TestBacktesterPricingInputsNanPadding:
         signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
         bt_config = BacktestConfig(
             signal=signal, start_date="2024-01-02", end_date="2024-01-08",
-            asset_class_configs={"equity": config}, calendar_ticker="TEST",
+            asset_class_configs={"equity": config},
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         result = bt.run()
         history = list(result.trade_history)
 
@@ -957,9 +969,10 @@ class TestBacktesterOrderRejectionWarning:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         with pytest.warns(UserWarning, match="data not available"):
             bt.run()
 
@@ -1016,9 +1029,10 @@ class TestBacktesterTradeHistorySnapshot:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_ticker="TEST",
+            calendar_provider=CalendarProvider(),
+            simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config, data_feed)
+        bt = Backtester(bt_config)
         bt.run()
 
         assert len(captured_snapshots) >= 3
@@ -1034,3 +1048,110 @@ class TestBacktesterTradeHistorySnapshot:
 
         assert open_found, "TradeRecord with is_open=True should appear before close"
         assert closed_found, "TradeRecord with is_open=False, exit_date set should appear after close"
+
+
+class TestCalendarIntegration:
+    """The CalendarProvider, not the price data, defines the simulation loop."""
+
+    def test_calendar_is_authoritative_over_data_derived_days(self, simple_csv):
+        """A calendar holiday is skipped even though the price CSV has it,
+        and a calendar trading day with no price data is still iterated."""
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-02": [
+                {
+                    "Action": "NEW",
+                    "trade_id": None,
+                    "info": [
+                        {
+                            "structure_id": None,
+                            "legs": [
+                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-11",
+            asset_class_configs={"equity": config},
+            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            simulation_calendar_codes=["US"],
+        )
+        bt = Backtester(bt_config)
+        result = bt.run()
+
+        # 2024-01-04 exists in the price CSV (close 102.0) but US.csv marks
+        # it a holiday, so the calendar -- not the data -- wins.
+        assert "2024-01-04" in data_feed.get_series("eod_prices", None, None, "TEST").index
+        assert "2024-01-04" not in result.trading_days
+
+        # The calendar runs to 2024-01-11: 01-06/07 are a weekend, 01-04 is a
+        # holiday, and 01-10/01-11 are business days with no price data at all.
+        # Under the old data-derived calendar those last two could never appear.
+        assert result.trading_days == (
+            "2024-01-02",
+            "2024-01-03",
+            "2024-01-05",
+            "2024-01-08",
+            "2024-01-09",
+            "2024-01-10",
+            "2024-01-11",
+        )
+
+        trade = list(result.trade_history)[0]
+        leg = trade.structure_history[0].legs[0]
+        # Entry day (0.0) plus one PnL entry per subsequent simulated day.
+        assert len(leg.daily_total_pnl) == 7
+        # 2024-01-10/11 lie outside the price CSV -> NaN; current_price is
+        # frozen at the last valid mark (105.0 on 2024-01-09).
+        assert np.isnan(leg.daily_total_pnl[5])
+        assert np.isnan(leg.daily_total_pnl[6])
+        assert leg.current_price == 105.0
+
+    def test_union_calendar_keeps_single_code_holiday(self, simple_csv):
+        """A day closed in one code but open in another stays in the union."""
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        provider = EquityPriceProvider(data_feed)
+        pricer = EquityPricer(provider)
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        signal = _make_mock_signal(orders_lookup={}, requires_portfolio=False)
+
+        bt_config = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-09",
+            asset_class_configs={"equity": config},
+            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            simulation_calendar_codes=["US", "UK"],
+        )
+        bt = Backtester(bt_config)
+        result = bt.run()
+
+        # US is closed 2024-01-04, UK is closed 2024-01-05; neither is a
+        # holiday in *every* code, so the union keeps both.
+        assert "2024-01-04" in result.trading_days
+        assert "2024-01-05" in result.trading_days
+
+        us_only = BacktestConfig(
+            signal=signal,
+            start_date="2024-01-02",
+            end_date="2024-01-09",
+            asset_class_configs={"equity": config},
+            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            simulation_calendar_codes=["US"],
+        )
+        us_only_days = Backtester(us_only).run().trading_days
+        assert "2024-01-04" not in us_only_days
