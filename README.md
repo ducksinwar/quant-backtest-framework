@@ -19,7 +19,7 @@ With five years as a head of quant at a hedge fund, I know what separates a back
 - **Abstract pricer layer** – equities today, with clean interfaces ready for options / futures / FX.  
 - **Transaction cost separation** – costs are computed post‑simulation from a structure‑level event log; change cost assumptions without re‑running the backtest.  
 - **Standard performance reports** – equity curve, trade summary, scalar metrics, periodic metrics, hit ratio, drawdown table, and per‑underlying breakdowns, with optional capital‑based percentage figures.  
-- **Modular, well‑documented code** with 145 unit tests – easy to extend with new instruments or signals.
+- **Modular, well‑documented code** with 248 unit tests – easy to extend with new instruments or signals.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ backtester/
     data/
         data_feed.py            # DataFeed with swappable backends
         csv_backend.py          # CSV backend implementation
-        typed_providers/        # (future) Vol, rate, forward curve providers
+        typed_providers/        # Equity price + FX rate providers (Vol/rate/forward curve: future)
     instruments.py              # Contract and LegState
     strategy_structure.py       # Atomic leg grouping with event log
     pricers/
@@ -56,6 +56,7 @@ backtester/
     trade.py                    # Trade class
     snapshots.py                # Frozen snapshot dataclasses
     backtest_engine.py          # Daily loop orchestrator
+    calendar_provider.py        # Trading‑day calendars (union simulation calendar)
     summary.py                  # Thin data coordinator
     cost_model.py               # Transaction cost computation
     metrics_registry.py         # Pluggable BaseMetricCalculator registry
@@ -71,8 +72,12 @@ backtester/
         by_underlying.py        # ByUnderlyingReport
 examples/
     sma_crossover_example.py    # End‑to‑end example
+market_data/
+    <TICKER>_eod.csv            # Daily adjusted closes (date, close)
+    holidays/<CODE>.csv         # Holiday calendars (header `date`, YYYY-MM-DD rows)
 tests/
-    test_trade.py               # Unit tests
+    test_calendar_provider.py   # CalendarProvider unit tests
+    test_data/holidays/         # Committed holiday fixtures
 design_notes.md                 # Full architectural specification
 ```
 ## Installation
@@ -96,7 +101,8 @@ pytest
 conda activate backtest
 python examples/sma_crossover_example.py
 ```
-The script backtests a 20/50‑day SMA crossover on SPY and QQQ (notional‑sized) and prints the equity curve, metrics, and trade summary.  
+The script backtests a 20/50‑day SMA crossover on four tickers across three markets – SPY and QQQ (US), 2800.HK (Hong Kong) and SXRT.DE (Germany) – each notional‑sized and FX‑converted to USD, and prints the equity curve, metrics, and trade summary.  
+The simulation calendar is the **union** of the US, HK and DE calendars (holiday calendars are served through the `DataFeed`'s `CsvBackend`, which reads `market_data/holidays/{CODE}.csv`; the `CalendarProvider` computes the union), so a day that is a holiday in only one market is still simulated; a leg whose market is closed simply carries no price that day.  
 *Replace or add CSVs in `market_data/` (named `<TICKER>_eod.csv`, columns `date`, `close`) to test on different data.*
 
 If you don’t have a `market_data/` folder yet, create one and place your CSV inside – the folder is gitignored so your data stays local.
@@ -141,7 +147,7 @@ If you’re evaluating this project as a hiring manager, that file will give you
 ```bash
 pytest
 ```
-145 unit tests cover `Instrument`, `DataFeed`, `Pricers`, `Trade`, `StrategyStructure`, `CostModel`, `Backtester`, `Summary`, and `Signals`.
+268 unit tests cover `Contract`/`LegState`, `DataFeed`, `Pricers`, `Trade`, `StrategyStructure`, `CostModel`, `Backtester`, `CalendarProvider`, `Summary`, and `Signals`.
 
 ## Contributing
 

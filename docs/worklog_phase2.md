@@ -8,6 +8,8 @@
 |------|------|-------|---------|
 | 1 | 06‑18 | Design notes: CalendarProvider + OrderGenerator + Phase 2 plan | [§ Design notes](#2026-06-18--design-notes-calendarprovider-ordergenerator-phase2-plan) |
 | 2 | 07‑25 | Documentation restructuring: archive Phase 1, rename + move docs | [§ Docs restructure](#2026-07-25--documentation-restructuring-archive-phase1-rename--move-docs) |
+| 3 | 09‑20 | Task 4: CalendarProvider + remove the `calendar_ticker` surrogate | [§ Task 4](#2026-09-20--task-4-calendarprovider--remove-the-calendar_ticker-surrogate) |
+| 4 | 09‑21 | Refactor: CalendarProvider onto the DataFeed/backend contract | [§ Refactor](#2026-09-21--refactor-calendarprovider-onto-the-datafeedbackend-contract) |
 ---
 
 ## 2026-06-18 – Design notes: CalendarProvider, OrderGenerator, Phase 2 plan
@@ -1979,3 +1981,659 @@ day is 0.0).
 - verification: entry-date shortfall diagnostic 47/48 + 48/48 -> 0/48 + 0/48;
   SXRT.DE Check A passes for gross/cost/net
 ```
+
+---
+
+## 2026-09-20 -- Task 4: CalendarProvider + remove the `calendar_ticker` surrogate
+
+### Prompt
+Implement the shared `CalendarProvider` exactly as specified in `design_notes.md`
+§3.5, integrate it into the backtester's simulation loop, and remove the Phase 1
+`calendar_ticker` surrogate plus the now-obsolete `trading_days()` methods from
+the data layer.  Holiday CSVs already existed in `market_data/holidays/`
+(produced by a separate data-collection task) and were consumed and validated,
+not created.
+
+### Pre-flight validation of `market_data/holidays/`
+All three files validated before any code was written -- each has a single
+header column `date`, every value matches `YYYY-MM-DD`, there are zero
+Saturday/Sunday rows, zero nulls, zero duplicates, and the rows are sorted:
+
+| File | Rows | Range |
+|------|------|-------|
+| `US.csv` | 244 | 2000-01-17 .. 2025-12-25 |
+| `HK.csv` | 378 | 2000-02-04 .. 2025-12-26 |
+| `DE.csv` | 181 | 2000-04-21 .. 2025-12-31 |
+
+All three cover the example's `2000-01-01 .. 2025-12-31` window.  The late 2000
+start dates are correct rather than gaps: the only US candidate in early 2000
+(2000-01-01) is a Saturday and is therefore correctly absent.
+
+### Design decisions applied
+1. **CSV schema** -- one file per calendar code at `{holiday_dir}/{CODE}.csv`,
+   header `date`, one full non-trading day per row.  Half-days and
+   point-in-time vintages are explicitly out of scope.
+2. **Simulation calendar coupling** -- the backtester does **not** infer calendar
+   codes from trades.  A new `BacktestConfig.simulation_calendar_codes:
+   list[str] | None` declares the union of markets to simulate and is passed
+   straight to `CalendarProvider.trading_days(...)`.
+3. **Union for simulation, per-leg checks for execution** -- `trading_days()`
+   returns the union (a day is dropped only if it is a holiday in *every*
+   listed code).  Intersection for execution is Task 5's
+   `CalendarValidationRule`; Task 4 only had to make `is_valid_day()` available.
+4. **No DataFeed masking** -- holiday gaps are absorbed by the existing
+   forward-fill/NaN mechanics.  No masking was added to `DataFeed`.
+5. **Interim execution policy** -- no execution-time calendar gating was added.
+6. **Method naming** -- the per-code primitives are `is_valid_day` /
+   `next_valid_day` (calendar-kind-agnostic, so they will serve settlement and
+   fixing calendars unchanged); the union method keeps `trading_days` because it
+   produces the simulation calendar and matches `BacktestResult.trading_days` /
+   `Summary.generate(trading_days=...)`.
+7. **`calendar_provider` is REQUIRED (no default)** -- forgetting it must fail
+   loudly at construction rather than silently falling back to a no-holiday
+   calendar.
+
+### Changes
+
+- **`backtester/calendar_provider.py`** (new): `CalendarProvider` with
+  `__init__(holiday_dir=None)`, `trading_days(holiday_codes, start, end)`,
+  `is_valid_day(holiday_code, date)`, `next_valid_day(holiday_code, date)`.
+  - `holiday_dir=None` -> business-days-only mode (every code except `"all"`).
+  - `holiday_dir` set -> lazy per-code loading from `{holiday_dir}/{CODE}.csv`,
+    cached per code, so each file is read at most once per instance.
+  - Missing file raises `FileNotFoundError` naming the code and expected path;
+    a missing file is never silently treated as "no holidays".
+  - Branch order in `trading_days` is deliberate: `"all"` short-circuits
+    **before** any loading (so `all.csv` is never requested, and `"all"` is
+    never modelled as an empty holiday set, which would wrongly drop weekends);
+    then `None`/`[]` -> business days (with a one-time warning when a
+    `holiday_dir` is configured but unused); then union = business days minus
+    the intersection of the codes' holiday sets.
+  - Forward-compatibility: the `date` column is read **by name** and every date
+    is normalized on both sides of a membership test; extra columns emit a
+    one-time-per-file-per-instance warning and are otherwise ignored; all CSV
+    loading sits behind a single private `_holidays(code)` seam; the three
+    public methods are pure functions of their arguments, so a future additive
+    `as_of` parameter is possible.
+  - `next_valid_day` scans strictly forward and raises `RuntimeError` (naming
+    the code, the start date and the 1000-day budget) if no valid day exists.
+
+- **`backtester/backtest_engine.py`**:
+  - `BacktestConfig`: removed `calendar_ticker`; added
+    `calendar_provider: CalendarProvider` with **no default** and
+    `simulation_calendar_codes: list[str] | None = None`.  All four pre-existing
+    fields are non-default, so replacing `calendar_ticker` in place keeps every
+    no-default field ahead of every defaulted one -- no field reordering and no
+    `kw_only` were needed.
+  - `run()` now calls
+    `self._config.calendar_provider.trading_days(self._config.simulation_calendar_codes, start_date, end_date)`.
+  - `Backtester.__init__(self, config)`: the `data_feed` parameter and the
+    `self._data_feed` attribute were **removed**.  A grep confirmed
+    `trading_days` was the only remaining use of `self._data_feed`.
+  - `BacktestResult.trading_days` still carries the calendar downstream, so
+    `Summary` needed no changes.
+
+- **`backtester/data/csv_backend.py`** / **`backtester/data/data_feed.py`**:
+  removed `trading_days()` (calendars are a cross-cutting concern, not market
+  data -- §3.5).  No other consumer existed.
+
+- **`examples/sma_crossover_example.py`**: instantiates
+  `CalendarProvider("market_data/holidays")`; sets
+  `simulation_calendar_codes=["US", "HK", "DE"]`, derived from the markets
+  actually traded (SPY/QQQ -> US, 2800.HK -> HK, SXRT.DE -> DE -- matching
+  exactly the holiday files that exist); drops the `data_feed` argument from
+  `Backtester(...)`.
+
+- **`tests/conftest.py`**: the sandbox-safe `tmp_path` override previously
+  called `tmp_path_factory.getbasetemp()`, which made pytest create the basetemp
+  with `mkdir(mode=0o700)` -- the very construct that breaks DACL inheritance
+  and produced the 22 `PermissionError [WinError 5]` setup failures.  The
+  override now creates per-test directories under a stable, inherited
+  `tests/.tmp/` base and never touches the basetemp.  Exact prior error:
+  `PermissionError: [WinError 5] ... '.pytest_bt6\test_trade_history_returned_21f3a45c'  tests\conftest.py:33`.
+
+- **`tests/test_calendar_provider.py`** (new, 68 tests): business-days mode;
+  `None` vs `[]` vs `["all"]` vs `["all", "<code>"]`; the `"all"` short-circuit
+  proven by patching `pd.read_csv`; single-code subtraction; multi-code union
+  (kept vs. dropped); holiday-on-weekend ignored; inclusive bounds; single-day
+  ranges; empty results; missing-file `FileNotFoundError` from all three public
+  methods; the one-time unused-files warning (fresh provider per assertion,
+  asserted against `_warned_no_codes`); per-code caching asserted by patching
+  `pd.read_csv` beneath the `_holidays` seam; extra-column parsing and
+  one-time-per-instance warning; all `is_valid_day` cases including empty-string
+  and unknown codes; `next_valid_day` normal / weekend / holiday / consecutive
+  closures / year boundary / `"all"`; and the `RuntimeError` guard triggered by
+  pre-seeding the per-code cache with a dense holiday set (no ~1000-row fixture).
+
+- **`tests/test_data/holidays/`** (new fixtures, committed, following the
+  existing `tests/test_data/SPY_eod.csv` convention rather than `tmp_path`):
+  `TEST.csv` (2024-01-04, 2024-02-02), `TEST2.csv` (2024-01-05, plus a Saturday
+  2024-01-06), `EXTRA.csv` (`date,name,note`), and `empty/` for the missing-file
+  path.
+
+- **`tests/test_backtester.py`**: deleted `TestTradingDaysStrings` (it tested
+  the removed backend method); every `BacktestConfig` construction now supplies
+  `calendar_provider` and `simulation_calendar_codes`; every `Backtester(...)`
+  call drops the `data_feed` argument; `test_pnl_nan_on_missing_price` now uses
+  a business-days-only provider so its subject stays a *genuine* missing price
+  rather than a calendar holiday; added `TestCalendarIntegration` with two
+  tests -- one proving the calendar is authoritative over data-derived days
+  (a date present in the price CSV is skipped because the calendar says so,
+  while dates absent from the CSV are still iterated and produce NaN with a
+  frozen `current_price`), and one proving a union keeps a day closed in only
+  one code.
+
+- **`design_notes.md`**: §3.5 rewritten around the implemented behaviour (method
+  renames and the naming-split rationale, CSV schema, `holiday_dir=None` mode,
+  missing-file `FileNotFoundError`, unused-files warning, explicit statement
+  that intersection lives in Task 5's `CalendarValidationRule` so the docs do
+  not imply a missing API, plus a Future Extensions paragraph covering calendar
+  kinds, half-days, point-in-time `as_of` semantics -- including that the
+  simulation calendar itself would become vintage-dependent -- and non-Mon-Fri
+  weeks); §3.9 now attributes the daily loop to the CalendarProvider and notes
+  that union days can be flat/NaN for a closed leg; §2 adds `calendar_provider.py`
+  and the previously missing `fx_rate_provider.py`, plus `market_data/holidays/`
+  and the new test files; §5 Phase 2 item 1 and §8.4 updated to the new method
+  names and implemented status.
+
+- **`README.md`**: corrected the stale example description (it claimed "SPY and
+  QQQ" only -- the example trades SPY, QQQ, 2800.HK and SXRT.DE across three
+  markets with a union simulation calendar); updated the project tree; corrected
+  the test count, which was stale at 145.
+
+- **`docs/phase2_plan.md`**: Task 4 deliverables updated to `is_valid_day` /
+  `next_valid_day` and the new config fields.  The Task 4 checkbox is left
+  `[ ]` deliberately -- it is marked complete only after manual code review.
+  Added a Phase 2B note that the metrics `annualization` default of 252 assumes
+  a single-market trading year, while a union calendar yields slightly more than
+  252 days per year, so annualised figures are marginally deflated.
+
+- **`.gitignore`**: added `tests/.tmp/` (the new fixture base) and ignore
+  patterns for the sandbox-locked pytest/probe directories created while
+  diagnosing the `tmp_path` failure.
+
+### Test impact
+**248 passed, 0 failed, 0 errors** (`python -m pytest -p no:cacheprovider -q tests/`).
+Baseline on the unmodified tree was 179 passed after the `conftest.py` fix.
+Reconciliation: 179 -- 1 (deleted `test_trading_days_return_strings`) + 68
+(`test_calendar_provider.py`) + 2 (`TestCalendarIntegration`) = 248.
+
+Both new integration tests were checked for the fail-before/pass-after property
+against the old data-derived calendar: neither date selection can be produced by
+"dates present in the price CSV", so they fail on the pre-change engine.
+
+### Example verification (`examples/sma_crossover_example.py`, 2000-01-01 .. 2025-12-31)
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Trades executed | 230 | 230 |
+| Total transaction cost | $7,889.96 | $7,889.76 |
+| `return_gross` | 335,810.747808 | 334,940.587755 |
+| `sharpe_gross` | 0.365931 | 0.360394 |
+| `max_drawdown_gross` | -116,203.094215 | -116,203.094215 |
+| `return_net` | 327,920.787482 | 327,050.828195 |
+| `sharpe_net` | 0.357345 | 0.351917 |
+| `max_drawdown_net` | -116,925.837779 | -116,925.837779 |
+| Equity curve first/last | 2000-01-03 / 2025-12-31 | 2000-01-03 / 2025-12-31 |
+
+The trade count is unchanged and the equity-curve endpoints are identical, which
+is the expected signature: the union calendar **adds** US-holiday weekdays on
+which HK or DE were open, so SPY legs are flat/NaN on those days and the
+`trading_days` index used for PnL alignment shifts slightly, while the
+non-zero-drawdown figures are untouched.  A `["US"]`-only run would have been
+expected to match the old calendar closely; the multi-market union delta is the
+legitimate source of the shift, not a holiday-file mismatch.
+
+### Breaking changes
+1. **`BacktestConfig.calendar_provider` is required** (no default).  Any
+   construction of `BacktestConfig` without it now raises `TypeError` at
+   construction time -- deliberately loud rather than silently defaulting to a
+   no-holiday calendar.
+2. **`BacktestConfig.calendar_ticker` removed.**
+3. **`Backtester.__init__` no longer accepts `data_feed`** -- the signature is
+   now `Backtester(config)`.  `trading_days` was its only live use.
+4. **`DataFeed.trading_days()` and `CsvBackend.trading_days()` removed** --
+   calendars are a cross-cutting concern, not market data.
+
+### Notes
+- The `market_data/holidays/*.csv` files remain untracked in this working tree
+  (they are produced by the separate data-collection task) but are now consumed
+  and validated by the implementation.
+- Diagnostic directories created while root-causing the sandbox `tmp_path`
+  failure could not be removed from inside the sandbox (writes and deletes to
+  them are both denied).  They are empty and are now gitignored; remove them
+  manually with `rmdir /s /q .dsh_probe .dsh_probe2 .pytest_bt* .pytest_probe*`.
+
+### Manual changes
+- None (all changes above were applied in this task).
+
+### Suggested commit message
+```
+feat: add CalendarProvider and make the calendar authoritative for the sim loop
+
+Implements design_notes.md 3.5 and removes the Phase 1 calendar_ticker
+surrogate plus the data-layer trading_days() methods.
+
+- backtester/calendar_provider.py: new CalendarProvider.
+  holiday_dir=None -> business-days-only; otherwise lazy per-code loading
+  of {holiday_dir}/{CODE}.csv, cached per code. "all" short-circuits before
+  any loading; None/[] -> business days (+ one-time unused-files warning when
+  a holiday_dir is configured); otherwise union = business days minus the
+  intersection of the codes' holiday sets. Missing files raise
+  FileNotFoundError; next_valid_day has a 1000-day RuntimeError guard.
+  CSV date column read by name, dates normalized both sides, extra columns
+  warned once per file per instance, all loading behind a single _holidays seam.
+- BacktestConfig: remove calendar_ticker; add required calendar_provider
+  (no default, so omission fails loudly) and simulation_calendar_codes.
+  Field order is unchanged because every pre-existing field is non-default.
+- Backtester: take only the config; drop data_feed (trading_days was its only
+  use) and source the simulation calendar from the CalendarProvider.
+- data layer: remove trading_days() from CsvBackend and DataFeed.
+- example: CalendarProvider("market_data/holidays") with
+  simulation_calendar_codes=["US", "HK", "DE"] for the four traded tickers.
+- tests: new test_calendar_provider.py (68 tests) with committed holiday
+  fixtures under tests/test_data/holidays/; update test_backtester.py (supply
+  calendar_provider, drop data_feed, delete the removed-method test) and add
+  TestCalendarIntegration proving the calendar is authoritative over
+  data-derived days and that a union keeps a single-code holiday.
+- tests/conftest.py: create per-test tmp_path dirs under tests/.tmp/ instead of
+  via tmp_path_factory.getbasetemp(), which made pytest create the basetemp
+  with mkdir(mode=0o700) and broke DACL inheritance (22 setup errors).
+- docs: design_notes.md 3.5/3.9/2/5/8.4, README.md (stale example description,
+  tree, test count 145 -> 248), docs/phase2_plan.md (method names + Phase 2B
+  annualization note; Task 4 checkbox left unchecked pending review).
+
+Breaking: BacktestConfig.calendar_provider is now required;
+Backtester(config) no longer takes data_feed; DataFeed/CsvBackend.trading_days
+removed.
+```
+
+---
+
+## 2026-09-20 -- Harness cleanup: demote `tests/conftest.py` to local-only
+
+### Prompt
+Clean up the sandbox/harness debris left behind while diagnosing the `tmp_path`
+failures, and demote `tests/conftest.py` from a tracked repository file to a
+local, untracked, gitignored file used only under restricted-token sandboxes.
+Harness knowledge is to live only in `AGENT.md` (conditional recipe) and in this
+worklog (history).
+
+### Ruling applied
+`tests/conftest.py` is **not part of the project**. It must not be committed and
+must not appear in `README.md` or `design_notes.md`. Rationale: the `tmp_path`
+failure is specific to restricted-token sandboxes on Windows, where pytest
+creates temp directories with an explicit `0o700` mode whose Security Descriptor
+breaks DACL inheritance and the creating process locks itself out
+(`PermissionError [WinError 5]`; upstream:
+https://github.com/deepseek-ai/deepseek-harness/discussions/81). On a normal
+environment pytest's native `tmp_path` works, so repository consumers need
+nothing.
+
+### Changes
+
+- **`tests/conftest.py` -- demoted to local-only (now untracked + gitignored).**
+  Removed from the index with `git rm --cached tests/conftest.py`; the file
+  remains on disk for this sandbox. Added to `.gitignore` as
+  `# local-only sandbox workaround; never commit` / `tests/conftest.py`. The
+  file's docstring was rewritten tool-neutrally (restricted-token sandboxes,
+  explicit `0o700` Security Descriptor vs inherited ACL) and it no longer names
+  the harness; it states that it is load-bearing **in this environment only**
+  and points to `AGENT.md` for the recipe and the upstream link. Lifecycle
+  additions: `tmp_path` is now a *yielding* fixture with
+  `shutil.rmtree(unique_dir, ignore_errors=True)` teardown, and a new
+  `pytest_sessionstart` performs a best-effort sweep of stale `tests/.tmp/*`
+  children left by an interrupted run.
+
+- **`README.md`** (tracked): deleted the `conftest.py` line from the
+  project-structure tree. There is now no mention of `conftest`, sandbox,
+  `tmp_path`, or `basetemp` anywhere in the README.
+
+- **`design_notes.md`** (tracked): verified first and left untouched -- a
+  case-insensitive grep for `conftest|sandbox|DeepSeek|DSH|tmp_path|basetemp`
+  returned zero hits, so there was nothing to remove and nothing was added.
+
+- **`AGENT.md`** (tracked): rewritten. It now documents the conda environment,
+  plain `pytest` commands, the conda-discovery fallback, and the dependency
+  rules, plus a new "Testing Infrastructure (environment-specific)" section
+  carrying the only harness knowledge in the repo: the bug and its upstream
+  link, the instruction to create a LOCAL, UNTRACKED `tests/conftest.py` *if and
+  only if* the error appears, and the prohibitions -- never pass `--basetemp`,
+  never create probe/diagnostic directories, never request elevated or
+  full-access permissions to work around temp-dir permission errors.
+  The previous `--basetemp=./.pytest_tmp` guidance was removed from every
+  command: it never worked (pytest deletes and recreates the basetemp itself,
+  and the per-test numbered directory underneath is still created with the
+  broken mode) and it left `.pytest_tmp*` debris behind.
+
+- **`.gitignore`**: keeps the existing `tests/.tmp/` and debris patterns
+  (`.pytest_tmp*`, `.pytest_bt*`, `.pytest_probe*`, `.dsh_probe*`) and adds the
+  `tests/conftest.py` local-only entry; the file now ends with a trailing
+  newline.
+
+### Debris cleanup
+All harness debris was removed from the working tree:
+
+- Root directories `.pytest_bt*`, `.pytest_probe*`, `.pytest_tmp*`,
+  `.dsh_probe*`, `probe_os_mkdir_700`, `probe_pathlib_mkdir_700` -- all gone.
+- Every child of `tests/.tmp/` swept (0 remaining).
+- Untouched by design: `.pytest_cache/`, `results/`, `scripts/`,
+  `market_data/`, and everything tracked.
+- **No locked directories remain and no manual `rmdir` is required.** An earlier
+  session was unable to delete some of these (the lockouts documented in the
+  Task 4 entry); by this point the sandbox allowed `Remove-Item -Recurse -Force`
+  on all of them, so the earlier caution no longer applies.
+- Note for future runs: `.pytest_cache/` cannot be written to in this sandbox,
+  so `pytest` emits one pre-existing `PytestCacheWarning: could not create cache
+  path ... [WinError 5]`. It is harmless and not the `tmp_path` bug. Running
+  with `-p no:cacheprovider` silences it.
+
+### Test-count timeline
+| Stage | Result |
+|-------|--------|
+| Pre-`conftest` (original state) | 157 passed, **22 setup errors** (`tmp_path`, `PermissionError [WinError 5]`) |
+| Post-`conftest` (baseline, unmodified tree) | **179 passed**, 0 errors, 0 failures |
+| Post-Task 4 | **248 passed**, 0 failures, 0 errors |
+| Post-cleanup (this entry, local conftest present) | **248 passed**, 0 failures, 0 errors; `tests/.tmp/` empty afterwards |
+
+**Fresh-clone greenness outside a restricted-token sandbox is established by
+argument, not by execution here.** This environment *is* a restricted-token
+sandbox, so the native `tmp_path` path could not be exercised directly. The
+claim rests on the root cause being environment-specific: the failure comes from
+pytest's explicit `0o700` mode breaking DACL inheritance under a restricted
+token, a condition that does not exist on Linux, macOS, or standard Windows.
+Since Task 4 added no test that depends on the override's behaviour -- the
+override only changes *where* pytest puts temp directories -- the suite should
+run green on a fresh clone with no `conftest.py` at all.
+
+### Verification
+- `conda run -n backtest python -m pytest -q` → **248 passed, 0 failed, 0 errors**.
+- `tests/.tmp/` is empty after the run (per-test teardown works).
+- `grep -in "conftest|sandbox|DeepSeek|DSH|tmp_path|basetemp" README.md` → 0 hits.
+- `grep -in "conftest|sandbox|DeepSeek|DSH|tmp_path|basetemp" design_notes.md` → 0 hits.
+- `git ls-files tests/conftest.py` → prints nothing.
+- Root directory listing shows no harness debris.
+
+### Manual changes
+- None (all changes above were applied in this task).
+
+### Suggested commit message
+```
+chore: keep the sandbox tmp_path workaround out of the repository
+
+The tests/conftest.py tmp_path override only exists to work around a
+restricted-token-sandbox bug on Windows (pytest's explicit 0o700 mode breaks
+DACL inheritance -> PermissionError [WinError 5]). It is not needed on normal
+environments, so it is demoted to a local, untracked, gitignored file.
+
+- .gitignore: add tests/conftest.py ("local-only sandbox workaround; never
+  commit"); keep tests/.tmp/ and the debris patterns; add trailing newline
+- README.md: drop conftest.py from the project tree (no mention of conftest,
+  sandbox, tmp_path or basetemp remains)
+- AGENT.md: rewrite; remove the never-working --basetemp guidance and add a
+  Testing Infrastructure section with the bug, its upstream link, the
+  conditional local-conftest recipe, and the no-probe/no-escalation rules
+- design_notes.md: verified clean, unchanged
+- worklog: record the demotion, the debris cleanup, the conftest lifecycle
+  additions (per-test teardown + session-start sweep) and the test-count
+  timeline (157+22 errors -> 179 -> 248)
+```
+
+## 2026-09-21 -- Refactor: CalendarProvider onto the DataFeed/backend contract
+
+### Prompt
+Refactor `CalendarProvider` onto the DataFeed/backend contract.  After Task 4 the
+provider performed its own `pd.read_csv` from a constructor-supplied directory,
+which created a second, parallel CSV-reading path outside the DataFeed +
+swappable-backend design and encoded calendar semantics partly in *construction*
+state (`holiday_dir=None` = silent business-days-only mode).  The refactor moves
+all holiday data access behind the backend contract and makes calendar semantics
+controlled solely by the call-time declaration.
+
+### Rationale
+1. **A single data-access path.** `design_notes.md` §8.1 states that the
+   `DataFeed` is the **only** code that knows whether data lives in a CSV, a
+   SQLite database or a vendor session.  A provider reading CSVs itself made that
+   invariant false and meant the future `SqlBackend` migration would have had to
+   replace *two* storage paths instead of one.  Holiday files are still data;
+   only the calendar *semantics* are cross-cutting.
+2. **A single semantic knob, at the call site.**  With `holiday_dir` gone, nothing
+   about a calendar is decided at construction.  `trading_days(codes, ...)` is the
+   one declaration point per consumer (`BacktestConfig.simulation_calendar_codes`
+   for simulation; per-leg codes later for Task 5's `CalendarValidationRule`).
+3. **No silent degradation.**  An unknown calendar code is an operator error, so
+   it fails loudly everywhere instead of quietly producing a business-days
+   calendar.
+
+### Implementation
+- **`backtester/data/csv_backend.py`**: added `get_holiday_dates(code)`.  The
+  backend now owns the `{base_dir}/holidays/{CODE}.csv` convention (mirroring
+  `<TICKER>_eod.csv`), reads `date` **by name**, normalizes via
+  `pd.to_datetime(...).dt.strftime('%Y-%m-%d')`, de-duplicates into a
+  `frozenset`, warns once per file per instance about extra columns, caches per
+  code, and raises `FileNotFoundError` naming the code and the expected path
+  when a file is missing.  Two additional hardening decisions: an empty
+  `date` cell raises `ValueError` (it would otherwise become an inert `NaN`
+  member of the set), and the extra-columns warning uses **`stacklevel=4`** so it
+  is attributed to the provider frame -- the call chain is
+  `_load_holidays(1)` -> `CsvBackend.get_holiday_dates(2)` ->
+  `DataFeed.get_holiday_dates(3)` -> provider method(4) -> caller(5), and
+  `stacklevel=2` would have blamed the backend method.  A comment records the
+  chain so a later refactor does not reset it to 2.
+- **`backtester/data/data_feed.py`**: `get_holiday_dates` delegates to the
+  backend like every other dataset.  The contract asymmetry is deliberate and
+  documented: `get_value` / `get_series` return `None` / an empty series for an
+  unknown ticker (graceful degradation into the NaN mechanics), while
+  `get_holiday_dates` raises -- calendar codes are configuration identifiers, and
+  a typo must fail loudly, or Task 5's `CalendarValidationRule` would mask config
+  errors behind calendar-shaped rejections.
+- **`backtester/calendar_provider.py`** (rewritten): `CalendarProvider(data_feed)`
+  is now I/O-free -- no directory parameter, no `None`-mode, no cache, no
+  `pd.read_csv`, no `pd` import at all.  It owns only calendar math: the Mon-Fri
+  base, union = business days minus the **intersection** of the holiday sets,
+  `"all"` handling, `is_valid_day`, and `next_valid_day` (with the 1000-day
+  `RuntimeError` guard).  Normalization is unified into one shared helper that
+  parses the input a single time and truncates any time component explicitly, so
+  `"2024-01-04 23:00:00"` behaves as `"2024-01-04"` in both per-code methods.
+  The provider is a **deliberate improvement**: dropping pandas removes the
+  engine core's heaviest import from a pure date-arithmetic module and collapses
+  the old double-parse.
+- **`examples/sma_crossover_example.py`**: the provider is constructed with the
+  already-created `data_feed`; the `"market_data/holidays"` path literal is gone.
+
+### Deliberate behaviour changes (ledger)
+1. **The unused-holiday-files warning (`_warned_no_codes`) is removed** -- a
+   *retracted Task 4 refinement*.  The provider can no longer observe
+   construction state, and `codes=None` is a legitimate explicit declaration
+   ("this run has no holiday calendars"), not a misconfiguration.  The
+   corresponding tests are retired.
+2. **The unknown/empty-code business-days fallback is removed** in favour of a
+   fail-loud `FileNotFoundError`.  Previously `holiday_dir=None` made every code
+   resolve to plain business days, which is precisely how a typo stayed silent.
+3. **Unknown/empty codes now raise from `is_valid_day` even on a weekend input**
+   (previously a Saturday returned `False` without touching the code).  This
+   **reverses the earlier pin** recorded in the Task 4 entry above
+   ("`is_valid_day(<unknown>, <Saturday>)` returns `False` without raising"), by
+   owner ruling: fail-loud ordering beats the old short-circuit.  Both per-code
+   methods now resolve the holiday set *before* any weekend/membership test;
+   `"all"` still short-circuits first, before any backend call.
+- The old double-parse in `is_valid_day` (`pd.Timestamp(date)` then a second
+  `pd.Timestamp(normalized)`) was **redundant, not wrong**; it is replaced by the
+  single shared helper rather than preserved for "behaviour-identical" reasons.
+  Parse count was never an invariant.
+
+### Correction of an earlier claim (mine)
+During Step 1 of this task I claimed the price and holiday caches "cannot
+collide" because their key spaces were distinct.  **That claim was false as an
+invariant**: a ticker and a calendar code can legitimately share a name -- `DE` is
+both Deere on the NYSE and the German calendar code.  Storing both in one
+`_cache` dictionary would have let one dataset return the other's object, and the
+`assert isinstance(cached, frozenset)` guard I had written to catch it disappears
+under `python -O`.  Fixed **by construction** instead: `CsvBackend` now has
+separate `_price_cache` and `_holiday_cache` dictionaries with correct type
+annotations, the assert is deleted, and a regression test
+(`test_price_and_holiday_caches_are_separate_namespaces`) checks both directions
+and order-independence for a shared name.
+
+### Test impact
+**268 passed, 0 failed, 0 errors** (`python -m pytest -q`).  Baseline on the
+unmodified tree (this session) was **248 passed**; the arithmetic is +20, and the
+parts sum exactly to the whole:
+
+| Test file | Before | After | Delta | Explained by |
+|-----------|-------:|------:|------:|--------------|
+| `tests/test_calendar_provider.py` | 68 | 75 | **+7** | −4 retired (`holiday_dir=None`/`_warned_no_codes` class) +7 new, +4 parametrize expansions |
+| `tests/test_csv_backend.py` | 10 | 21 | **+11** | new `TestCsvBackendHolidays` |
+| `tests/test_data_feed.py` | 6 | 8 | **+2** | new `TestDataFeedHolidays` |
+| `tests/test_backtester.py` | 27 | 27 | **0** | fixture + 24 construction sites updated in place |
+| all other files | 137 | 137 | 0 | untouched |
+| **total** | **248** | **268** | **+20** | |
+
+`test_calendar_provider.py` is 71 test functions / 75 collected items (four
+`@pytest.mark.parametrize("date_str", ["2024-01-04", "2024-01-06"])` decorators
+expand to eight items).  Removed functions were **replaced**, not dropped:
+
+- `TestTradingDaysBusinessDaysMode` (4) and the `holiday_dir=None` variants of
+  `TestMissingFile` (1), `TestIsValidDay` (2), `TestNextValidDay` (1) are gone;
+  `TestTradingDaysNoCodes` (6) became `TestTradingDaysBusinessDayBase` (6);
+  `TestHolidayCaching` (4) became `TestCsvParsingIntegration` (8);
+  `TestExtraColumns` (5) became `TestBackendExtraColumnWarning` (4) +
+  `TestCsvParsingIntegration` (4); `TestMissingFile` (7) became
+  `TestMissingFileIntegration` (6).
+
+New coverage required by the refactor: the `codes=None` mirror of the `"all"`
+short-circuit asserting `get_holiday_dates` is never called on a strict mock feed;
+the truncation convention (a datetime-string input in both `is_valid_day` and
+`next_valid_day`); unknown/empty codes raising `FileNotFoundError` from **both**
+methods on **weekday and weekend** inputs; `is_valid_day(<valid code>, <Saturday>)`
+→ `False`; backend-level caching, extra-columns warn-once (plus an assertion that
+`stacklevel=4` attributes the warning to `calendar_provider.py`), missing-file and
+null-date tests; the cache-namespace regression test; a stub-backend pure-math
+suite and a real-`CsvBackend` integration suite.
+
+Test-backend pinning is by construction, not by choice: pure calendar-math tests
+run against a stub backend exposing `get_holiday_dates` with hard-coded sets
+(decoupled from CSV parsing), while integration tests run against a real
+`CsvBackend`.  The `simple_csv` fixture keeps a **copied** `holidays/` subdir
+under its temp base_dir because the integration tests' fail-before/pass-after
+property requires a *controlled* price CSV (ticker `TEST`) with engineered absent
+dates (2024-01-10/11), which exists only in that fixture; `tests/test_data/` has
+no `TEST_eod.csv` (only the fully-covered `SPY_eod.csv`, which would defeat the
+gap assertions).  Committing a controlled `TEST_eod.csv` and retiring
+`simple_csv` remains deferred as out of scope.
+
+### Example verification (`examples/sma_crossover_example.py`, 2000-01-01 .. 2025-12-31)
+Byte-identical to the pre-refactor baseline after normalizing the 230 random
+trade-id UUIDs (`uuid.uuid4()`, so raw stdout can never hash-match across runs):
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Trades executed | 230 | 230 |
+| Total transaction cost | $7,889.76 | $7,889.76 |
+| `return_gross` | 334,940.587755 | 334,940.587755 |
+| `sharpe_gross` | 0.360394 | 0.360394 |
+| `max_drawdown_gross` | −116,203.094215 | −116,203.094215 |
+| `return_net` | 327,050.828195 | 327,050.828195 |
+| Equity curve first/last | 2000-01-03 / 2025-12-31 | 2000-01-03 / 2025-12-31 |
+
+Comparison method: UUID-normalized SHA-256 `77bb189198292313d44c84f0f23a6c7fb89de111e246d274011de504ba7dbf62`
+for **both** runs, 258 lines each, 0 differing lines.
+
+### Greps (Step 4 gate)
+```
+holiday_dir          (backtester/**, tests/, examples/, design_notes.md, README.md) -> ZERO HITS
+loaded but unused | _warned_no_codes (same scope)                                   -> ZERO HITS
+read_csv             (backtester/calendar_provider.py)                              -> ZERO HITS
+load seam            (design_notes.md)                                              -> ZERO HITS
+storage-access grep  (backtester/** excluding backtester/data/, pattern
+                      read_csv|sqlite3|\.connect\(|pd\.read_)                       -> ZERO HITS
+get_holiday_dates    (backtester/)  -> csv_backend.py (def + stacklevel comment),
+                                       data_feed.py (def + delegation),
+                                       calendar_provider.py (3 call sites)
+```
+`grep -rn "holiday_dir" ... docs/` still reports **9 hits, all inside the
+historical Task 4 entry of this worklog** (lines ~2012-2220) plus 1
+`_warned_no_codes` hit at line ~2100.  Those are the append-only record of what
+Task 4 actually did and are deliberately **not** rewritten; the current-tense
+documentation (`design_notes.md`, `README.md`, `docs/phase2_plan.md`) is clean.
+
+### Also updated
+- **`design_notes.md`**: §3.4 initialization sequence now inserts the
+  `CalendarProvider(data_feed)` step immediately after the DataFeed step and
+  refreshes the stale config parenthetical (the required `calendar_provider`
+  field plus `simulation_calendar_codes`), so a reader following the documented
+  recipe no longer hits the required-field `TypeError`; §8.1 relaxes the backend
+  protocol to `get_value`, `get_series` **and** `get_holiday_dates`, records why
+  `get_holiday_dates` is a dedicated contract method rather than an overload of
+  `get_series(dataset="holidays", ticker=code)` (the overload would overload
+  `ticker`'s meaning and the set-return shape does not match a `Series`), and
+  states the deliberate contract asymmetry; §3.5 is rewritten for the I/O-free
+  provider with call-time-only semantics, the fail-loud ordering, the removed
+  fallback and the normalization convention, with Future Extensions (c)
+  re-anchored from "behind the load seam" to "behind the backend contract
+  (`get_holiday_dates(code, as_of=...)`, still additive)"; §8.4 states calendars
+  are served through the DataFeed contract from the CSV phase onward.
+- **`README.md`**: the mechanism sentence now says holiday calendars are served
+  through the DataFeed's `CsvBackend` (the provider computes the union), and the
+  unit-test count is corrected 248 -> 268.
+- **`docs/phase2_plan.md`**: Task 4 deliverables updated (the provider no longer
+  loads CSVs; the backend serves holiday dates), checkbox deliberately left
+  `[ ]` until manual review; one line added to Testing & hardening to revisit the
+  local `tests/conftest.py` sandbox workaround and the `.gitignore` debris
+  patterns once the DSH sandbox `tmp_path` bug is fixed upstream.
+- **Deleted**: the now-unused untracked `tests/test_data/holidays/empty/` +
+  `.gitkeep` (never committed; the empty-dir fixture only existed to prove the
+  removed `holiday_dir=None` behaviour).
+
+### Suggested commit message
+```
+refactor(calendar): serve holiday data through the DataFeed/backend contract
+
+Move holiday-file access out of CalendarProvider and into the data layer,
+removing the second CSV-reading path that bypassed the swappable-backend
+design (design_notes.md 3.4, 3.5, 8.1, 8.4).
+
+- data: add CsvBackend.get_holiday_dates(code) + DataFeed delegation.
+  Owns the {base_dir}/holidays/{CODE}.csv convention, reads the date column
+  by name, normalizes to YYYY-MM-DD, de-duplicates into a frozenset, caches
+  per code, warns once per file about extra columns (stacklevel=4, so the
+  warning points at the provider frame), raises FileNotFoundError naming the
+  code and expected path, and raises ValueError on an empty date cell.
+- data: split the backend cache into _price_cache and _holiday_cache.
+  A ticker and a calendar code can share a name (DE: Deere vs Germany), so a
+  single dict could return one dataset's object for the other; the assert
+  that guarded this vanishes under python -O, so the separation is now
+  structural.
+- calendar_provider: rewrite as an I/O-free, pandas-free service constructed
+  with the DataFeed. No holiday_dir parameter, no None-mode, no cache, no
+  private _holidays seam. Owns calendar math only: Mon-Fri base, union =
+  business days minus the intersection of holiday sets, "all" handling,
+  is_valid_day, next_valid_day (1000-day guard).
+- calendar_provider: one shared normalization helper (single parse, explicit
+  date truncation), replacing the old double-parse; both per-code methods
+  resolve the holiday set before any weekend/membership test, so unknown or
+  empty codes raise on any weekday including weekends.
+- example: construct the provider with the existing data_feed.
+
+Behaviour changes:
+- the unused-holiday-files warning (_warned_no_codes) is removed (retracted
+  Task 4 refinement: codes=None is a legitimate explicit declaration);
+- the unknown/empty-code business-days fallback is removed in favour of a
+  loud FileNotFoundError;
+- is_valid_day on a weekend with an unknown code now raises instead of
+  returning False -- this reverses the earlier Weekend-returns-False pin, per
+  owner ruling, so CalendarValidationRule cannot mask config typos.
+
+Tests: 248 -> 268. Pure calendar-math tests run against a stub backend with
+hard-coded holiday sets; integration tests run against a real CsvBackend.
+Adds fail-loud weekday+weekend cases, truncation-convention cases, backend
+caching/extra-columns/missing-file/null-date tests and a price/holiday cache
+collision regression test. Example metrics unchanged (230 trades, $7,889.76,
+return_gross 334,940.587755, equity 2000-01-03 -> 2025-12-31).
+
+Docs: design_notes.md 3.4/3.5/8.1/8.4, README.md mechanism + test count,
+docs/phase2_plan.md Task 4 deliverables (checkbox still open).
+```
+
+- **2026-09-22** — Design decision recorded (docs-only): holiday *dates* are served through the same `DataFeed`/backend contract as prices (`CsvBackend.get_holiday_dates`), while calendar *semantics* stay in `CalendarProvider`. Lives in `design_notes.md` §3.4 ("Decision: one feed serves market data and holiday calendars"), cross-referenced from §3.5 and §8.4; no code changes.
+

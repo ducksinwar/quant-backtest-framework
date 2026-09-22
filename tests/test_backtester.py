@@ -1,5 +1,4 @@
 import dataclasses
-from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 import numpy as np
@@ -21,10 +20,6 @@ from backtester.snapshots import (
 )
 from backtester.strategy_structure import StrategyStructure
 from backtester.trade import Trade
-
-# Committed holiday fixtures (mirrors the tests/test_data/SPY_eod.csv pattern).
-# US.csv marks 2024-01-04 and 2024-02-02 as non-trading days.
-HOLIDAY_DIR = Path(__file__).parent / "test_data" / "holidays"
 
 
 def _make_mock_signal(orders_lookup=None, requires_portfolio=False, requires_history=False):
@@ -50,6 +45,13 @@ def _make_csv(tmp_path, rows):
     return str(tmp_path)
 
 
+#: Holiday fixture content for the ``simple_csv`` temp base_dir.  The price CSV
+#: and its ``holidays/`` subdir must now live in the *same* base_dir, because the
+#: backend owns both path conventions.
+_US_HOLIDAY_CSV = "date\n2024-01-04\n2024-02-02\n"
+_UK_HOLIDAY_CSV = "date\n2024-01-05\n2024-01-06\n"
+
+
 @pytest.fixture
 def simple_csv(tmp_path):
     base = _make_csv(tmp_path, [
@@ -60,6 +62,16 @@ def simple_csv(tmp_path):
         ("2024-01-08", 104.0),
         ("2024-01-09", 105.0),
     ])
+    # Deliberate duplication of tests/test_data/holidays/: the calendar
+    # integration tests need a *controlled* price CSV (ticker TEST) with
+    # engineered absent dates (2024-01-10/11), and tests/test_data/ has no
+    # TEST_eod.csv -- only SPY_eod.csv, whose complete coverage would defeat
+    # the gap assertions.  Committing a controlled TEST_eod.csv and retiring
+    # simple_csv is a separate, deferred cleanup.
+    holidays_dir = tmp_path / "holidays"
+    holidays_dir.mkdir()
+    (holidays_dir / "US.csv").write_text(_US_HOLIDAY_CSV)
+    (holidays_dir / "UK.csv").write_text(_UK_HOLIDAY_CSV)
     return base
 
 
@@ -138,7 +150,7 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
 
@@ -165,7 +177,7 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -207,7 +219,7 @@ class TestBacktesterBasic:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -248,7 +260,7 @@ class TestBacktesterPnl:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -295,7 +307,7 @@ class TestBacktesterPnl:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -331,15 +343,17 @@ class TestBacktesterPnl:
             requires_portfolio=False,
         )
 
-        # Business-days-only calendar (no holiday_dir), so 2024-02-02 -- a
-        # Friday on which the provider has no price -- is a simulated day and
-        # exercises the genuine missing-price path.
+        # simulation_calendar_codes=None declares "no holiday calendars", so
+        # 2024-02-02 -- a Friday on which the provider has no price -- is a
+        # simulated day and exercises the genuine missing-price path.  This
+        # test is about the missing-price path, not calendars, and None never
+        # reaches the backend, so a MagicMock feed is sufficient here.
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-02-01",
             end_date="2024-02-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(MagicMock()),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -366,7 +380,7 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -392,7 +406,7 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -418,7 +432,7 @@ class TestBacktesterPortfolioState:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -458,7 +472,7 @@ class TestBacktesterUnknownAssetClass:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -485,7 +499,7 @@ class TestBacktesterRoll:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -541,7 +555,7 @@ class TestBacktesterDataAvailability:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -581,7 +595,7 @@ class TestBacktesterDataAvailability:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -642,7 +656,7 @@ class TestBacktesterSnapshotSemantics:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -701,7 +715,7 @@ class TestBacktesterCostExposure:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -750,7 +764,7 @@ class TestBacktesterCostExposure:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -796,7 +810,7 @@ class TestBacktesterRecordPricingInputs:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -835,7 +849,7 @@ class TestBacktesterRecordPricingInputs:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -899,7 +913,7 @@ class TestBacktesterPricingInputsNanPadding:
         bt_config = BacktestConfig(
             signal=signal, start_date="2024-01-02", end_date="2024-01-08",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -969,7 +983,7 @@ class TestBacktesterOrderRejectionWarning:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -1029,7 +1043,7 @@ class TestBacktesterTradeHistorySnapshot:
             start_date="2024-01-02",
             end_date="2024-01-05",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
@@ -1085,7 +1099,7 @@ class TestCalendarIntegration:
             start_date="2024-01-02",
             end_date="2024-01-11",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=["US"],
         )
         bt = Backtester(bt_config)
@@ -1134,7 +1148,7 @@ class TestCalendarIntegration:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=["US", "UK"],
         )
         bt = Backtester(bt_config)
@@ -1150,7 +1164,7 @@ class TestCalendarIntegration:
             start_date="2024-01-02",
             end_date="2024-01-09",
             asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(holiday_dir=HOLIDAY_DIR),
+            calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=["US"],
         )
         us_only_days = Backtester(us_only).run().trading_days

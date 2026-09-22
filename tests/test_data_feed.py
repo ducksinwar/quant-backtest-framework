@@ -38,3 +38,20 @@ class TestDataFeed:
     def test_get_value_ticker_none(self, data_feed):
         val = data_feed.get_value("eod_prices", "2024-01-02", None)
         assert val is None
+
+
+class TestDataFeedHolidays:
+    """``DataFeed.get_holiday_dates`` delegates like every other dataset."""
+
+    def test_delegates_to_backend(self, data_feed):
+        # This fixture's base_dir is "market_data", whose US.csv starts in 2000.
+        holidays = data_feed.get_holiday_dates("US")
+        assert isinstance(holidays, frozenset)
+        assert "2000-01-17" in holidays
+        assert all(len(d) == 10 and d[4] == "-" and d[7] == "-" for d in holidays)
+
+    def test_unknown_code_raises_rather_than_returning_empty(self, data_feed):
+        # The deliberate contract asymmetry: prices degrade to None, calendar
+        # codes fail loudly because they are configuration identifiers.
+        with pytest.raises(FileNotFoundError):
+            data_feed.get_holiday_dates("NOPE")

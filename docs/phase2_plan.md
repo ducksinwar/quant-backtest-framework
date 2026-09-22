@@ -48,10 +48,12 @@
 - **Dependencies:** Task 2 (legs carry `currency` from `Contract`)
 
 ### Task 4: CalendarProvider
-- [ ] **Goal:** Shared holiday calendar service.
+- [x] **Goal:** Shared holiday calendar service.
 - **Deliverables:**
-  - `CalendarProvider` class: loads holiday CSVs per calendar code.
-  - Methods: `trading_days()` (union), `is_trading_day()`, `next_trading_day()`.
+  - `CalendarProvider` class: I/O‑free calendar math — `trading_days()` (union simulation calendar), `is_valid_day()`, `next_valid_day()` (calendar‑kind‑agnostic per‑code primitives) — constructed with the shared `DataFeed`. Semantics are call‑time only; there is no directory parameter and no "no‑holidays" mode, and an unknown calendar code fails loudly.
+  - `CsvBackend.get_holiday_dates(code)` + `DataFeed.get_holiday_dates(code)`: holiday dates per calendar code from `{base_dir}/holidays/{CODE}.csv`, `date` column read by name, normalized to `YYYY-MM-DD`, de‑duplicated into an immutable `frozenset`, cached per code in a namespace separate from price series, with a loud `FileNotFoundError` for a missing code and a `ValueError` for an empty date cell.
+  - `BacktestConfig.calendar_provider` (required, no default) + `simulation_calendar_codes`; `calendar_ticker` removed.
+  - Data‑layer `trading_days()` removed from `CsvBackend` / `DataFeed` (calendars are cross‑cutting, not market data).
 - **Dependencies:** None
 
 ### Task 5: OrderGenerator & Signal Intent Interface
@@ -69,9 +71,12 @@
 
 ## Phase 2B – Validation Pipeline
 
+> **Note (annualization under union calendars):** the metrics `annualization` default of **252** assumes a single‑market trading year. The simulation calendar is now the *union* of the configured markets, which yields slightly **more** than 252 days per year (e.g. US + HK + DE), so annualised figures are marginally deflated relative to a true 252‑day year. Revisit whether `annualization` should stay 252, become a per‑run computed value, or be exposed explicitly in `SummarySpec` when the validation pipeline lands.
+
 ### Testing & hardening
 - [ ] Add invariant/property tests for P&L conservation, time‑series length alignment, and missing‑data deferral (finding 3.2).
 - [ ] Fill coverage gaps for untested branches (e.g., `total_size == 0` fallback, `per_leg` missing‑data mode) (finding 3.4).
+- [ ] Revisit the local `tests/conftest.py` sandbox workaround and the `.gitignore` debris patterns once the DSH sandbox `tmp_path` bug is confirmed fixed upstream.
 
 ### Task 6: FoldGenerator
 - [ ] **Goal:** Produce purged, embargoed walk‑forward fold tuples.

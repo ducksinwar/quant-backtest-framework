@@ -2,6 +2,7 @@ import os
 import sys
 
 from backtester.backtest_engine import AssetClassConfig, BacktestConfig, Backtester
+from backtester.calendar_provider import CalendarProvider
 from backtester.cost_model import CostModel, EquityCostCalculator
 from backtester.data.csv_backend import CsvBackend
 from backtester.data.data_feed import DataFeed
@@ -61,7 +62,14 @@ def main():
         ticker_currency=ticker_currency,
     )
 
-    # 4. Backtester config
+    # 4. Calendar: SPY/QQQ are US, 2800.HK is HK, SXRT.DE is DE.  The
+    # simulation calendar is the *union* of these three markets, so a day
+    # that is a holiday in only one market is still simulated.
+    # Holiday files live behind the same backend as prices:
+    # market_data/holidays/{US,HK,DE}.csv.
+    calendar_provider = CalendarProvider(data_feed)
+
+    # 5. Backtester config
     config = BacktestConfig(
         signal=signal,
         start_date="2000-01-01",
@@ -73,11 +81,12 @@ def main():
                 record_pricing_inputs=False,
             )
         },
-        calendar_ticker="SPY",
+        calendar_provider=calendar_provider,
+        simulation_calendar_codes=["US", "HK", "DE"],
     )
 
-    # 5. Run backtest
-    bt = Backtester(config, data_feed)
+    # 6. Run backtest
+    bt = Backtester(config)
     result = bt.run()
     trade_history = list(result.trade_history)
     print(f"Backtest complete. {len(trade_history)} trade(s) executed.")

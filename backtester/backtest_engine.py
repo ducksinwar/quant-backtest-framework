@@ -3,6 +3,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Tuple
 
+from backtester.calendar_provider import CalendarProvider
 from backtester.instruments import LegState
 from backtester.snapshots import (
     LegSnapshot,
@@ -29,7 +30,12 @@ class BacktestConfig:
     start_date: str
     end_date: str
     asset_class_configs: dict[str, AssetClassConfig]
-    calendar_ticker: str = "SPY"
+    #: Required: no default, so a missing provider fails loudly at construction
+    #: instead of silently falling back to a no-holiday calendar.
+    calendar_provider: CalendarProvider
+    #: The union of markets to simulate.  Passed straight to
+    #: ``CalendarProvider.trading_days``.  ``None`` means business days only.
+    simulation_calendar_codes: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -41,16 +47,15 @@ class BacktestResult:
 
 
 class Backtester:
-    def __init__(self, config: BacktestConfig, data_feed):
+    def __init__(self, config: BacktestConfig):
         self._config = config
-        self._data_feed = data_feed
         self.active_trades: list[Trade] = []
         self.trade_history: list[Trade] = []
         self.trading_days: list[str] = []
 
     def run(self) -> BacktestResult:
-        self.trading_days = self._data_feed.trading_days(
-            self._config.calendar_ticker,
+        self.trading_days = self._config.calendar_provider.trading_days(
+            self._config.simulation_calendar_codes,
             self._config.start_date,
             self._config.end_date,
         )

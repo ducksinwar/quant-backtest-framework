@@ -58,6 +58,7 @@ backtester/
         csv_backend.py                  # (* Phase 1 *) CSV backend implementation
         typed_providers/
             equity_price_provider.py    # (* Phase 1 *) Thin wrapper around DataFeed for equity prices
+            fx_rate_provider.py         # (* Phase 2 *) Daily FX spot conversion factors
             rate_curve_provider.py
             vol_surface_provider.py
             forward_curve_provider.py
@@ -73,8 +74,9 @@ backtester/
     signals/
         base_signal.py                  # (* Phase 1 *) BaseSignal abstract class
         sma_crossover.py                # (* Phase 1 *) SMA crossover example
-    trade.py                            # (* Phase 1 *) Trade class
+    trade.py                            # (* Phase 2 *) Trade class
     backtest_engine.py                  # (* Phase 1 *) Backtester daily loop
+    calendar_provider.py                # (* Phase 2 *) CalendarProvider (holiday calendars)
     summary.py                          # (* Phase 1 *) Summary (thin data coordinator)
     cost_model.py                       # (* Phase 1 *) CostModel (includes EquityCostCalculator)
     metrics_registry.py                 # (* Phase 2 *) Pluggable BaseMetricCalculator registry
@@ -92,8 +94,13 @@ backtester/
         by_underlying.py                # (* Phase 2 *) ByUnderlyingReport
 examples/
     sma_crossover_example.py            # (* Phase 1 *) End‑to‑end example
+market_data/
+    {TICKER}_eod.csv                    # Daily adjusted closes (date, close)
+    holidays/{CODE}.csv                 # (* Phase 2 *) Holiday calendars: header `date`, YYYY-MM-DD rows
 tests/
     test_trade.py                       # (* Phase 1 *) Unit tests
+    test_calendar_provider.py           # (* Phase 2 *) CalendarProvider unit tests
+    test_data/holidays/{CODE}.csv       # Committed holiday fixtures for tests
 design_notes.md                         # This file
 ```
 **Notes:**
@@ -329,43 +336,70 @@ The framework uses a **DataFeed** class from Phase 1 – a single, concrete clas
 2. Create typed data providers (`EquityPriceProvider`, `VolSurfaceProvider`, `RateCurveProvider`, etc.), passing them the `DataFeed`.
 3. Create pricers (`EquityPricer`, `EquityOptionPricer`, etc.), passing each the typed providers it requires.
 4. Create the signal (passing the `DataFeed` if the signal needs it).
-5. Assemble the `asset_class_configs` dictionary, where each entry’s `AssetClassConfig` bundles the `pricer`, `risk_measures`, `pnl_calculator`, and `record_pricing_inputs`.
-6. Create the `Backtester` with the config (signal, `asset_class_configs`).
-7. After the backtest, create a `Summary` instance with the desired `SummarySpec` and call `summary.generate(trade_history, cost_model, ...)` to produce the requested reports.
+5. Create the `CalendarProvider`, passing it the `DataFeed` — holidays are served through the backend contract exactly like prices, so the provider is constructed like every other typed provider (§3.5).
+6. Assemble the `asset_class_configs` dictionary, where each entry’s `AssetClassConfig` bundles the `pricer`, `risk_measures`, `pnl_calculator`, and `record_pricing_inputs`.
+7. Create the `Backtester` with the config — the signal, `asset_class_configs`, the required `calendar_provider` (no default, so omitting it raises `TypeError`), and `simulation_calendar_codes`.
+8. After the backtest, create a `Summary` instance with the desired `SummarySpec` and call `summary.generate(trade_history, cost_model, ...)` to produce the requested reports.
 All objects are created once and reused across the entire backtest and any validation folds.
+
+**Decision: one feed serves market data and holiday calendars (2026‑09‑22).** Recorded here so later tasks reference it rather than re‑litigating it.
+
+- **Decision.** A single `DataFeed`/backend contract serves both market data and holiday calendars. `get_holiday_dates` is the **third contract method**, alongside `get_value` and `get_series` (§8.1); `CalendarProvider` remains **I/O‑free** and owns only calendar math — the business‑day base, union/intersection arithmetic and `"all"` handling (§3.5). Storage of holiday dates is a data‑layer concern; calendar *semantics* are not.
+- **Rationale.** (i) A single storage swap point keeps §8.1's "**only** piece of code that knows whether data lives in a CSV, a SQLite database, …" singular, and moves prices and calendars together in the SQL migration — one backend replaced, so the two datasets cannot skew versions. (ii) One configuration surface (`base_dir` today; `connection` / `source` / `observation_time` / the future `as_of`) keeps point‑in‑time coherence structural rather than a per‑feed discipline. (iii) One feed minimizes wiring at consumers, configs and test fixtures. (iv) This matches §8.4's documented endgame, in which the `CalendarProvider` arrives with holiday lists **served through the `DataFeed` contract** from the CSV phase onward.
+- **Alternatives considered and rejected.** (a) **A separate calendar store/feed** — two storage abstractions and two swap points, doubled configuration and wiring, and divergence from §8.4. Its extreme form, the provider reading the holiday CSVs itself, was Task 4's original shape; it was removed for having no SQL story and for adding a parallel read path outside the backend. (b) **Moving the asymmetry into a different module** — rejected as a relocation rather than a removal: the graceful‑`None` (a missing market observation) versus loud‑raise (a mistyped configuration identifier) difference is domain‑driven, not module‑driven, so separating the storage would not make the contract uniform; and the ticker/code cache‑key collision is already mitigated structurally by the backend's separate cache namespaces. (The narrower method‑shape question — a dedicated `get_holiday_dates` versus an overloaded `get_series(dataset="holidays", …)` — was settled in §8.1 and is not re‑opened here.)
+- **Sanctioned future split and its triggers (approved; not to be re‑litigated per task).** If a calendar source arrives with its own client/auth that cannot live inside `CsvBackend`, or `SqlBackend` grows until the price and calendar implementations naturally separate, refactor to **one `DataFeed` facade composing two backends** — a price backend and a calendar backend, two protocols, separate caches. Consumer signatures and the single configuration surface stay unchanged.
+- **Accepted costs.** The backend contract is heterogeneous (the asymmetry §8.1 documents as deliberate); god‑object drift in the backend is to be monitored; data with different lifecycles now lives inside one class; and test fixtures are coupled — the `simple_csv` fixture carries a `holidays/` subdir because one `base_dir` owns both path conventions.
 
 See Section 8 for the full evolution plan, including SQL migration, typed providers, point‑in‑time data, and the long‑term vision.
 
 ### 3.5 CalendarProvider
 
-The CalendarProvider is a shared service that provides trading‑day calendars to the backtester, OrderGenerator (§3.8), and pricers. It is not part of the DataFeed, because calendars are a cross‑cutting concern that spans multiple components.
+The CalendarProvider is a shared service that provides trading‑day calendars to the backtester, OrderGenerator (§3.8), and pricers. It is **I/O‑free**: it holds no directory, no file handles and no cache. Holiday *data* is served by the data layer through the `DataFeed` contract (`get_holiday_dates`, §3.4); calendar *semantics* — the business‑day base, union/intersection arithmetic, `"all"` handling — live here. That split is what reconciles the earlier statement that calendars are a cross‑cutting concern rather than market data: the concern is cross‑cutting, the raw dates are still data and are fetched like any other dataset. Storage of holiday dates lives in the backend per the §3.4 decision, which records why the storage half is unified, the alternatives rejected and the sanctioned future split.
 
 **Holiday calendar model:**
 - Calendars are defined by holiday codes (e.g. Bloomberg‑style `"US"`, `"HK"`).
 - Each instrument may depend on multiple codes: trading calendar, settlement calendar, fixing calendar.
-- The provider maps these codes to lists of non‑trading dates.
+- A code maps to a `frozenset` of full non‑trading dates served by the backend (`{base_dir}/holidays/{CODE}.csv` in the CSV phase). The provider never reads storage itself.
 
 **Default calendar:**
-- If no holiday codes are specified, the provider returns all business days (Monday–Friday).
+- If no holiday codes are specified (`None` or `[]`), `trading_days` returns all business days (Monday–Friday). This is an explicit *call‑time declaration* that the run has no holiday calendars — not a fallback mode and not a misconfiguration, so no warning is emitted.
 - A special code `"all"` returns every calendar day.
 
 **Multi‑asset handling:**
 - Supports **union** (for the simulation loop) and **intersection** (for order execution).
 - For multi‑leg orders, the OrderGenerator uses intersection to verify all legs' markets are open.
+- **Intersection is realized in Task 5's `CalendarValidationRule`** via per‑leg `is_valid_day` checks — there is deliberately no separate intersection method on the provider, and the absence of one is not a missing API.
+- The union calendar used for simulation may therefore introduce days on which a given leg's market is closed. Those days are **not** masked out of the DataFeed; the leg simply has no price, the pricer returns `None`, and the existing missing‑data mechanics append `NaN` while holding `current_price` at its last valid mark (§3.9).
 
 **Core methods:**
-- `trading_days(holiday_codes, start, end) -> list[str]` — union calendar for simulation.
-- `is_trading_day(holiday_code, date) -> bool` — used for order‑execution checks.
-- `next_trading_day(holiday_code, date) -> str` — used by pricers (settlement, fixing) and the backtester (futures rolls).
+- `trading_days(holiday_codes, start, end) -> list[str]` — the **union** calendar for simulation, inclusive of both `start` and `end`.
+- `is_valid_day(holiday_code, date) -> bool` — single‑code check; used for order‑execution checks.
+- `next_valid_day(holiday_code, date) -> str` — first valid day strictly after `date`; used by pricers (settlement, fixing) and the backtester (futures rolls).
+
+**Naming split (deliberate):** `trading_days` keeps its name because it produces the *simulation* calendar and matches the pipeline‑wide vocabulary (`BacktestResult.trading_days`, `Summary.generate(trading_days=...)`). The two per‑code primitives are named `is_valid_day` / `next_valid_day` — not `is_trading_day` / `next_trading_day` — because they are calendar‑kind‑agnostic: the same methods will later serve trading, settlement, and fixing calendars unchanged.
+
+**Implemented behaviour (Phase 2):**
+- **Constructor:** `CalendarProvider(data_feed)`. There is no directory parameter and no `None`‑mode: all holiday access goes through the feed, so the provider cannot observe storage and holds no cache. It is a pure function of its arguments plus the feed.
+- **Semantics are call‑time only.** Nothing about the calendar is decided at construction; the codes passed to each call are the single knob. (One declaration point per consumer is preserved: `BacktestConfig.simulation_calendar_codes` for simulation, per‑leg codes later for `CalendarValidationRule`.)
+- **CSV schema:** one file per calendar code at `{backend base_dir}/holidays/{CODE}.csv` — a header row `date` and one `YYYY-MM-DD` holiday per row; each row is a full non‑trading day. This convention is owned by `CsvBackend`, mirroring how it owns `<TICKER>_eod.csv`. The `date` column is read **by name**, never by position; dates are normalized with `pd.to_datetime(...)`/`strftime('%Y-%m-%d')` and de‑duplicated into an immutable `frozenset`. Empty date cells are rejected with a `ValueError` rather than becoming inert `NaN` members. Additional columns are warned about once per file per backend instance (attributed to the provider frame, so a consumer sees their own call site) and otherwise ignored (reserved for future half‑day/hours support). Half‑days and point‑in‑time vintages are out of scope for Phase 2.
+- **Caching:** per code, in the backend, consistent with price‑series caching — and in a **separate cache namespace** from prices. A ticker and a calendar code may share a name (the NYSE ticker `DE` vs the German calendar code), so sharing one dictionary would let one dataset return the other's object; the separation is structural, not conventional.
+- **Unknown or empty codes fail loudly.** A code whose file does not exist raises `FileNotFoundError` naming the code and the expected path, from every entry point. The old business‑days fallback for unknown codes is **removed**: a calendar code is a configuration identifier, and a typo must fail loudly everywhere — otherwise `CalendarValidationRule` (§3.8) would mask configuration errors as calendar‑shaped order rejections.
+- **Ordering semantics (fail‑loud):** `"all"` short‑circuits **before any backend call**; otherwise the code's holiday set is resolved *before* any weekend or membership test. Consequently an unknown or empty code raises on **any** weekday, including Saturday and Sunday — where a weekend short‑circuit would otherwise return `False` and hide the typo. Weekday evaluation and holiday‑set membership come after resolution.
+- **Normalization convention:** both per‑code methods parse the input exactly once through one shared helper, which derives the calendar‑day string and truncates any time component explicitly. `"2024-01-04 23:00:00"` therefore behaves exactly as `"2024-01-04"` in both methods, and the time part never leaks into `next_valid_day`'s offset arithmetic or returned value.
+- **Union semantics:** the union of per‑code trading days equals business days minus the **intersection** of all codes' holiday sets — a day is dropped only if it is a holiday in *every* listed code. A holiday that falls on a weekend is naturally ignored because it is not in the business‑day base. `"all"` short‑circuits **before** any holiday loading, so `all.csv` is never requested and `"all"` is never modelled as an empty holiday set (which would wrongly drop weekends).
+- **Iteration guard:** `next_valid_day` raises `RuntimeError` if no valid day is found within 1000 days, so a malformed or empty calendar cannot loop forever.
 
 **Signal data scoping:**
 Before requesting price data from the DataFeed, the signal's data‑scoping layer (part of the OrderGenerator) uses the CalendarProvider to find the last valid trading day for each instrument. This ensures indicators are computed only on actual trading days.
 
-**Phase 2 implementation:**
-The CalendarProvider will be built first in Phase 2. It will initially load holiday lists from simple CSV files (one per calendar code) and support union/intersection logic. Point‑in‑time holiday data is deferred.
+**Future extensions:**
+- **(a) Calendar kinds.** Trading / settlement / fixing calendars for the same market arrive as additional opaque code strings (e.g. `"US_SETTLE"`). No API change is required.
+- **(b) Half‑days and intraday.** These arrive as additive CSV columns plus new methods; a half‑day must never be treated as a full holiday at day granularity.
+- **(c) Point‑in‑time holidays.** An optional additive `as_of` parameter — `get_holiday_dates(code, as_of=...)` on the backend contract, threaded through `DataFeed` and the provider methods — backed by versioned storage **behind the backend contract**, will let a caller ask what the calendar was believed to be on a given date. The change stays additive: no consumer signature other than the provider's own changes shape. Note that in that world the *simulation calendar itself* becomes vintage‑dependent — a run over the same window could legitimately produce different trading days depending on `as_of`. That is an open semantics question, not a settled design.
+- **(d) Non‑Mon–Fri weeks.** The Mon–Fri base week is a Phase 2 simplification; markets with different weekends (e.g. Gulf markets) will need per‑code week definitions later.
 
-**Phase 1 status:**
-Not yet implemented. The current `BacktestConfig.calendar_ticker` is a temporary surrogate that will be replaced by a CalendarProvider instance in Phase 2.
+**Status:** Implemented (`backtester/calendar_provider.py`). Replaces the Phase 1 `BacktestConfig.calendar_ticker` surrogate with a required `BacktestConfig.calendar_provider` plus `simulation_calendar_codes`. The provider is constructed with the shared `DataFeed`; holiday files are served by the backend (`CsvBackend.get_holiday_dates`).
+
 
 ### 3.6 Pricer (BasePricer + concrete implementations)
 
@@ -586,7 +620,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
     `trade_history` provides the immutable, complete audit trail for post‑backtest analysis.
 
 - **Daily loop order:**  
-  For each trading day T (as determined by the `DataFeed`’s calendar):
+  For each trading day T (as determined by the `CalendarProvider`'s union simulation calendar — `BacktestConfig.calendar_provider.trading_days(simulation_calendar_codes, start_date, end_date)`):
 
   1. **Compute PnL (T‑1 → T):**  
      For every leg in every active structure of every active trade:
@@ -1458,7 +1492,7 @@ Build the following in order, each tested before moving on:
 11. **Unit tests** – for Contract/LegState, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.
 
 ### Phase 2: Validation
-1. **CalendarProvider** (§3.5): Implement with CSV holiday files, union/intersection logic, and core methods (`trading_days`, `is_trading_day`, `next_trading_day`). Replace `BacktestConfig.calendar_ticker` with a CalendarProvider instance.
+1. **CalendarProvider** (§3.5): Implement with CSV holiday files, union logic, and core methods (`trading_days`, `is_valid_day`, `next_valid_day`). Replace `BacktestConfig.calendar_ticker` with a required `BacktestConfig.calendar_provider` plus `simulation_calendar_codes`. Intersection semantics for execution are deferred to `CalendarValidationRule` below.
 2. **OrderGenerator** (§3.8): Build the rule‑chain infrastructure. Implement **CalendarValidationRule** as the first `OrderRule`, using CalendarProvider to reject orders on holidays. Migrate any existing scaling/hedging logic into additional rules as needed.
 3. **Backtester pipeline update:** Modify the daily loop to use the new signal → OrderGenerator → execution pipeline (§3.9).
 4. Implement `FoldGenerator` with purge/embargo.
@@ -1508,14 +1542,20 @@ class DataFeed:
 
     def get_series(self, dataset: str, start: str | None, end: str | None, ticker: str = None, **params) -> pd.Series:
         return self._backend.get_series(dataset, start, end, ticker, **params)
+
+    def get_holiday_dates(self, code: str) -> frozenset[str]:
+        return self._backend.get_holiday_dates(code)
 ```
 **Key features:**
 - `dataset` is a logical name (e.g., `eod_prices`, `spx_vol_surface`, `trump_likes_24h`).
-- The backend protocol requires only `get_value` and `get_series`; any object implementing those can serve as a backend.
+- The backend protocol requires `get_value`, `get_series`, **and** `get_holiday_dates`; any object implementing those can serve as a backend.
+- `get_holiday_dates(code)` returns the full holiday set for a calendar code as an immutable `frozenset[str]` of `YYYY-MM-DD` dates. It is a **dedicated contract method rather than an overload of `get_series(dataset="holidays", ticker=code)`**: overloading `ticker` would make that parameter mean "instrument" in one dataset and "calendar code" in another, and the set‑return shape does not match `get_series`'s `pd.Series`‑return shape — a caller could not tell which it was getting without knowing the dataset. The overload alternative was considered and rejected.
+- **The contract asymmetry is deliberate.** `get_value` / `get_series` return `None` / an empty series for an unknown ticker: a missing price is a normal market condition that degrades gracefully into the NaN mechanics (§3.4, §3.9). `get_holiday_dates` **raises** `FileNotFoundError` for an unknown code, because calendar codes are configuration identifiers — a typo is an operator error, not a data condition, and must fail loudly rather than silently produce a business‑days calendar.
 - `start=None` / `end=None` in `get_series` requests the full available series for that ticker; both `None` returns the entire cached series.
 - The `DataFeed` is the **only** piece of code that knows whether data lives in a CSV, a SQLite database, a PostgreSQL cluster, or a Bloomberg session.
 - It can be configured to select between multiple sources (`source='bloomberg'` vs `'refinitiv'`) and observation times (`observation_time='ny_close'`), enabling point‑in‑time backtests and vendor‑robustness checks.
 - New methods (e.g., for point‑in‑time data) can be added to the `DataFeed` class without affecting existing consumers.
+- **Calendar data via the same contract:** `get_holiday_dates` is the third dataset‑shaped method, which keeps §8.4's "served from the CSV phase onward" true and means the SQL migration replaces one backend rather than two storage paths.
 
 In Phase 2, an `SqlBackend` will be written, and the system will switch from CSV to SQL by changing a single constructor argument—no backtester, pricer, or signal code will change.
 
@@ -1594,7 +1634,7 @@ This separation ensures that the research engine never depends on the schemas of
 - **Phase 2 (SQL integration):**  
   A separate ETL (Extract‑Transform‑Load) pipeline is built to pull, clean, and store data in a SQL database. The database schema supports `source` and `observation_time` columns from the start.  
   A `SQLDataFeed` is implemented, fulfilling all the same dataset names as the CSV version. The `CSVDataFeed` is swapped out for the `SQLDataFeed` via configuration—the entire research framework remains untouched.  
-  - **Calendar system:** Introduce the `CalendarProvider` (§3.5). Replace the temporary `calendar_ticker` with a calendar configuration. The provider will initially load holiday lists from simple CSV files and support union/intersection logic. Point‑in‑time holiday data will be added when the SQL data pipeline supports versioned calendars.
+  - **Calendar system:** Introduced the `CalendarProvider` (§3.5) — implemented, with holiday lists **served through the `DataFeed` contract** (`get_holiday_dates`) from the CSV phase onward: `CsvBackend` reads `market_data/holidays/{CODE}.csv` and an `SqlBackend` will serve the same method from the `holiday_calendar` table without any provider change. The provider contributes union semantics for the simulation calendar and the per‑code `is_valid_day` primitives for execution checks. It replaces the temporary `calendar_ticker` with a required `BacktestConfig.calendar_provider`. Point‑in‑time holiday data will be added when the SQL data pipeline supports versioned calendars (an additive `as_of` parameter on the same method). This is the §3.4 decision in practice: the SQL migration swaps one backend, so prices and holiday dates move together instead of through two swap points and cannot skew versions; §3.4 also records the sanctioned future split and its triggers.
   **Holiday calendars** (per currency, exchange, or instrument) are stored in the database and made available through the `DataFeed`. These serve two purposes:
     - **Pricing input:** required for computing cash‑flow schedules (swaps), converting tenors to absolute maturity dates (forwards, options), and determining settlement dates. The Pricer’s `resolve_instrument` method (Section 3.6) consumes these calendars.
     - **Liquidity masking:** for OTC instruments where data may exist on local holidays but liquidity is questionable, the `DataFeed` can use a holiday calendar to treat those dates as having no valid data, even if raw quotes exist. This ensures that pricing and P&L are only computed on days with genuine market liquidity.

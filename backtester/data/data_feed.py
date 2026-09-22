@@ -20,5 +20,12 @@ class DataFeed:
     ) -> pd.Series:
         return self._backend.get_series(dataset, start, end, ticker, **params)
 
-    def trading_days(self, ticker: str, start: str, end: str) -> list[str]:
-        return self._backend.trading_days(ticker, start, end)
+    def get_holiday_dates(self, code: str) -> frozenset[str]:
+        """Holiday dates for calendar *code* (see ``CalendarProvider``, §3.5).
+
+        Unlike ``get_value`` / ``get_series`` -- which return empty results for
+        an unknown ticker and let the NaN/missing-data mechanics absorb it --
+        this raises ``FileNotFoundError`` for an unknown code: a calendar code
+        is a configuration identifier, not a ticker to degrade on.
+        """
+        return self._backend.get_holiday_dates(code)
