@@ -13,6 +13,15 @@ class Contract:
     asset_class: str
     multiplier: float = 1.0
     currency: str = "USD"
+    #: Holiday calendar code governing this instrument's market (Task 5b-2).
+    #: Stamped by the pricer from the configured ticker -> code mapping during
+    #: ``resolve_instrument``; ``None`` for an unmapped ticker (no scoping).
+    #: Not instrument identity -- deliberately excluded from the pricer's cache
+    #: key (see design_notes §3.6).
+    trading_calendar_code: str | None = None
+    #: Settlement calendars for this instrument.  Reserved: populated empty
+    #: until a later task needs settlement-day checks.
+    settlement_calendar_codes: tuple[str, ...] = ()
     params: dict = field(default_factory=dict)
 
 

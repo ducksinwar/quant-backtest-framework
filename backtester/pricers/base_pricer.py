@@ -13,17 +13,30 @@ class BasePricer(ABC):
         "structure_id",
         "leg_id",
         "cost_leg",
+        "trading_calendar_code",
+        "settlement_calendar_codes",
     }
+
+    def __init__(self, ticker_to_calendar_code=None):
+        #: Ticker -> holiday calendar code, injected by the caller (Task 5b-2).
+        #: The pricer only stamps it onto the ``Contract``; it performs no
+        #: calendar math and holds no feed for it.  A defensively copied dict,
+        #: so later mutation by the caller cannot retroactively change a
+        #: stamped Contract.
+        self._ticker_to_calendar_code = dict(ticker_to_calendar_code or {})
 
     def _build_contract(self, resolved: dict) -> Contract:
         params = {
             k: v for k, v in resolved.items() if k not in self._INFRA_KEYS
         }
+        ticker = resolved.get("ticker", "")
         return Contract(
-            ticker=resolved.get("ticker", ""),
+            ticker=ticker,
             asset_class=resolved.get("asset_class", "equity"),
             multiplier=resolved.get("multiplier", 1.0),
             currency=resolved.get("currency", "USD"),
+            trading_calendar_code=self._ticker_to_calendar_code.get(ticker),
+            settlement_calendar_codes=(),
             params=params,
         )
 

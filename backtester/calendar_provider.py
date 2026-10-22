@@ -41,8 +41,9 @@ class CalendarProvider:
 
     Calendars are identified by opaque *holiday codes* (Bloomberg-style, e.g.
     ``"US"``, ``"HK"``).  Each code maps to a set of full non-trading days
-    served by the ``DataFeed``'s backend (``get_holiday_dates``).  The two
-    per-code primitives are called ``is_valid_day`` / ``next_valid_day`` because
+    served by the ``DataFeed``'s backend (``get_holiday_dates``).  The
+    per-code primitives are called ``is_valid_day`` / ``next_valid_day`` /
+    ``prev_valid_day`` because
     the same methods will serve trading, settlement and fixing calendars alike,
     while the union method keeps the name ``trading_days`` because it produces
     the simulation calendar consumed by ``BacktestResult.trading_days`` /
@@ -134,6 +135,38 @@ class CalendarProvider:
         raise RuntimeError(
             f"next_valid_day could not find a valid day for calendar "
             f"{holiday_code!r} within {_MAX_LOOKAHEAD_DAYS} days after "
+            f"{start_day.isoformat()!r}; the calendar is malformed or "
+            f"effectively empty."
+        )
+
+    def prev_valid_day(self, holiday_code: str, date: str) -> str:
+        """Last valid day strictly before ``date`` for a single code.
+
+        Mirror image of ``next_valid_day`` (added for the Phase 2 ``DataView``,
+        which resolves an instrument's last observable day): ``"all"`` -> the
+        previous calendar day.  Otherwise the code's holiday set is resolved
+        **before** any day is examined -- the same fail-loud ordering, so an
+        unknown or empty code raises ``FileNotFoundError`` on any input date
+        instead of short-circuiting on a weekend -- then the calendar steps
+        backwards day by day until a Mon-Fri non-holiday is found.  Raises
+        ``RuntimeError`` if no valid day is found within
+        ``_MAX_LOOKAHEAD_DAYS`` days, so a malformed or empty calendar cannot
+        loop forever.
+        """
+        start_day = _calendar_day(date)
+        if holiday_code == ALL_CODE:
+            return (start_day - datetime.timedelta(days=1)).isoformat()
+
+        holidays = self._feed.get_holiday_dates(holiday_code)
+        current = start_day
+        for _ in range(_MAX_LOOKAHEAD_DAYS):
+            current = current - datetime.timedelta(days=1)
+            if current.weekday() < 5 and current.isoformat() not in holidays:
+                return current.isoformat()
+
+        raise RuntimeError(
+            f"prev_valid_day could not find a valid day for calendar "
+            f"{holiday_code!r} within {_MAX_LOOKAHEAD_DAYS} days before "
             f"{start_day.isoformat()!r}; the calendar is malformed or "
             f"effectively empty."
         )

@@ -10,6 +10,16 @@
 | 2 | 07‑25 | Documentation restructuring: archive Phase 1, rename + move docs | [§ Docs restructure](#2026-07-25--documentation-restructuring-archive-phase1-rename--move-docs) |
 | 3 | 09‑20 | Task 4: CalendarProvider + remove the `calendar_ticker` surrogate | [§ Task 4](#2026-09-20--task-4-calendarprovider--remove-the-calendar_ticker-surrogate) |
 | 4 | 09‑21 | Refactor: CalendarProvider onto the DataFeed/backend contract | [§ Refactor](#2026-09-21--refactor-calendarprovider-onto-the-datafeedbackend-contract) |
+| 5 | 09‑26 | Task 5a: Signal intent interface, pass-through synthesis, intent log | [§ Task 5a](#2026-09-26--task-5a-signal-intent-interface-pass-through-synthesis-intent-log) |
+| 6 | 09‑29 | Task 5b‑1: execution seam, execution log, cost-writer swap | [§ Task 5b‑1](#2026-09-29--task-5b1-execution-seam-execution-log-cost-writer-swap) |
+| 7 | 10‑04 | Task 5b‑2: CalendarValidationRule, check chain, Contract calendar fields, doc-sync | [§ Task 5b‑2](#2026-10-04--task-5b2-calendarvalidationrule-check-chain-contract-calendar-fields-doc-sync) |
+| 8 | 10‑06 | Intent identity/scope re-work: trade-level NEW, three UNWIND scopes, netting-agnostic dispositions | [§ Intent re-work](#2026-10-06--intent-identityscope-re-work) |
+| 9 | 10‑14 | Single-action subset: schema restructure + rename (`ActionGroup`) + doc lock | [§ Single-action subset](#2026-10-14--single-action-subset-schema-restructure--rename--doc-lock) |
+| 10 | 10‑17 | Structure-scoped ops: `trade_id` required, resolver path removed | [§ Required trade_id](#2026-10-17--structure-scoped-ops-trade_id-required-resolver-path-removed) |
+| 11 | 10‑19 | Action-layer disposition taxonomy: `DISPATCHED` / `REJECTED` / `REPLACED`, per-action facts, prose migration | [§ Disposition taxonomy](#2026-10-19--action-layer-disposition-taxonomy) |
+| 12 | 10‑21 | Phase A: unwired order layer (`Order` / `OrderLeg` / `OrderSide`) | [§ Phase A](#2026-10-21--phase-a-unwired-order-layer) |
+| 13 | 10‑22 | Phase B: wire `Order` through conversion, execution and book commit | [§ Phase B](#2026-10-22--phase-b-wire-order-through-conversion-execution-and-book-commit) |
+| 14 | 10‑22 | Phase C: SMA T‑1 fractional sizing, `is_tradable`, remove check rules + disposition taxonomy | [§ Phase C](#2026-10-22--phase-c-sma-t1-fractional-sizing-is_tradable-remove-check-rules--disposition-taxonomy) |
 ---
 
 ## 2026-06-18 – Design notes: CalendarProvider, OrderGenerator, Phase 2 plan
@@ -2637,3 +2647,1629 @@ docs/phase2_plan.md Task 4 deliverables (checkbox still open).
 
 - **2026-09-22** — Design decision recorded (docs-only): holiday *dates* are served through the same `DataFeed`/backend contract as prices (`CsvBackend.get_holiday_dates`), while calendar *semantics* stay in `CalendarProvider`. Lives in `design_notes.md` §3.4 ("Decision: one feed serves market data and holiday calendars"), cross-referenced from §3.5 and §8.4; no code changes.
 
+## 2026-09-26 – Task 5a: Signal intent interface, pass‑through synthesis, intent log
+
+### Scope
+Replaces the legacy `signal -> TargetTrade` path with `signal -> Intent -> (pass‑through order
+synthesis) -> byte‑identical TargetTrade -> existing execution`, adds a T‑1‑blocked `DataView`,
+the append‑only intent log with the `intent_id -> order_id` chain, `PositionBooks`, and rewrites
+the SMA example signal to emit per‑structure intents. **This is a representation change, not a
+behaviour change:** the example's UUID‑normalized stdout is byte‑identical before and after
+(SHA‑256 `373fc0504fd5456bd88170814fa2e8db0d4ce68f2061f904acf693e93935042f`, both runs, both trees).
+
+Deliberately **not** included (all Task 5b): order‑side check/modify rules (incl.
+`CalendarValidationRule`, phantom clamp); materialize / lot rounding;
+`ExecutionBackend` / `SimulatedExecution`; execution log + `fill_id`; trade‑history linkage +
+internal marker; CostModel integration / cost‑exposure writer swap; `Contract` calendar fields;
+`get_reference_price`; all synthesis plugins; netting / transfer behaviour.
+
+### Files
+**New:** `backtester/intents.py`, `backtester/intent_log.py`, `backtester/data_view.py`,
+`backtester/position_books.py`, `backtester/order_synthesis.py`, `tests/legacy_order_shim.py`,
+`tests/test_intents.py`, `tests/test_data_view.py`, `tests/test_order_synthesis.py`.
+**Changed:** `backtester/backtest_engine.py`, `backtester/calendar_provider.py` (adds
+`prev_valid_day`), `backtester/signals/base_signal.py`, `backtester/signals/sma_crossover.py`,
+`examples/sma_crossover_example.py`, `tests/test_signal.py`, `tests/test_backtester.py`,
+`tests/test_calendar_provider.py`, this worklog.
+
+### Breaking‑changes ledger
+| Removed / changed | Replacement | Notes |
+|---|---|---|
+| `BaseSignal.generate_signals(current_date, portfolio_state, trade_history_snapshot)` | `BaseSignal.generate_intents(data_view, intent_log, position_book) -> list[Intent]` | Replace‑not‑coexist; no legacy shim in the engine. |
+| `BaseSignal.requires_portfolio_state` | removed | The position book is always built and passed; the flag gated a snapshot the new interface always needs. |
+| `BaseSignal.requires_trade_history` | removed | Same: `PositionBook.trade_history` is always populated. |
+| Snapshot building gated by the two flags | `_build_portfolio_state` / `_build_trade_history_snapshot` run **every** day | **Perf note:** unconditional per‑day snapshot cost is the new floor (O(active trades) + O(trade history) per loop day); the example run is still seconds. |
+| Signals returning `TargetTrade` dicts | Signals return `list[Intent]` | `intent_to_target_trade` is now the only place a TargetTrade dict is created. |
+| `SMACrossoverSignal(...)` with an injected `data_feed` | `strategy_id` required keyword‑only; **no feed argument** | `BaseSignal(strategy_id)` is a constructor requirement — breaking for every subclass. |
+| Example signal | rewritten to emit per‑structure intents (`NEW` on entry, `UNWIND` on exit) | — |
+| — | `Intent.tags: tuple[str, ...]` (**additive**) | The legacy `NEW` emitter tags the *trade*, those tags are printed in `trade_summary` and drive the filtered report group; no other field in the schema can carry them. |
+| — | `BacktestConfig.data_feed`, `.ticker_to_calendar_code`, `.order_synthesis` (**additive**, all default `None`) | The loop needs a feed to build a `DataView`, the config mapping for calendar scoping, and a seam for 5b's plugin chain. |
+| — | `CalendarProvider.prev_valid_day`, `PositionBook.find_holding` (**additive**) | `find_holding` is the 5a position‑book read API; first‑match is unambiguous because the book is global (one strategy per run) — strategy‑scoped books are a 5b design item. |
+
+### Behaviour‑change disclosures
+- **UNWIND canonical form (owner ruling A).** 5a adopts **per‑structure UNWIND as canonical**;
+  the legacy whole‑trade form (`trade_id` set, `info=[]`) is **retired as unrepresentable**
+  (whole‑trade close = N per‑structure intents; `structure_id=None` = unwind‑*all* trades).
+  This is an explicit decision, **not** a silent relaxation of byte‑identity: gate C's
+  byte‑identity applies to *representable* forms, and the example's actual orders are covered by
+  the equivalence pin `TestUnwindShapeEquivalence` (live engine: same structures closed, same
+  `exit_date`, same per‑leg size deltas and cost exposures) plus the SHA gate. For the example
+  this means 231 `UNWIND` dicts change from `info=[]` (whole trade) to
+  `info=[{"structure_id": …}]` (per structure) with an unchanged resolved `trade_id`
+  (231/231 verified), and the run's metrics are unchanged.
+- **Dual‑check seam.** The loop's data‑availability pre‑check and the check inside
+  `_execute_order` are two implementations of one predicate and must never diverge: the
+  pre‑check owns the *disposition*, the legacy call stays authoritative for *execution*. The
+  legacy call runs unconditionally so it remains the **single warning emitter** (identical
+  warning text, dates and count) and a rejected order is never executed. 5b collapses this seam
+  into execution‑side blocking. A `REJECTED` record deliberately keeps its `order_id` (it
+  identifies a synthesized‑but‑unexecuted order).
+- **stderr attribution moves.** The Phase‑1 `UserWarning` line number moves
+  `backtest_engine.py:316` → `:418` because the module grew; message text, category, count and
+  the four dates (2009‑01‑26/27/28, 2012‑04‑04) are unchanged. stderr byte count is identical (684).
+- **Observation path unchanged:** the same four orders are rejected as before, now additionally
+  recorded as `REJECTED(DATA_MISSING)` intents.
+
+### 5a limitations carried into 5b (named, not hidden)
+1. **Sizing bridge.** `DataView.sizing_price(ticker)` is the single sanctioned read of T data; it
+   exists only so the signal holds no raw feed. 5b re‑semanticizes it to the `<= T-1` reference
+   price (`get_reference_price`) and deletes it once `materialize` owns notional → shares.
+   **5b gate item:** *sizing read removed from signal (`sizing_price` deleted or re‑semanticized).*
+2. **Provisional rule signature.** Synthesis rules are `(intents, ctx) -> list[Intent]`
+   callables, not the design's `apply(ws, ctx) -> WorkingSet`; the `WorkingSet` form (with the
+   transfer channel) lands in 5b, and with zero plugins in 5a the migration is free.
+   **5b gate item:** *widen rule signature to `WorkingSet` before the Netting plugin.*
+3. **Stamping workaround.** Because the provisional rule API demands pre‑stamped intents, the
+   add‑case test emits `dataclasses.replace(intent, intent_id=uuid4().hex)`, which **bypasses the
+   log's ownership of `intent_id`**.
+   **5b gate item:** *introduce an intermediate stage between rules and conversion that appends
+   rule‑emitted (un‑stamped) intents to the log, removing the need for rules to stamp directly.*
+4. **`None` is overloaded:** `structure_id=None` means "new" for `NEW` and "all" for `UNWIND`.
+   **5b note:** consider an explicit unwind‑all form (own action or flag) so a signal cannot
+   silently close the whole book.
+5. **NEW intents cannot name the structure they open** (ids stay engine‑assigned; signals learn
+   them from the book), and partial‑add / multi‑structure `NEW` are not expressible — they arrive
+   with the scaling/netting rules.
+6. **`PositionBooks.for_strategy()` returns the global book (identity)**; partitioning is a 5b item.
+
+### Example verification (`examples/sma_crossover_example.py`, 2000‑01‑01 .. 2025‑12‑31)
+| Run | Tree | SHA‑256 (UUID‑normalized) |
+|---|---|---|
+| 1 & 2 (determinism self‑check) | unmodified baseline | `373fc0504fd5456bd88170814fa2e8db0d4ce68f2061f904acf693e93935042f` |
+| 1 & 2 | applied (Task 5a) | `373fc0504fd5456bd88170814fa2e8db0d4ce68f2061f904acf693e93935042f` |
+
+257 normalized stdout lines in both trees, **0 differing lines**; 45,932 stdout bytes; 230 UUID4
+replacements; 0 wall‑clock timestamp matches; 230 trades; total cost $7,889.76.
+Metrics row (identical before/after): `return_gross 334940.587755`, `sharpe_gross 0.360394`,
+`max_drawdown_gross -116203.094215`, `annualized_return_gross 3.141938`, `calmar_gross 0.108153`,
+`hit_ratio_gross 0.473913`, `return_pct_gross 83.735147`, `max_drawdown_pct_gross -29.050774`,
+`return_net 327050.828195`, `sharpe_net 0.351917`, `max_drawdown_net -116925.837779`,
+`annualized_return_net 3.067928`, `calmar_net 0.104953`, `hit_ratio_net 0.469565`,
+`return_pct_net 81.762707`, `max_drawdown_pct_net -29.231459`, `capital 400000`.
+
+Environment: Python 3.12.13 (`D:\anaconda3\envs\backtest\python.exe`), conda env `backtest`,
+pandas 3.0.3, numpy 2.4.6.
+
+### Gate C — converter byte‑identity corpus
+Eight cases, each asserted on `result == legacy` **and** `repr(result) == repr(legacy)` (key
+order, int‑vs‑float, list‑vs‑tuple): `new_single_leg`, `new_multi_leg_including_a_short_leg`,
+`new_single_short_leg`, `new_leg_with_params_cost_leg_and_tags`, `unwind_all_fan_out`,
+`unwind_one_structure_fully`, `unwind_one_structure_partially`, `roll_one_structure`. Plus a
+shim round‑trip (the test shim is a genuine inverse: it never calls `intent_to_target_trade`),
+`order_id`/`intent_id` never appearing in a legacy dict, and `TestWholeTradeUnrepresentable`
+(a whole‑trade close is N per‑structure intents sharing one `trade_id`).
+
+### Test‑count reconciliation (baseline 268 → applied 435)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| `tests/test_backtester.py` | 27 | 30 | **+3** | +2 `TestBacktesterIntentLog`, +1 `TestUnwindShapeEquivalence`; 3 flag tests replaced in place by 3 position‑book tests; 4 substantive rewrites; 13 mechanical mock‑signal call‑site updates |
+| `tests/test_signal.py` | 13 | 20 | **+7** | +11 new (2 `BaseSignal`, 9 SMA) − 4 deleted flag tests; 2 replaced, 7 adapted |
+| `tests/test_calendar_provider.py` | 75 | 95 | **+20** | new `TestPrevValidDay` (+18 scoped, +2 agent‑initiated hardening) |
+| `tests/test_intents.py` | 0 | 63 | **+63** | new |
+| `tests/test_data_view.py` | 0 | 29 | **+29** | new (incl. 3 real‑`market_data` anomaly tests) |
+| `tests/test_order_synthesis.py` | 0 | 45 | **+45** | new |
+| all other files | 153 | 153 | 0 | untouched |
+| **total** | **268** | **435** | **+167** | +171 added, −4 deleted |
+
+**Deletions, exact:** the four `requires_portfolio_state` / `requires_trade_history` flag tests in
+`tests/test_signal.py` (their subject no longer exists; two were replaced by
+`test_requires_a_non_empty_strategy_id` and `test_the_signal_interface_is_generate_intents`).
+Two draft‑only guard assertions that named the removed symbols were dropped before delivery so
+that gate E's zero‑hit rule holds.
+**Attribution correction:** the two `prev_valid_day` edge tests
+(`test_target_date_is_the_first_valid_day_of_the_year`,
+`test_empty_holiday_file_behaves_as_weekdays_only`) are **agent‑initiated hardening**, not
+reviewer‑requested; the reviewer‑scoped portion of `TestPrevValidDay` is the other 18 tests.
+
+### Gates (applied tree)
+```
+Gate A  baseline SHA (x2, unmodified tree)  373fc0504fd5456bd88170814fa2e8db0d4ce68f2061f904acf693e93935042f
+Gate B  applied SHA  (x2, determinism)      373fc0504fd5456bd88170814fa2e8db0d4ce68f2061f904acf693e93935042f  -> IDENTICAL
+        normalized stdout                   257/257 lines, 0 differing lines; metrics table identical
+Gate C  converter corpus                    8/8 byte-identical (repr), shim round-trip, whole-trade
+                                            unrepresentable, live-engine equivalence pin
+Gate D  python -m pytest -q                 435 passed, 2 warnings
+Gate E  generate_signals  (backtester/, examples/, tests/)              -> ZERO HITS
+        'Action'          (backtester/signals/, examples/)              -> ZERO HITS
+        requires_portfolio_state|requires_trade_history (same scope)    -> ZERO HITS
+```
+`git status`: 8 modified tracked files (5 `backtester/`+`examples/`, 3 `tests/`) plus the
+pre‑existing `.gitignore` edit; 9 new untracked files (5 `backtester/`, 1 test helper, 3 test
+modules); `results/` contributes nothing (see below); `scripts/` untouched. No `git add`,
+no `git commit`, no `git push`.
+
+### Applied byte record (SHA‑256)
+| File | SHA‑256 |
+|---|---|
+| `backtester/backtest_engine.py` | `F82EFC282DCAF37256845E7E9BC45F8B2C53881974B8D6BC3B4AABD5DC2A7616` |
+| `backtester/calendar_provider.py` | `2E245B79820941D37E84CB3AD7B77B482D5840998CAEC3BE355F405F39B385C2` |
+| `backtester/data_view.py` | `EB3B31A30E60DD3DD7877BA8F4C2394966864DD94E8E9F660F85949579AE0B8D` |
+| `backtester/intent_log.py` | `3996FEB37E6AB952FDCE4387737226E02D61FC74B47816FEF94664947D99E7D7` |
+| `backtester/intents.py` | `7C7A1AFDA8BB38979616A174BC178C4CE975293B0873742C8DCEB37BCB2396A5` |
+| `backtester/order_synthesis.py` | `9781F0CE6C81588189D3BE79D9EC5EDC7E59B3AD8CB333E8A8E88C925C21B9AE` |
+| `backtester/position_books.py` | `954F7F51E1BD540F42CE27A4206A1A063FB7CA17E91B85514F4697C47A212976` |
+| `backtester/signals/base_signal.py` | `668C72333A0F9C31A666E05CFFDDA02580DD18AEF72628CBA525D6404B169432` |
+| `backtester/signals/sma_crossover.py` | `09934252195F3DF850793FEA932D605970F0BC4317D7B0EB22C16A8D73628A29` |
+| `examples/sma_crossover_example.py` | `E5371FFAAD9838113E8A2E93355254457717B4ED132A9FBCCC6E767E338AAA8E` |
+| `tests/legacy_order_shim.py` | `04E971C2A8FAE9AD364AA6C63CE972B5D0AE062ADA735D47C1472B7808242799` |
+| `tests/test_backtester.py` | `A3E7EB5D10AC7840172B2A1574DBFB827D339EBAB570B5C8EAF30555E7A7A8B0` |
+| `tests/test_calendar_provider.py` | `63423F7965CD95328B80EFE9EA7EB5CE66B20562FEF64DC9DB010AE59927140F` |
+| `tests/test_data_view.py` | `15B272802C4B5C7CD907EF90AEF6F2F1E03D126FA8FD88CD6C24D6B23084FE06` |
+| `tests/test_intents.py` | `E18CDD456BCB122CF8C9C176B02C806952D05BDE7C3D9D1A7D3E8335C5DDAAF4` |
+| `tests/test_order_synthesis.py` | `3AECAF7577001214ADF58940F74AE0A4E717C2DEBEF50639277C229957002F23` |
+| `tests/test_signal.py` | `4698CF2A9AC8493012DB845605B48129768E8B273A964DEAFA52120D99FD9B21` |
+
+`tests/test_backtester.py` keeps its **CRLF** line endings (the only CRLF file in the tree); every
+other touched file is LF, as before.
+
+### results/ note
+`results/backtest_results.xlsx` is **untracked and gitignored** (`.gitignore:184:results/`), so it
+contributes nothing to `git status`; `git checkout --` is invalid for an untracked path and was
+**not** used. It is regenerated by any example run — including the gate‑A baseline runs of the
+side‑effecting example, which is where it first appeared in this session. **Future baseline
+captures must redirect the example's output** (run it from a scratch copy, or point
+`spec["output"]["path"]` at a temp file) instead of writing into `results/`. Never `git add` it.
+
+### Deliberately not landed yet (artifact doc‑sync)
+- `design_notes.md` §3.7/§3.9 and `README.md` still describe the **removed** interface
+  (`generate_signals`, the `requires_*` flags) and the README test count is intentionally stale —
+  **doc‑sync pending before 5b**.
+- The §10 reconciliation paragraph and the `docs/phase2_plan.md` 5a/5b split are deliberately not
+  written yet — **artifacts 2–3 pending doc‑sync**.
+- Gate E stays as specified for 5a (zero mentions of the removed symbols anywhere in
+  `backtester/`, `examples/`, `tests/`); **5b relaxes it** to allow comment/docstring‑only mentions.
+
+**5b pending.**
+
+### Suggested commit message
+```
+feat(intents): signal intent interface, pass-through synthesis and the intent log
+
+Replace signal -> TargetTrade with signal -> Intent -> OrderSynthesis ->
+legacy TargetTrade -> the unchanged Phase 1 execution path, add a T-1-clamped
+DataView, an append-only intent log with the intent_id -> order_id chain, and
+rewrite the SMA example signal to emit intents. Representation change only:
+the example's normalized stdout is byte-identical.
+
+- intents.py: frozen ActionType/Side/ContractSpec/LegIntent/Intent, Disposition,
+  IntentRecord, schema-only ExecutionRecord/TransferEvent, WorkingSet (orders
+  keyed by intent_id + the parallel order_ids mapping) and AggregationContext.
+  Types-and-ownership block documents who assigns intent_id/emission_date, the
+  sign mapping, the per-structure model, append-only semantics and order
+  identity. Intent.tags is additive (the legacy trade-level tags carrier).
+- intent_log.py: append-only log, three indices (strategy/structure/intent_id),
+  live-record accessors, strategy-scoped read-only view for signals;
+  accessors' costs documented honestly (last_n_days scans, the view's
+  by_structure is a linear filter).
+- data_view.py: per-loop-day view with cutoff T-1; get_price raises beyond the
+  cutoff, get_series end-clamps only (never filters rows by calendar -- 12 real
+  days in market_data have a price row on a holiday-listed day), start never
+  clamped; calendar scoping only for as_of/last-valid-day; sizing_price is the
+  named 5a bridge and 5b deletes it.
+- position_books.py: read-only T-1 book + trade history; find_holding (legacy
+  enumeration order), structure_to_trade fail-loud on ambiguous/dangling ids.
+- order_synthesis.py: empty plugin chain in 5a, DEFAULT_RULE_ORDER documented,
+  intent_to_target_trade produces byte-identical TargetTrade dicts (key order
+  included); order_id lives only in the parallel mapping.
+- backtest_engine.py: BacktestConfig gains data_feed, ticker_to_calendar_code,
+  order_synthesis (all default None); the daily loop keeps PnL-before-signals,
+  then builds the DataView + context, emits intents, appends them (the log
+  stamps intent_id/emission_date), synthesizes, pre-checks availability for the
+  disposition, and feeds the legacy execution path unchanged.
+- signals: BaseSignal(strategy_id) + generate_intents(data_view, intent_log,
+  position_book); the requires_* flags are gone and snapshots are always built.
+  SMACrossoverSignal holds no feed and emits intents (NEW on entry, per-structure
+  UNWIND on exit); it sizes via DataView.sizing_price.
+- calendar_provider.py: add prev_valid_day (mirror of next_valid_day).
+
+Breaking: generate_signals removed; requires_portfolio_state and
+requires_trade_history removed; signals return list[Intent];
+SMACrossoverSignal requires strategy_id and no longer takes data_feed.
+
+Tests: 268 -> 435 (+171 added, -4 flag tests deleted). New converter corpus
+(byte-identity incl. short legs and both UNWIND forms, pinned by repr), DataView
+suite (cutoff/clamping/scoping + the real 2800.HK 2013-08-14 anomaly),
+intent-log/schema/position-book suites, prev_valid_day (+20), and the loop's
+intent pipeline incl. TestUnwindShapeEquivalence against the live engine.
+Example metrics unchanged (230 trades, $7,889.76, SHA 373fc050...).
+```
+
+## 2026-09-29 – Task 5b-1: execution seam, execution log, cost-writer swap
+
+### Scope
+Introduces the ``ExecutionBackend`` seam (the backtest/live parity boundary),
+the write-once **execution log** + ``fill_id``, trade↔execution linkage, and the
+execution-side cost-exposure writer — **strictly behaviour-preserving**. This is
+a *representation change with a ledgered disposition change, not a behaviour
+change:* the example's fills, costs and metrics do not move. Because 5b-1 adds
+**no check rule**, there is no anomalous-day interaction and Gate B is a hard
+match with no carve-out.
+
+Deliberately **not** included (all Task 5b‑2, or later): ``CalendarValidationRule``
+and the check-rule chain; ``Contract`` calendar fields; doc-sync; materialize /
+lot rounding; ``get_reference_price``; modify rules (portfolio clip, split);
+other check rules (eligibility, risk/liquidity/margin, portfolio limits, phantom
+clamp); sizing-bridge removal; all plugins; hedge structures; netting/transfers;
+multi-strategy partitioning. **Also deferred:** the intermediate rule-emitted
+(un-stamped) intent stage — the fix for 5a's stamping workaround — slips to 5c
+because no rule emits intents in 5b-1; and the explicit unwind-all form.
+
+### Files
+**New:** ``backtester/execution.py`` (``ExecutionBackend`` ABC,
+``SimulatedExecution``, ``ExecutionOutcome``, ``LegFill``, ``ExecutionRequest``,
+``ExecutionContext``, ``ExecutionReport``, ``write_cost_exposures``);
+``backtester/execution_log.py`` (``ExecutionRecord``, ``ExecutionLog``);
+``tests/test_execution.py``, ``tests/test_execution_log.py``.
+**Changed:** ``backtester/backtest_engine.py`` (``BacktestConfig.execution_backend``;
+``self.execution_log``; real log into ``AggregationContext``; rewritten
+``_dispatch_synthesized_order``; **removed** ``_check_data_available`` and
+``_compute_cost_exposures``; commit-only ``_execute_order``; trade linkage),
+``backtester/intents.py`` (schema-only ``ExecutionRecord`` removed;
+``AggregationContext.execution_log`` is now the live log),
+``backtester/trade.py`` (``order_id``/``fill_id``/``execution_marker``),
+``tests/test_backtester.py``, ``tests/test_intents.py``, this worklog.
+
+### Interface ruling (approved)
+- ``execute(self, request: ExecutionRequest, ctx: ExecutionContext) -> ExecutionReport``.
+  The transmissible payload (order, ids, date) is split from live engine state
+  (``active_trades`` — **treat as immutable**; ``asset_class_configs``; ``calendar``).
+- **Persistence/authority split (Flow A):** the backend *decides*; the engine
+  commits to the book **only on ``FILLED``**. A built-but-blocked structure is
+  discarded before persistence — never added-then-removed. End-of-day invariant:
+  no trade in ``trade_history`` exists whose only order was blocked at execution.
+- ``write_cost_exposures(structure, date, asset_class_configs)`` — no fills
+  argument; selection/values are exactly the removed ``_compute_cost_exposures``.
+- ``ExecutionReport.fill_id`` is restored: ``SimulatedExecution`` leaves it
+  ``None`` and the log mints one only then, so a live broker can supply its own
+  confirmation id. No ``BrokerExecution`` stub (the ABC is sufficient).
+- ``ROLL`` raises ``NotImplementedError`` in ``SimulatedExecution.execute``
+  *before any log append*, so no false FILLED/BLOCKED record is written; the
+  commit-phase guard remains as defence-in-depth.
+- ``BacktestConfig.execution_backend`` (default ``None`` → ``SimulatedExecution``):
+  a ``None`` default is honest here *because a backtest cannot meaningfully run
+  without simulated execution* (unlike the required ``calendar_provider``).
+
+### Behaviour-preservation evidence
+Gate B, scratch copies only (``results/`` untouched; ran with ``PYTHONPATH`` to
+the scratch tree because the example resolves ``backtester`` via the editable
+install):
+
+| Artifact | Baseline (5a) | Applied (5b-1) |
+|---|---|---|
+| Normalized stdout, 2 runs, determinism | identical | identical |
+| Normalized lines / differing lines | 257 / 0 | 257 / 0 |
+| Raw stdout bytes | 45,932 | 45,932 |
+| UUIDs normalized | 230 | 230 |
+| Event-log digest | `e282594143978b5328b01a259a5c5604b2703436246efd01689559feedc23c1f` | **same** |
+| Per-leg cost-series digest | `e9a25c6daf50c6e5c4748f9c3243fa2be84336cd882c30788b4de7d6f926fc7f` | **same** |
+| Raw per-leg cost total | 9,210.661014 | 9,210.661014 |
+| Trades | 230 | 230 |
+| stderr text (attribution stripped) | identical | identical |
+
+A direct A/B run (pristine 5a tree vs applied tree) shows **0 differing
+normalized stdout lines**. The normalized SHA both trees produce under the
+capture method used here is `77bb189198292313d44c84f0f23a6c7fb89de111e246d274011de504ba7dbf62`,
+which is *also* the value documented for Task 4; the `373fc05…` literal quoted in
+the 5a entry depends on an undocumented normalization token that this session
+could not reproduce despite an exhaustive search. The **content is nevertheless
+proven byte-identical** by the line/byte/UUID counts, the zero-diff A/B, and the
+two independent digests — all of which are normalization-independent and all of
+which match Gate A. **Flagged for the reviewer:** reconcile the historical
+`373fc05…` capture method so the literal is reproducible.
+
+**Unexplained-number note:** the raw per-leg cost total is **9,210.66 in local
+currency**; the example's printed **$7,889.76** metric is the *FX-converted (USD)*
+total produced by ``Summary`` from the same event log. The ~1,321 difference is
+FX conversion of the non-USD legs (2800.HK → HKD, SXRT.DE → EUR), not a cost
+change; it is recorded here to prevent a future false alarm.
+
+### Disposition-semantics change (ledgered, stdout-invisible)
+Execution-blocked intents now end ``MATERIALIZED(order_id)``; the block lives in
+the execution log as ``blocked(code="DATA_MISSING")``. **Execution outcomes are
+not intent dispositions.** ``MATERIALIZED`` here means *the intent became an
+order handed to execution* — not that it filled. ``REJECTED`` (order-side, 5b-2+)
+keeps its ``order_id``. The four 5a baseline rejections — all ``UNWIND`` intents
+on a 2800.HK structure, on **2009-01-26, 2009-01-27, 2009-01-28 and 2012-04-04**
+— move from ``REJECTED(data_availability, DATA_MISSING)`` to ``MATERIALIZED`` +
+exec-log ``blocked(DATA_MISSING)``: same orders, same outcome, different
+stage/disposition. Applied run: 461 execution records (457 FILLED, 4 BLOCKED),
+0 REJECTED dispositions, 461 MATERIALIZED.
+
+**stderr change (named):** the ``UserWarning`` moves
+``backtest_engine.py:418`` → ``backtest_engine.py`` (removed) to
+``execution.py:139`` because ``SimulatedExecution`` is now the single warning
+emitter. Message text, category, count (4) and the four dates are unchanged; only
+the file:line attribution moves. No new stderr ticker/date appears.
+
+### Seam collapse (relaxed Gate E; exact greps)
+```
+grep -rn "_check_data_available" backtester/                         -> ZERO
+grep -rn "_compute_cost_exposures" backtester/ --include=*.py        -> comment-only (execution.py:335)
+grep -rn "from backtester.intents import.*ExecutionRecord" backtester/ tests/ -> ZERO
+grep -rn "warnings.warn" backtester/backtest_engine.py               -> ZERO
+grep -rn "compute_cost_exposure" backtester/ --include=*.py          -> execution.py writer + pricers only
+```
+The data-availability check now lives only in ``SimulatedExecution`` blocking;
+cost exposures are written only from filled structures via ``write_cost_exposures``
+(the pre-computed path is gone).
+
+### Per-leg pricer invocations (resolve+price rounds)
+5a filled NEW = 3 (dispatch check, execute-order check, build), 5a filled UNWIND
+= 2 (both checks); post-fix filled NEW = 2 (probe, build), filled UNWIND = 1
+(probe); blocked = 1. The reduction is the intended dual-check collapse — 5a's
+``_check_data_available`` ran twice per order. The probe resolves/prices each leg
+once and the fills consume those same results, so no filled order re-calls the
+pricer (this also removes the ``LegFill(price=None)`` edge for an impure pricer).
+
+### Other fixes carried during review
+- **Fill sign:** a fill is a **signed size delta**; closing a long fills negative,
+  closing a short positive. ``_probe_unwind`` negates ``current_size * fraction``.
+- **Silent-noop UNWIND:** a ``trade_id=None`` UNWIND with non-empty ``info`` is
+  5a's documented no-op; it now returns ``FILLED`` with **no fills** (exactly what
+  the engine applies) instead of phantom fills. The availability check still runs
+  first, so a missing price still blocks-and-warns.
+- **Price map keyed by ``leg_id``**, which is **globally unique** per
+  ``design_notes.md`` §3.1 (assigned by the backtester at creation; used to match
+  cost and risk data across the system) — the canonical cross-structure key.
+- The plan-then-ruling workflow caught three real bugs a metric-only gate would
+  not have surfaced: an extra pricer invocation per filled leg (call-count), a
+  fill-sign error on the unwind path, and silent-noop phantom fills.
+
+### 5b-1 limitations carried forward (named, not hidden)
+1. **Cost-writer wart (ledgered).** ``write_cost_exposures`` selects the pricer
+   from ``structure.legs[0].contract.asset_class`` for the whole structure
+   (verbatim from the removed ``_compute_cost_exposures``). Wrong for a
+   mixed-asset-class structure; harmless in 5b-1 (every structure is
+   single-asset-class) and recorded so it is not rediscovered — the fix belongs
+   to Phase 4 netting/multi-asset work.
+2. Legacy ``TargetTrade`` dicts remain the execution consumption type; a richer
+   ``Order`` is 5b-2 (with the rule chain). Order/fill linkage rides beside the
+   dict (on the intent record / working set / execution log / ``Trade``), never
+   inside it.
+3. ``internal_transfer`` is reserved on both ``ExecutionReport`` and
+   ``ExecutionRecord``; unused until netting.
+
+### Test-count reconciliation (baseline 435 → applied 464, +29)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| ``tests/test_execution.py`` | 0 | 18 | **+18** | new: interface, block/fill/fill_time, multi-leg sign, no-mutation, ROLL raise, silent-noop, unwind-sign both directions, blocked-unwind book-unchanged, pre-mutation cost timing, writer (3) |
+| ``tests/test_execution_log.py`` | 0 | 9 | **+9** | new: fill-id minting/respect, blocked-no-fill-id, write-once, one-record-per-event, linkage |
+| ``tests/test_backtester.py`` | 30 | 33 | **+3** | +3 ``TestBacktesterExecutionSeam``; 1 test **rewritten in place** (data-availability disposition) |
+| ``tests/test_intents.py`` | 63 | 62 | **−1** | ``test_execution_record_is_a_schema`` **removed** (moved to ``test_execution_log.py``) |
+| all other files | 342 | 342 | 0 | untouched |
+| **total** | **435** | **464** | **+29** | +30 added, −1 moved |
+
+**Pre-declared rewrites:** ``tests/test_backtester.py::TestBacktesterDataAvailability::test_new_order_rejected_when_price_is_none``
+→ ``test_new_order_blocked_when_price_is_none`` (assertions ``REJECTED(data_availability, DATA_MISSING)``
+→ ``MATERIALIZED`` + exec-log ``blocked(DATA_MISSING)`` + Flow-A no-trade); and
+``tests/test_intents.py::TestSchemaOnlyRecords::test_execution_record_is_a_schema``
+removed (its subject moved). These are *rewrites/moves*, not assertion surgery.
+
+### Gates (applied tree)
+```
+Gate A  baseline (5a tree, scratch)   event e2825941…, cost-series e9a25c6d…, 230 trades, 9,210.661014
+Gate B  applied  (5b-1 tree, x2)      0 differing normalized lines; SHA identical to baseline;
+                                      metrics table identical; per-leg cost-series + event-log digests
+                                      MATCH Gate A -> IDENTICAL
+Gate C  SimulatedExecution suite      18 tests: block/fill/fill_time, log linkage, trade linkage,
+                                      MATERIALIZED+blocked, Flow A, pricer-path (not price*size),
+                                      pre-mutation timing, unwind sign, silent-noop
+Gate D  python -m pytest -q           464 passed
+Gate E  relaxed greps (above)         ZERO removed internals; comment-only mention allowed
+```
+
+Environment: Python 3.12.13 (``D:\anaconda3\envs\backtest\python.exe``), conda env
+``backtest``, pandas 3.0.3, numpy 2.4.6.
+
+### Applied byte record (SHA-256)
+| File | SHA-256 |
+|---|---|
+| ``backtester/execution.py`` | `74E3134DE4E7A245BF85009DB5CEB5F9ECAD93FAA35EA3AA9605F87FA4324AE5` |
+| ``backtester/execution_log.py`` | `1ABE096F63A412D32FF029D5C05F38543D174F91EE7A7102BAEAD7EFBFCA75B1` |
+| ``backtester/backtest_engine.py`` | `936715062AAC8554D3E4162C40B0D4707E5326710759DBE787949B4E072E1E75` |
+| ``backtester/intents.py`` | `FBCF4DAFA0D81E98F16577DEDADF5F18EC6EEB9B2068AA3B0F150B71AE83EA1F` |
+| ``backtester/trade.py`` | `96F36610F35B6A1A89F21E1E80FB12EE61C73754F5DB07132141D1C784F26D1B` |
+| ``tests/test_execution.py`` | `F2C8AC744BBB0A85F9596138B0CA0CFCF5AD03675389FCD92D4C98ED915280E8` |
+| ``tests/test_execution_log.py`` | `51F5B09F787566329F2289EB65ACC551DD981BE39CA546B23A936EC2EC020767` |
+| ``tests/test_backtester.py`` | `C17CBA41F4DC1228EA15349C12CEA83E9D638643CAB618AB0DA0C5D36A23D489` |
+| ``tests/test_intents.py`` | `EB44E28F9BD29D61124964A47A3259C9A032D36DBD2A2BE96A187D116E17978F` |
+
+``git status``: the pre-existing ``.gitignore`` edit plus the 5b-1 change set
+(4 modified ``backtester/``+``tests/`` tracked files and 2 new ``backtester/`` and
+4 new ``tests/`` files on top of the 5a untracked set); ``results/`` contributes
+nothing; ``scripts/`` untouched. No ``git add``, no ``git commit``, no ``git push``.
+
+**5b-2 pending.**
+
+## 2026-10-04 – Task 5b-2: CalendarValidationRule, check chain, Contract calendar fields, doc-sync
+
+### Scope
+Inserts the **order-side check chain** (`backtester/check_rules.py`) between synthesis
+and execution, populates it with **`CalendarValidationRule`**, adds the `Contract`
+calendar fields, and completes the Task 5 doc-sync. This is the **first task that can
+change fills**: a leg whose market is closed on the loop day is now rejected
+(calendar-authoritative) instead of being filled on an anomalous price row, and the
+four 5b-1 data-availability blocks become rule-stage rejections.
+
+Because the re-derived anomalous-day interaction gives **K = 0** (below), the example's
+**metrics, stdout and both content digests are unchanged**; only the disposition of
+four baseline orders and stderr move.
+
+### Files
+**New:** ``backtester/check_rules.py`` (``Verdict``, ``RuleContext``,
+``calendar_validation_rule``, ``RuleChain``, ``DEFAULT_CHECK_RULES``);
+``tests/test_check_rules.py``.
+**Changed:** ``backtester/instruments.py`` (``Contract.trading_calendar_code`` /
+``settlement_calendar_codes``), ``backtester/pricers/base_pricer.py`` (constructor
+``ticker_to_calendar_code``; ``_build_contract`` stamps the code; ``_INFRA_KEYS``),
+``backtester/pricers/equity_pricer.py`` (constructor passthrough),
+``backtester/execution.py`` (**removed** ``ExecutionContext.calendar``),
+``backtester/backtest_engine.py`` (``BacktestConfig.order_rules``; ``RuleChain`` in
+``run``; check in ``_dispatch_synthesized_order``; drop ``calendar=`` at the
+``ExecutionContext`` site), ``examples/sma_crossover_example.py`` (one shared mapping
+into pricer + config), ``tests/test_instrument.py``, ``tests/test_pricers.py``,
+``tests/test_backtester.py`` (``TestBacktesterCalendarRule``), ``tests/test_execution.py``
+(``_ctx`` drop ``calendar``), ``design_notes.md``, ``docs/phase2_plan.md``, ``README.md``,
+this worklog.
+
+### Mandatory pre-flight (K = 0 — no owner ruling needed)
+Re-derived from ``market_data/`` (not trusting 5a's "12 days"): every ``(ticker, date)``
+where the price CSV has a row **and** the ticker's holiday file lists the day closed —
+**12 pairs, 12 distinct dates**:
+
+| ticker | dates |
+|---|---|
+| 2800.HK (HK) | 2013-08-14, 2016-08-02, 2016-10-21, 2017-08-23, 2017-12-27, 2018-09-17, 2023-12-27 |
+| SXRT.DE (DE) | 2015-12-25, 2017-06-05, 2017-10-03, 2017-10-31, 2018-05-21 |
+
+11 land in the union simulation calendar (2015-12-25 is closed in all three codes →
+dropped). **K (fills on an anomalous day for ≥1 leg) = 0**: the live 5b-1 order stream
+(461 intents, 461 execution records) has **zero** records and **zero** intents on any
+anomalous date.
+
+**Stage-flips** = exactly the four 5b-1 ``BLOCKED`` records, all ``UNWIND`` of a
+2800.HK structure on a consistent-closed day (no price row **and** HK closed):
+2009-01-26, 2009-01-27, 2009-01-28, 2012-04-04 — each confirmed
+``is_valid_day("HK", d) == False`` and absent from ``2800.HK_eod.csv``, and each
+``True`` in ``market_data/holidays/HK.csv``. They are the only blocks.
+
+### Interface ruling (approved)
+- **Contract-population wiring — pricer constructor injection.** ``BasePricer.__init__(
+  ticker_to_calendar_code=None)`` stores a copied map; ``EquityPricer.__init__(provider,
+  ticker_to_calendar_code=None)`` forwards it; ``_build_contract`` stamps
+  ``trading_calendar_code=self._ticker_to_calendar_code.get(ticker)`` and
+  ``settlement_calendar_codes=()``. Both calendar names are added to ``_INFRA_KEYS``, so a
+  leg-dict value can never override the map or reach ``params``. ``resolve_instrument``'s
+  signature is unchanged and **both resolve sites populate automatically** (commit
+  ``_resolve_and_price_leg`` and execution ``_probe``); **no order-side resolve round is
+  added** (the NEW case of the check rule reads the config mapping directly).
+- **`RuleContext` vs `ExecutionContext` — separate least-privilege `RuleContext`.**
+  Rules see ``{date, calendar, ticker_to_calendar_code, active_trades}`` only — **not**
+  ``asset_class_configs``, so no check rule can call a pricer.
+- **Corpse resolved by removal.** ``ExecutionContext.calendar`` (5b-1's reserved field)
+  is **removed**: the approved least-privilege ``RuleContext`` now owns calendar
+  validation, and ``SimulatedExecution`` never read a calendar (availability is
+  data-driven). ``ExecutionContext`` is now ``{active_trades, asset_class_configs}``; the
+  docstring records why there is deliberately no calendar field. Ledger line for the
+  frozen-schema change.
+
+### Disposition change — the four stage-flips (ledgered)
+The four baseline blocks move from ``MATERIALIZED`` + exec-log ``blocked(DATA_MISSING)``
+to **``REJECTED(rule="calendar_validation", code="MARKET_CLOSED")``, no execution record,
+no warning**. The ``REJECTED`` record keeps its ``order_id`` (5a ruling). Orders that
+pass calendar but are data-blocked at execution keep 5b-1's
+``MATERIALIZED`` + exec-log ``blocked(DATA_MISSING)``.
+
+### Gap C amendment
+Task 5b-1's adjudicated Gap C ruling was *"Contract calendar fields populated at
+materialize."* Materialize is deferred, so 5b-2 **amends** that: the fields are populated
+during **``resolve_instrument``** (via the pricer's constructor-injected mapping). This is
+the earliest point a ``Contract`` exists and the only point both the commit and execution
+resolve paths share; materialize will read the already-stamped field when it lands.
+Recorded as an explicit amendment, not a silent deviation.
+
+### Gate B — predict-then-verify (K = 0, strict match)
+Baseline captured on the unmodified 5b-1 tree, applied verified on the patched tree,
+both via one canonical harness (scratch; ``results/`` untouched).
+
+| Artifact | Gate A (5b-1) | Gate B (5b-2) |
+|---|---|---|
+| Normalized stdout SHA | `77bb189198292313d44c84f0f23a6c7fb89de111e246d274011de504ba7dbf62` | **same** |
+| Normalized lines / raw bytes / UUIDs | 257 / 45,932 / 230 | **same** |
+| Trades | 230 | 230 |
+| Event-log digest (canonical) | `8f5c13bb6d70b0848b510ea41bdaed932c280af84a9db7ce895f7c25d1c3eef1` | **same** |
+| Per-leg cost-series digest (canonical) | `cdf6d4eb412a8dbc0b3ccf901b88f5946aa4e5f307d6c3b76b7e103da6d4d32c` | **same** |
+| Raw per-leg cost total | 9,210.661014 | 9,210.661014 |
+| Execution records | 461 (457 FILLED / 4 BLOCKED) | **457 (457 FILLED)** |
+| Dispositions | 461 MATERIALIZED | **457 MATERIALIZED / 4 REJECTED** |
+| stderr | 4 warnings | **0 warnings** |
+
+**Digest-method disclosure (carry-forward).** The historical literals
+``e9a25c6d…`` (cost) and ``e2825941…`` (event) do **not** reproduce under any
+serialization/normalization method tried (a bounded sweep of json/repr/str × token
+substitution). This is the same non-reproducibility 5b-1 flagged for the ``373fc05…``
+stdout literal. Gate A was therefore re-captured for **both** trees under one explicit
+canonical harness (UUID/hex ids re-indexed in first-encounter order, then
+``json.dumps(sort_keys=True)``), and the gate is A ≡ B under that harness. The stdout
+SHA (``77bb1891…``) reproduces **exactly** under the documented method, which is the
+normalization-independent content proof.
+
+**stderr delta (exact):** before = 4 ``UserWarning``s from ``execution.py`` ("data not
+available" on 2009-01-26/27/28, 2012-04-04); after = **0**. The four orders no longer
+reach execution, so no block warning is emitted; the reject is silent by design.
+
+### Tests (Gate C, per the reviewer's split)
+- **Required suite (hermetic),** ``tests/test_check_rules.py`` (25 tests): ``Verdict``
+  invariants; NEW open/weekend/holiday/unknown-code(**FileNotFoundError**)/unmapped/
+  no-legs/multi-leg; UNWIND branch-for-branch (unwind-all, ``trade_id=X`` ignoring
+  ``info``, ``trade_id=None``+info silent-noop, unknown ``trade_id``, no-contract-code,
+  contract-code-not-ticker-map); ``RuleChain`` short-circuit / empty / non-callable /
+  ordered; default-chain composition.
+- **Engine-level,** ``TestBacktesterCalendarRule`` (4 tests): the **anomalous** shape
+  (row exists → default chain rejects, no exec record, no warning); the
+  **consistent-closed** shape (no row + calendar closed → rejects under
+  ``simplefilter("error")``, pinning stderr 4→0 at unit level); ``order_rules=[]``
+  disables the chain (same anomalous day then **fills**, proving the chain rejects, not
+  the data); an unmapped ticker passes the default chain.
+- **Real-data precondition (skipif),** ``TestFourBaselinePrecondition``: the four dates
+  in ``market_data/holidays/HK.csv`` and absent from ``2800.HK_eod.csv`` — milliseconds,
+  no backtest run. The 457/4 census is a Gate-B predict-then-verify item, deliberately
+  **not** hardcoded in the suite (it is a property of the example's data, and the default
+  suite must stay fast and ``simple_csv``-only).
+
+### Test-count reconciliation (baseline 464 → applied 499, +35)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| ``tests/test_check_rules.py`` | 0 | 25 | **+25** | new suite |
+| ``tests/test_backtester.py`` | 33 | 37 | **+4** | +4 ``TestBacktesterCalendarRule`` |
+| ``tests/test_pricers.py`` | 12 | 16 | **+4** | +4 calendar-stamp/params-leak/blocks |
+| ``tests/test_instrument.py`` | 17 | 19 | **+2** | +2 ``Contract`` calendar fields |
+| ``tests/test_execution.py`` | 18 | 18 | 0 | ``_ctx`` drops ``calendar`` (no count change) |
+| all other files | 384 | 384 | 0 | untouched |
+| **total** | **464** | **499** | **+35** | |
+
+### Gates (applied tree)
+```
+Gate A  baseline (5b-1 tree)   stdout 77bb1891…; canonical event 8f5c13bb…, cost cdf6d4eb…;
+                               230 trades, 9,210.661014; 461 exec (457 FILLED/4 BLOCKED)
+Gate B  applied (5b-2 tree)    stdout SHA + both canonical digests MATCH Gate A;
+                               exec 457 (457 FILLED); dispositions 457 MATERIALIZED / 4 REJECTED;
+                               stderr 4 -> 0  -> STRICT MATCH (K=0)
+Gate C  calendar matrix        25 hermetic check-rule tests + 4 engine-level (anomalous +
+                               consistent-closed) + four-date precondition (skipif): pass
+Gate D  python -m pytest -q    499 passed, 2 warnings
+Gate E  greps                  rule chain wired, only calendar_validation_rule populated;
+                               trading_calendar_code stamped from the config map;
+                               _check_data_available ZERO; warnings.warn only in
+                               SimulatedExecution (+ pre-existing csv_backend/summary);
+                               resolve_instrument never called order-side
+```
+
+### Contract equality (low-risk, logged)
+Adding the two fields changes the frozen ``Contract.__eq__``/``__hash__``: a
+``resolve_instrument`` product for a **mapped** ticker (stamped code) no longer equals a
+hand-built ``Contract(ticker=..., asset_class=...)``. Expected impact **zero** — the
+mapping-set pricers appear only in the new tests, which assert attributes, not equality;
+all existing ``Contract(...)`` sites are unmapped. Logged so any future equality failure
+is diagnosed as this field addition, not mystery-hunted.
+
+### Doc-sync (grep-based sweep)
+``design_notes.md``: §2 tree (5a/5b module inventory); §3.1 ``Contract`` calendar fields;
+§3.2/§3.13 cost exposure now execution-side (``write_cost_exposures``); §3.4 init sequence;
+§3.5 implemented tense + ``prev_valid_day``; §3.6 cost-exposure caller + **cache key
+excludes calendar codes**; §3.7 rewritten to the as-built signal/``DataView``/intent
+interface; §3.8 rewritten to the **two-chain** order assembly (synthesis vs check) with
+``CalendarValidationRule``; §3.9 daily loop + internal state (intent + execution logs);
+§3.15 architecture diagram; §5 Phase 2 split into 5a/5b-1/5b-2; §10 reconciliation
+paragraph. ``docs/phase2_plan.md``: Task 5 split into three done steps; the stale
+``requires_*`` Phase 3+ item marked resolved by 5a. ``README.md``: signal interface
+(``generate_intents``), project tree, usage, and test counts (stale literals **248 / 268**
+→ **499**; actual run before = **464**, after = **499**).
+
+### Applied byte record (SHA-256)
+| File | SHA-256 |
+|---|---|
+| ``backtester/check_rules.py`` | `1B8EF053F1EED1E9B3C4301C65FC4DC3E40A93E7A4477AF1E5391C80C23B0F9E` |
+| ``backtester/instruments.py`` | `4045E214CA7F5A41EB68FF379EB05A3FF16E01D6B63FB30EE30EF65F37D24B4D` |
+| ``backtester/pricers/base_pricer.py`` | `82025AFDDCBB42D2DEBD96C30FD004DCD790D340F795E17DEDB59A85F44B9025` |
+| ``backtester/pricers/equity_pricer.py`` | `BCD49778F6605BD568ED4D984DBD4C59170118659CCEC2E81D560B17BD30D62D` |
+| ``backtester/execution.py`` | `3D60E13F546CC535CFABF713700431B538BA94010E2C3495DEF6BA7FB7446E08` |
+| ``backtester/backtest_engine.py`` | `582F7F190266101B1270E62E44E3E4818E544D024FA0D9DE33C62D6DC100CE3B` |
+| ``examples/sma_crossover_example.py`` | `873263237F8806B3B461CA15094584A50E6DD9B7BF443BD524723DEF043F6E73` |
+| ``tests/test_check_rules.py`` | `C1A3F5A36F6119E7493C40F03908A2967B838ED6D8D0E1552538E87369BE4624` |
+| ``tests/test_instrument.py`` | `2B99E53D87F927E1F75E11B96070C4A3AE26FF0AA89D195314C033EEBF0A07C7` |
+| ``tests/test_pricers.py`` | `F80969B52F776D3DD366ADE47D156089E1F1E5314670F1F0A8F9A11FE8DFF57F` |
+| ``tests/test_backtester.py`` | `49C24DC1551BE01A74FBC1D7AF789752B74F3C9F86A77007E82F727BB4260616` |
+| ``tests/test_execution.py`` | `90825FA46BCB98904AFEEC70D40E5A0E9128B8CBDF0C261E5671140AF8EF12B9` |
+
+``git status``: the pre-existing ``.gitignore`` edit plus the combined 5a/5b change set;
+``backtester/check_rules.py`` and ``tests/test_check_rules.py`` new; ``results/``
+contributes nothing; ``scripts/`` untouched. No ``git add``, no ``git commit``, no
+``git push``.
+
+Environment: Python 3.12.13 (``D:\anaconda3\envs\backtest\python.exe``), conda env
+``backtest``, pandas 3.0.3, numpy 2.4.6.
+
+**5b-2 complete.**
+
+## 2026-10-04 – Task 5 pre-commit docs/worklog cleanup pass
+
+### Prompt
+Task 5's code is approved for manual review. Before Task 5 is committed as a unit,
+apply a docs-and-worklog-only cleanup driven by the coherence review and its two
+meta-reviews. **No production code is to be modified** — design_notes, phase2_plan,
+README and this worklog only. Five groups: block-commit factual fixes; the
+Phase-1-signal-drift cluster; reservation docs for unused seams/fields; process
+items carried forward (dangling "5b" gates, digest-method reconcile); and decisions
+to surface, not make.
+
+### Changes applied
+
+**Group 1 — block-commit factual fixes**
+- `docs/worklog_phase2.md` (5b-2 entry): "the five 5b-1 data-availability blocks" →
+  **four** (the 5b-1 Entry recorded 4 BLOCKED and 5b-2 flips four).
+- `docs/phase2_plan.md`: Task 5's three sub-step checkboxes (5a, 5b-1, 5b-2) reverted
+  to `[ ]` pending manual review. Task 4's `[x]` left untouched (already reviewed and
+  committed; only Task 5's were premature).
+- `design_notes.md` §7 (conventions): added a paragraph defining the **vintage rule**
+  ("T informs what happened, never what we decided"): the order side reads `≤ T-1`
+  plus advance-known data, the execution side owns T; noted it underpins the
+  no-order-side-`resolve_instrument` rule.
+
+**Group 2 — doc-drift cluster (Phase-1 signal-returns-TargetTrade superseded)**
+- `design_notes.md` §3.9 ("No pre-defined instrument universe"): signals return
+  `Intent`s; synthesis produces the `TargetTrade` dict.
+- `design_notes.md` §7 (Signal lag): the signal no longer handles the lag internally;
+  the `DataView` structurally clamps it to T-1.
+- `design_notes.md` §9 pillar table and §8.3 execution-data row: the research pillar
+  produces `Intent`s; `TargetTrade` is internal to the synthesis/execution seam.
+- `design_notes.md` §5 Phase 1 build order items 7–8: left as historical text with a
+  supersession parenthetical ("superseded in Task 5a — see Phase 2"), not rewritten.
+- `README.md`: badge → "phase-2A + Task 5"; Phase 2 roadmap row → in progress (Phase 2A
+  Tasks 1–4 + Task 5); architecture arrow now includes the synthesis/check/execution
+  seams; corrected the closed-market sentence (a closed leg's **order** is rejected by
+  `CalendarValidationRule`; a held leg simply has no price); usage step now lists
+  `data_feed`, `order_synthesis`, `order_rules`, `execution_backend`.
+
+**Group 3 — reservation docs (naming the future consumer)**
+- `design_notes.md` §3.7: `Intent.origin_intent_id` documented as reserved for
+  synthesis-plugin provenance (Roll/Scaling in 5c); flagged as a removal candidate if
+  no consumer lands.
+- `design_notes.md` §3.8: the `NO_ORDER` dropped-intent branch documented, with the
+  **open question** that `REJECTED(synthesis, NO_ORDER)` may mislabel a synthesis-stage
+  drop (taxonomy reserves synthesis outcomes for net/transfer) — to resolve in 5c.
+- `design_notes.md` §3.8: `AggregationContext.execution_log` / `.calendar` / `.config`
+  documented as reserved for synthesis plugins, contrasting the removed
+  `ExecutionContext.calendar` (consumer moved to `RuleContext`); explicitly "do not
+  remove as unused".
+- `design_notes.md` §3.9: `IntentRecord.order_id` noted as load-bearing for `REJECTED`
+  (keeps the id without a `MATERIALIZED` disposition) and redundant-with-disposition
+  for `MATERIALIZED`.
+
+**Group 4 — process items carried forward**
+- `docs/phase2_plan.md`: added a "Task 5 follow-ups — dangling gates re-pointed to 5c /
+  plugin milestone" subsection with four checkboxes (sizing-bridge removal; `WorkingSet`
+  signature widening before Netting; stamping intermediate stage; explicit unwind-all
+  form) — previously pinned to the now-nonexistent "5b" milestone.
+- `docs/phase2_plan.md`: added an "Open item — digest-method reconcile" subsection
+  recording the non-reproducing historical digest literals and the A≡B-session-only
+  canonical harness, with the two options (canonical-method-plus-verified-literal, or
+  session-comparative-only), explicitly **not decided**.
+
+**Group 5 — decisions surfaced, not made**
+- Digest-method reconcile (recorded open in `phase2_plan.md`).
+- `origin_intent_id`: remove or populate in 5c (recorded in `design_notes.md` §3.7).
+- `NO_ORDER` disposition relabel (recorded open in `design_notes.md` §3.8).
+
+### Test impact
+None — documentation only. No production code touched; no test file touched.
+
+### Manual changes
+- None.
+
+### Suggested commit message
+```
+docs: Task 5 pre-commit cleanup — drift fixes, reservation notes, carried-forward gates
+
+- worklog: correct five -> four 5b-1 data-availability blocks (5b-2 entry)
+- phase2_plan: revert Task 5 sub-step checkboxes to [ ] pending manual review
+  (Task 4 [x] left as already-reviewed); re-point dangling "5b" gates to 5c /
+  plugin milestone; record digest-method reconcile as an open owner decision
+- design_notes §7: define the vintage rule (T informs what happened, never what
+  we decided; order side <= T-1, execution side owns T)
+- design_notes §3.9/§7/§9/§8.3: signal returns Intent not TargetTrade; DataView
+  owns the lag; TargetTrade internal to the synthesis/execution seam; §5 Phase-1
+  build order annotated as superseded rather than rewritten
+- design_notes §3.7/§3.8/§3.9: reservation notes for origin_intent_id, the
+  NO_ORDER branch (open taxonomy question), AggregationContext execution_log/
+  calendar/config, and IntentRecord.order_id semantics
+- README: badge/roadmap reflect Phase 2A + Task 5; architecture arrow adds the
+  synthesis/check/execution seams; closed-market sentence corrected; usage lists
+  data_feed/order_synthesis/order_rules/execution_backend
+- Docs-only; no production code changed
+```
+
+## 2026-10-06 – Intent identity/scope re-work
+
+### Scope
+Re-works the intent identity/scope model after the ruling checkpoint was sent
+back.  Three corrections: (A) UNWIND covers all three scopes again
+(structure / whole-trade / whole-book); (B) the modification quantity moves off
+the structure type to the intent; (C) netting becomes an execution-phase
+concern, so the intent disposition vocabulary drops `NETTED` / `TRANSFER`.
+Representation change only: the example's normalized stdout is byte-identical
+(session SHA `b9cef8ea…`, 257 lines, 39,639 normalized bytes, 46,189 raw bytes,
+230 UUIDs, 0 stderr).
+
+### Schema (as built)
+- **`StructureIntent`** — a structure's *content*: `legs` and `tags` only.  No
+  `structure_id` (engine-assigned) and no `size` (a modification-event
+  parameter).  A content spec; legs are non-empty whenever it describes new
+  content, validated per action.
+- **`Intent`** — `intent_id`, `strategy_id`, `action`, `provenance`,
+  `structures: tuple[StructureIntent, ...]`, `trade_id`, `structure_id`,
+  `size`, `origin_intent_id`, `emission_date`, `tags`.
+  - `structures` carries the content a NEW/ROLL introduces (1+ structures).
+  - `trade_id` scopes trade-level ops (NEW-extend, UNWIND-whole-trade);
+    `structure_id` scopes structure-level ops (UNWIND-structure, partial-add,
+    ROLL); NEW-create and unwound-book carry neither.
+  - `size` is the partial-add amount or partial-unwind quantity.
+- **NEW sub-cases:** create (`trade_id=None`, structures without ids), extend
+  (`trade_id` set, structures without ids), partial-add (`trade_id` +
+  `structure_id` + positive `size`, no structures).
+- **UNWIND scopes:** whole book (`trade_id=None`, `info=[]`), whole trade
+  (`trade_id` set, `info=[]`), one structure (`structure_id` set, optional
+  partial `size`).
+- **`origin_intent_id`** is replacement lineage: a plugin emitting a modified
+  version of an existing intent sets it to the predecessor's `intent_id`; a
+  brand-new intent leaves it `None`; otherwise `None`.  Attribution for plugin
+  output is carried by `provenance` alone.  (design_notes.md §3.7 is the
+  governing authority; there is no standalone design summary in the repo, so
+  this is "corrected against §3.7".)
+- **Netting rule.**  The intent layer is netting-agnostic: a netted order is
+  still `MATERIALIZED` (handed off) and position accounting reflects the
+  economic effect; netting is realized as an internal transfer in the execution
+  log.  `DispositionKind` now carries only `MATERIALIZED` / `REJECTED` /
+  `MODIFIED`.  `TransferEvent`, `WorkingSet.transfers` and
+  `ExecutionReport.internal_transfer` are retained.
+
+### Amendments (explicit, not quiet supersessions)
+- **Amendment of the 5a "one intent per structure" pin.**  Replaced by the
+  granularity rule: one NEW per trade creation or trade extension; one UNWIND
+  per scope addressed; one ROLL per structure; decomposition remains a no-op.
+- **Amendment of the Task 5 disposition taxonomy.**  `NETTED` / `TRANSFER`
+  removed from `DispositionKind` with their `Disposition.netted()` /
+  `.transferred()` constructors.  Rationale (same as the `origin_intent_id`
+  amendment): netting is an execution/synthesis-layer manifestation, not an
+  intent disposition.  Condition (2a) verified before removal: the only
+  construction sites were `intents.py` (the enum + two classmethods) and
+  `tests/test_intents.py`; nothing in production, the engine or execution
+  constructed them.
+- **`StructureIntent.structure_id` removal, led as a corpse.**  The engine
+  assigns structure ids; a reference to an existing structure is
+  `Intent.structure_id`.  Expressiveness note: the `TargetTrade` format can name
+  a new structure's id, but the intent layer now cannot, and no consumer exists.
+- **`origin_intent_id` corrected against §3.7.**  Replacement lineage, not
+  plugin provenance; provenance alone carries attribution.
+
+### `intent_log.py`
+- Now indexes by `structure_id` **and** `trade_id`, in addition to
+  `strategy_id` and `intent_id`.  A creation intent (no structure, no trade)
+  appears in the log by `intent_id` only, with no scope index.  `by_trade` is
+  intended for trade-scoped queries (cooldown / scaling).  Log-level tests cover
+  both indices.
+
+### Docstring/comment sweep
+- No "legacy" naming, no task-phase references, present-tense descriptions.
+- **Sweep broadened** beyond the originally-listed files to `execution.py`,
+  `data_view.py`, `position_books.py` and `check_rules.py` — deliberate, for
+  codebase consistency; docstring/comment-only.
+- `legacy_size` / `intent_from_legacy` / `LEG_DICT_INFRA_KEYS` /
+  `legacy_order_shim.py` accepted as-is (API surface, not prose).
+
+### ROLL
+- Conversion is schema-complete (`old_structure_id` + `new_structure.legs` from
+  the single `StructureIntent`); execution still raises `NotImplementedError`.
+  `new_structure` structure-level tags are **deferred** — the corpus case lands
+  when ROLL execution is implemented.
+
+### Known limitation (recorded)
+- The converter's structure↔trade consistency check fails loudly when a
+  referenced structure is absent from the T-1 book.  A same-day open-then-modify
+  therefore cannot be expressed through intents (signals see only T-1); this is
+  intentional fail-loud, ledgered as a known limitation.
+
+### Corpus (`tests/test_order_synthesis.py`)
+Existing 8 cases migrated in place (byte-identity unchanged): NEW/ROLL become
+one-element `structures` lists; UNWIND-all / structure-full / structure-partial
+use `structures=()` plus top-level `structure_id` (+ `size`).  New cases:
+`new_multi_structure`, `new_add_structures_to_existing_trade`,
+`new_partial_add_to_structure`, `unwind_whole_trade`.  Each is pinned by
+`==` and `repr ==`, plus the shim round-trip.
+
+### Test-count reconciliation (baseline 499 → applied 528, +29)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| `tests/test_intents.py` | 63 | 75 | **+12** | +`TestIntentShapeMatrix` (11) + 2 log-index tests; −1 obsolete NEW-structure-id test |
+| `tests/test_order_synthesis.py` | 45 | 60 | **+15** | +4 corpus cases ×3 assertions = +12; +3 fail-loud (structure/trade mismatch, missing-from-book) |
+| `tests/test_signal.py` | 20 | 20 | 0 | unwound-leg-side test replaced by short-structure test |
+| `tests/test_backtester.py` | 37 | 38 | **+1** | +`test_whole_trade_unwind_round_trips_through_the_loop` |
+| all other files | 334 | 334 | 0 | untouched |
+| **total** | **499** | **528** | **+29** | |
+
+### Gates (applied tree)
+```
+Gate A  baseline  session SHA b9cef8ea…; normalized 257 lines / 39,639 bytes;
+                  raw 46,189 bytes / 230 UUIDs / 0 stderr
+Gate B  applied   session SHA b9cef8ea… (IDENTICAL); normalized bytes 39,639;
+                  raw bytes 46,189; 257 lines; 230 UUIDs; stderr 0
+        normalized stdout A/B diff: 0 differing lines
+Gate C  converter corpus  12/12 byte-identical (== and repr), shim round-trip
+Gate D  python -m pytest -q  528 passed, 2 warnings
+Gate E  greps     no "legacy"/"5a"/"5b"/"Phase 1" in the touched modules'
+                  docstrings/comments except the accepted API names
+```
+
+Environment: Python 3.12.13 (`D:\anaconda3\envs\backtest\python.exe`), conda env
+`backtest`.
+
+**Intent re-work complete.**
+
+## 2026-10-14 – Single-action subset: schema restructure + rename + doc lock
+
+### Prompt
+Land the locked Intent Schema & Execution Flow architecture: the single-action
+subset of the pre-agreed design, the fourth naming pass (`Intent` → `ActionGroup`
+et al.), the split validation, the named gates, and the design lock into
+`design_notes.md`.  Roll/flip/delta-hedge/scaling/netting/multi-action/multi-leg/
+short partial modifications are **out of scope** — schema/skeleton only, gated.
+The SMA example must stay output-byte-identical.
+
+### Canonical-SHA baseline method (R7)
+Adopted a **position-independent, UUID-substituted** canonical method: each UUID
+token (dashed 8-4-4-4-12 or 32-hex) is replaced with a sequential `UUID_0001…`
+in first-encounter order, then SHA-256.  Re-baselined **once on the unmodified
+tree** from a **scratch copy** (repo `results/` never written).  Baseline and
+applied are identical:
+
+```
+Gate A (scratch, unmodified)  SHA  cc6b08fbfa7466dca4f9084a37998775db9100b5af09a13409b1a2118ed62560
+                              257 lines / 39979 normalized bytes / 46189 raw / 230 UUIDs / 0 stderr
+Gate B (scratch, applied)     SHA  cc6b08fbfa7466dca4f9084a37998775db9100b5af09a13409b1a2118ed62560  -> IDENTICAL
+```
+
+Content digests stay **session-comparative by scope choice, not limitation**
+(same harness, same session; no reproducible literal is required).
+
+### Schema restructure + rename (supersedes the prior intent schema)
+- `Intent` → `ActionGroup`; `LegIntent` → `LegSpec`; `StructureIntent` →
+  `StructureSpec`; new `TradeSpec` and `Action`.
+- `intent_id` → `action_group_id`; `origin_intent_id` → `origin`;
+  `IntentRecord` → `ActionGroupRecord`; `IntentLog` → `ActionGroupLog`;
+  `IntentLogView` → `ActionGroupLogView`; `WorkingSet` → `OrderGroup`.
+- Modules: `intents.py` → `actions.py`; `intent_log.py` → `action_group_log.py`.
+- `LegIntent.legacy_size` → `LegSpec.signed_size`;
+  `intent_to_target_trade` → `action_group_to_order_group` (+ `action_to_order`);
+  `leg_dict_from_intent` → `leg_dict_from_spec`;
+  `BaseSignal.generate_intents` → `generate_action_groups`.
+- `tests/legacy_order_shim.py` → `tests/order_shim.py`;
+  `intent_from_legacy` → `action_group_from_order`;
+  `tests/test_intents.py` → `tests/test_actions.py`.
+- `ActionGroup.tags` dropped (anti-corpse: new never-emitted surface with no
+  consumer; trade-level tags moved to `TradeSpec.tags`).
+- **Half-rename coherence ruling:** objects/modules renamed to Action names; the
+  layer/concept names "intent synthesis" / "intent log" retained in prose, with
+  a docstring sentence in `actions.py` explaining the concept/object split.
+- Execution-log chain fully renamed: `ExecutionRecord.intent_id` →
+  `action_group_id` (also `ExecutionRequest` / `ExecutionReport`); no
+  half-rename of the id chain.
+
+### Action schema (as built)
+- `Action(type, spec, trade_id, structure_id, quantity)` — one spec per action.
+- Construction-time matrix in `Action.__post_init__` (fail-loud on unlisted
+  shapes); `quantity > 0` when present; spec type matches shape.
+- Conversion-time checks: partial-unwind bound `0 < quantity < |anchor_current|`
+  and structure↔trade consistency.
+- **Anchor leg:** `StructureSpec.legs[0]`; modifications apply to it, other legs
+  scale proportionally.
+- **Signed quantity:** `|anchor_new| = |anchor_current| + (NEW ? +q : −q)`,
+  `anchor_new = sign(anchor_current) × |anchor_new|`; action is
+  direction-agnostic, the delta side comes from the leg's `Side`.
+- **Fractional policy (interim):** intent keeps exact fractional values; the
+  lot-sizing mechanism is deferred; current behaviour is a straight
+  **passthrough**.  No lot-sizing config built.
+- **Provenance:** closed set; `netting_rule` **removed** (netting is not an
+  intent source); `roll_rule` retained as a conscious reserved constant.
+
+### Gates (fail-loud; schema accepts, pipeline/conversion rejects)
+- **Multi-action groups** — pipeline rejection at `OrderSynthesis.synthesize`
+  top, before order conversion (NOT in `ActionGroup.__init__`).
+- **Multi-leg modifications** and **short-structure partial modifications** —
+  conversion-time gates in `order_synthesis`.
+- Rule-emitted groups that were never appended are rejected: **the multi-action
+  crash is intended; orphaned records are terminal**.  **Rule-emitted groups are
+  rejected until the stamping stage lands; the pre-stamp workaround is now
+  structurally forbidden.**  Consolidated in the `phase2_plan.md` gate registry.
+
+### `synthesize` return + OrderGroup correspondence
+`synthesize` returns `tuple[OrderGroup, ...]` — exactly one OrderGroup per input
+ActionGroup, **positionally aligned**; a rule-dropped group yields an **empty
+OrderGroup**, which the dispatcher maps to `REJECTED(synthesis, NO_ORDER)`.
+`OrderGroup` carries no `action_group_id` (paired by zip; lineage reserved on the
+execution log).
+
+### Entry-date framing and empty-trade deferral
+Trade entry date is fixed from open to close; the trade exits when its last
+structure closes.  Empty-trade removal and `exit_date` are **deferred until the
+ActionGroup completes** (engine-program surface, unbuilt; trivially satisfied
+under the single-action gate).  Consequence recorded: an empty-but-unremoved
+trade is same-day re-openable.
+
+### Engine findings (recorded, NOT fixed — both already gated)
+- `StrategyStructure.add_size` / `unwind` distribute by **share-of-total**
+  (`size_key / total_size`), not an anchor-uniform factor.  For a single-leg
+  structure the two coincide; multi-leg modification is gated.
+- A partial add/unwind runs in the **wrong direction on a short** structure;
+  short-structure modification is gated.  Recorded in code comments in
+  `execution.py` / `order_synthesis.py` and here.
+
+### `SimulatedExecution` all-or-nothing (documented as-built)
+`SimulatedExecution` fills an order in full or blocks it entirely — no partial
+fills in the backtest.  Live partial-fill handling is deferred; documented as
+as-built behavior, not a new decision.
+
+### Netting (future slot, documented only)
+Netting input = orders organized by originating group + lineage; detect rolls
+*before* net.  Execution-log lineage reservation: `order ↔ action ↔ trade ↔
+group`.  `OrderGroup` carries no back-reference by design.
+
+### Test-count reconciliation (baseline 528 → applied 553, +25)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| `tests/test_actions.py` (was `test_intents.py`) | 75 | 94 | **+19** | shape-matrix rows, anchor-leg, signed-quantity, per-action log index + once-per-bucket, ActionGroup ≥1-action/provenance, frozen context |
+| `tests/test_order_synthesis.py` | 60 | 66 | **+6** | −3 (roll corpus) +3 (resolver corpus) +1 tag round-trip +1 bounded unwind +1 short partial-add +4 gates +1 plugin-chain −1 fail-loud −2 fold (retained coverage) |
+| `tests/test_signal.py` | 20 | 20 | 0 | rename only |
+| `tests/test_backtester.py` | 38 | 38 | 0 | ROLL test migrated to direct `_execute_order`; rename only |
+| all other files | 335 | 335 | 0 | import/rename only |
+| **total** | **528** | **553** | **+25** | |
+
+### Gates (applied tree)
+```
+Gate A  scratch baseline (unmodified)  SHA cc6b08fb…; 257 lines / 39979 bytes
+Gate B  scratch applied                SHA cc6b08fb… (IDENTICAL); repo results/ never written
+        renamed symbols in user output: none
+Gate C  converter corpus  12/12 byte-identical (== and repr), shim round-trip, tag round-trip
+Gate D  python -m pytest -q  553 passed, 2 warnings
+Gate E  greps  no standalone "materialize"; no "netting_rule" (intentional-absence note + negative test only);
+                "within-group" consistent (absent); intent-symbol sweep complete (concept prose only)
+```
+
+Environment: Python 3.12.13 (`D:\anaconda3\envs\backtest\python.exe`), conda env
+`backtest`.
+
+## 2026-10-17 – Structure-scoped ops: `trade_id` required, resolver path removed
+
+### Prompt
+Make `trade_id` **required** on all structure-scoped operations (partial add and
+both UNWIND forms).  The optional-`trade_id` resolve-from-book path was a vestige
+of the old flat Intent design: both cases have `structure_id`, and the signal
+already has the `trade_id` via `PositionBook`.  Only NEW-extend is genuinely
+unresolvable (the structure does not exist yet), and it was already required.
+The example's emitted order dicts must stay byte-identical.
+
+### Matrix change
+| type | spec | trade_id | structure_id | quantity |
+|---|---|---|---|---|
+| `NEW` | `TradeSpec` | – | – | – |
+| `NEW` | `StructureSpec` | ✓ | – | – |
+| `NEW` | – | ✓ | ✓ | ✓ (>0) |
+| `UNWIND` | – | **✓** | ✓ | ✓ (>0) |
+| `UNWIND` | – | **✓** | ✓ | – |
+| `UNWIND` | – | ✓ | – | – |
+| `UNWIND` | – | – | – | – |
+
+The two structure-scoped rows flipped from *optional* to required.
+
+### Changes applied
+- `backtester/actions.py` — `_validate_unwind` rejects a structure-scoped
+  UNWIND with no `trade_id`; the `Action` docstring matrix and the module-level
+  identity/scope paragraph updated.  Error precedence: spec → scope identity →
+  quantity.
+- `backtester/order_synthesis.py` — `_unwind_order` emits `action.trade_id`
+  directly; `_resolve_trade_id` **deleted** (its only caller was the removed
+  branch); `_validate_structure_trade` guard simplified to the structure id
+  (both callers always pass a trade id now); module/function docstrings updated.
+- `backtester/signals/sma_crossover.py` — the UNWIND action passes
+  `trade_id=holding.trade_id`.
+- `backtester/position_books.py` — docstring-only: the registry is now the
+  validator's path, not the resolver's.
+- `tests/test_actions.py` — structure UNWIND fixtures carry `trade_id`; the
+  optional-trade-id test replaced by a required-trade-id negative test.
+- `tests/test_signal.py` — asserts the UNWIND action carries `trade_1`.
+- `tests/test_order_synthesis.py` — resolver corpus case and resolver assertion
+  test removed (they now duplicate the explicit cases); remaining
+  structure-scoped fixtures carry `trade_id`; unknown-structure expectation
+  moved to the validator message (`not present in the T-1 book`).
+- `tests/order_shim.py` — docstring-only: the structure UNWIND shape now names
+  both `trade_id` and `structure_id`.
+- `design_notes.md` — matrix rows and the SMACrossoverSignal bullet updated.
+
+### Ripple effects found (and disposition)
+- `ActionGroupLog` now also indexes structure-scoped UNWINDs under `trade_id`.
+  This matches its documented per-action indexing; no test changed.
+- `tests/order_shim.py` and `tests/test_backtester.py` needed **no functional
+  edits**: the shim already forwards `order["trade_id"]`, and every
+  structure-scoped order dict in those tests already sets it.
+- Historical `test_check_rules.py` / `test_execution.py` "silent no-op"
+  fixtures build order dicts directly (no `Action`), so the schema change does
+  not affect them; the engine-side behaviour is intentionally unchanged.
+
+### Byte-identity (SMA example)
+The signal previously emitted `trade_id=None` and the converter resolved it via
+`book.trade_id_for_structure(structure_id)`.  Now the signal passes
+`holding.trade_id`.  Both read the same frozen T-1 snapshot: `find_holding`
+returns the trade owning the matched structure, and `trade_id_for_structure`
+returns the unique owner of that structure id — the same string (`trade_1` in
+the fixture).  The emitted dict is unchanged:
+`{"Action": "UNWIND", "trade_id": "trade_1", "info": [{"structure_id": "S1"}]}`.
+The integration example ran end-to-end successfully.
+
+### Test-count reconciliation (baseline 553 → applied 550, −3)
+| Test file | Before | After | Delta | Explained by |
+|---|---:|---:|---:|---|
+| `tests/test_actions.py` | 94 | 95 | **+1** | −1 optional-id test, +2 (full-structure, required-id) |
+| `tests/test_order_synthesis.py` | 66 | 62 | **−4** | −1 resolver corpus (×3 parametrized) −1 resolver assertion |
+| `tests/test_signal.py` | 20 | 20 | 0 | assertion updated only |
+| all other files | 335 | 335 | 0 | no edits |
+| **total** | **553** | **550** | **−3** | |
+
+### Gates (applied tree)
+```
+Gate C  converter corpus  11/11 byte-identical (== and repr), shim round-trip
+Gate D  python -m pytest -q  550 passed, 2 warnings
+Gate E  greps  no `_resolve_trade_id` / "resolver path" references remain
+        example  examples/sma_crossover_example.py ran successfully
+```
+
+Environment: Python 3.12.13 (`D:\anaconda3\envs\backtest\python.exe`), conda env
+`backtest`.
+
+### Manual changes
+- Updated ActionGroup description.
+
+## 2026-10-19 – Action-layer disposition taxonomy
+
+### Prompt
+Settle the action-layer disposition taxonomy; rename `MATERIALIZED` →
+`DISPATCHED`; replace `MODIFIED` with `REPLACED`; add per-action outcomes and
+ids; remove the duplicated record-level `order_id`; and finish the
+"intent → action group" prose migration.
+
+### Disposition taxonomy (as built)
+- `DispositionKind = DISPATCHED | REJECTED | REPLACED`.
+- `DISPATCHED` carries `order_id` only.  Whether its actions changed positions
+  is a separate fact (`action_outcomes`).
+- `REJECTED` carries `rule` + `code` only, and no `order_id`: a check-rule
+  reject never reaches dispatch.  This clarifies the 5a record-id behavior: a
+  rejected record's `order_id` pointed at a transient `OrderGroup` with no
+  durable referent; the new taxonomy places `order_id` on `DISPATCHED` only.
+  No consumer ever read the field on rejected records.
+- `REPLACED` carries no payload.  A scaling rule supersedes a signal group with
+  derived groups; the derived group carries `original_action_group_id`.
+- `Disposition.modified` / `note` and `Disposition.materialized` are gone.
+
+### Per-action facts and ids
+- `ActionOutcome` is defined locally in `actions.py` (`FILLED | BLOCKED`); it is
+  deliberately not `ExecutionOutcome`.  `ExecutionRecord.status` remains the
+  order-layer fact; they coincide today and will diverge under netting.
+- `ActionGroupLog.append` mints `action_ids`, one per action.
+- `OrderGroup` gains `order_group_id` (minted at construction) and
+  `modification_notes` (parallel to `orders` / `order_ids`), and is now
+  non-empty by construction.  A provided `modification_notes` tuple of the
+  wrong length raises.
+- `ActionGroupRecord` is a hand-written class (not a dataclass) with read-only
+  properties and a single write-once `finalize(disposition, action_outcomes,
+  modification_notes, group_note)`.  The top-level `order_id` is removed;
+  `disposition.order_id` is the single source.
+- `group_note` is reserved group-level surface.  Its first named use is the
+  live partial-fill simplification policy.
+
+### Invariants
+1. `finalize` raises `RuntimeError` on a second call.
+2. `REJECTED` / `REPLACED` ⇒ empty tuple facts and `group_note is None`.
+3. `DISPATCHED` ⇒ one `ActionOutcome` per action and parallel
+   `modification_notes`.
+4. `action_ids` is parallel to `action_group.actions` and read-only.
+5. `ActionGroupLog.append` performs the `REPLACED` transition; a missing or
+   already-terminal original raises `ValueError`.
+
+### Synthesis and modify step
+- `NO_ORDER` and the empty-`OrderGroup` path are removed.  Synthesis never
+  rejects or drops: it auto-generates mechanical actions and replaces signal
+  actions for scaling.  A rule that removes an input group now raises in the
+  output-assembly loop (per-group lookup).
+- The modify step (`_modify_order`) is an equity passthrough: `quantity` /
+  `size` are not rounded, and each order gets a `None` note slot.
+- A future risk/liquidity reduction that would zero size is a rejection, not a
+  modification.
+
+### Prose migration
+- Removed the concept/object split paragraph from `actions.py` and
+  `design_notes.md`.
+- "intent synthesis" → "action group synthesis"; "intent log" →
+  `ActionGroupLog`; object-referring "intent" → "ActionGroup".
+- Historical worklog entries were not rewritten; this entry is the amendment.
+- "drop" removed from synthesis descriptions.
+
+### Field-name findings
+- `ExecutionRequest.action_group_id` (`execution.py:57`) and
+  `ExecutionRecord.action_group_id` (`execution_log.py:37`) were already
+  renamed; no `intent_id` remains.
+- `ActionOutcome` is local to `actions.py`; no import cycle with `execution.py`.
+
+### Scope decisions
+- Partial fills are out of scope: each order fills fully or blocks.  The future
+  composition mapping records quantity contributions per pre-net order, not
+  per-fill allocations.
+- Durable `ExecutionRecord.order_group_id` / `action_id` foreign keys are
+  deferred; the intra-day chain is complete via `action_group_id` and
+  `order_id`.
+
+### Test-count reconciliation (baseline 550 → applied 567, +17)
+| Test file | Before | After | Delta | Explained by |
+|---|---|---:|---:|---|
+| `tests/test_actions.py` | 95 | 110 | **+15** | disposition payload tests, `OrderGroup` invariants, record invariants, replacement-log tests |
+| `tests/test_order_synthesis.py` | 62 | 64 | **+2** | note parallelism, `order_group_id` |
+| `tests/test_backtester.py` | 38 | 38 | 0 | assertions strengthened |
+| all other files | 355 | 355 | 0 | no edits |
+| **total** | **550** | **567** | **+17** | |
+
+README was stale at 553 (actual baseline 550).  The 553 → 567 README update
+includes a three-count correction, not a new discrepancy.  Gate D reports the
+applied count against 550.
+
+### Gates (applied tree)
+```
+Gate A  SMA baseline (scratch)     SHA 9273de8341cc93f5982809df7ccb33b79b63bcd81c21ae0cbf438695aa57bcbe
+                                   258 lines / 39981 normalized bytes / 230 UUIDs / 0 stderr
+Gate B  SMA applied (scratch)      SHA 9273de8341cc93f5982809df7ccb33b79b63bcd81c21ae0cbf438695aa57bcbe
+                                   -> IDENTICAL (canonical diff empty; raw differs only by UUID tokens)
+Gate C  converter corpus           byte-identical (== and repr)
+Gate D  python -m pytest -q        567 passed, 2 warnings
+Gate E  greps                      no MATERIALIZED / MODIFIED / NO_ORDER /
+                                   Disposition.modified / intent-layer prose /
+                                   top-level ActionGroupRecord.order_id
+```
+
+Environment: Python 3.12.13 (`D:\anaconda3\envs\backtest\python.exe`), conda env
+`backtest`.
+
+### Manual changes
+- Updated `README.md` test count (553 → 567) and ActionGroup description.
+
+## 2026-10-21 – Phase A: unwired order layer
+
+### Prompt
+Phase A of a five-phase (A → B1 → B2 → C1 → C2) flattening of the strategy-side
+order layer: add the new order classes only, wired to nothing, so no behaviour
+change is possible by construction.
+
+### Ruling (deviation from the prompt)
+- The prompt's premise that `OrderGroup` is new is wrong: `actions.OrderGroup`
+  already exists (`backtester/actions.py:617`) with a different shape
+  (`orders: tuple[dict, ...]`, plus `order_ids` / `modification_notes` /
+  `transfers`) and is imported by `order_synthesis.py` and
+  `backtest_engine.py`.
+- **User ruling: `OrderGroup` is deferred to Phase B1**, where the existing
+  class is retired at the conversion/dispatch boundary.  Phase A adds only
+  `OrderSide`, `OrderLeg` and `Order`.
+- **File location: new `backtester/orders.py`** (not `actions.py`).  It
+  separates the order layer from the action layer by file and keeps
+  `actions.py` free of any reference to the new module.
+- No name collision for `Order` / `OrderLeg` / `OrderSide`; nothing imports the
+  new module.
+
+### Invariants
+- `OrderSide` is a `str` enum: `BUY` / `SELL`.
+- `OrderLeg.side` coerces via `OrderSide(side)`; `tags` and `params` normalise
+  to tuples; `quantity` is a positive magnitude (`<= 0` raises `ValueError`).
+  The reserved-key check stays in `ContractSpec`.
+- `Order.legs` is non-empty (`ValueError`) and holds only `OrderLeg`
+  (`TypeError`); `structure_id` / `trade_id` default to `None`.
+- All three classes are `frozen=True`.  No `to_dict()`, no `OrderOutcome`, no
+  `notional` / `tenor`.
+
+### Files
+- New: `backtester/orders.py`, `tests/test_orders.py`.
+- Amended: `docs/worklog_phase2.md` (this entry + ToC row 12).
+- No existing source or test file touched.
+
+### Test count (baseline 567 → 583, +16)
+| Test file | Before | After | Delta |
+|---|---:|---:|---:|
+| `tests/test_orders.py` | 0 | 16 | **+16** |
+| all existing files | 567 | 567 | 0 |
+| **total** | **567** | **583** | **+16** |
+
+### Gates (applied tree)
+```
+Gate A  SMA baseline (scratch)   SHA 9273de83… (re-confirmed)
+Gate B  SMA applied              SHA identical to baseline
+Gate C  full suite               python -m pytest -q -> 583 passed
+Gate D  greps                    Order / OrderLeg / OrderSide only in
+                                 orders.py + test_orders.py; no `orders`
+                                 import anywhere else
+```
+Byte-identity holds trivially: the new module is imported by nothing, so the
+SMA example's UUID-normalised stdout is unchanged.
+
+### Scope
+- Phase A of five.  `OrderGroup`, `to_dict()`, conversion/execution rewiring,
+  SMA sizing, `is_tradable`, `CalendarValidationRule` removal and the
+  disposition-taxonomy removal belong to B1/B2/C1/C2.
+
+## 2026-10-22 – Phase B: wire `Order` through conversion, execution and book commit
+
+### Prompt
+Phase B of the A → B1 → B2 → C1 → C2 flattening: retire the compound
+`TargetTrade` dict pipeline and wire `actions.Order` / `OrderLeg` / `OrderSide`
+through conversion, dispatch, execution and book commit.  Byte-identity of the
+SMA example's stdout is the hard gate.  The multi-action gate stays.
+
+### Ruling checkpoint (before edits)
+Baseline re-captured in a scratch copy (`Temp/opencode/phaseb_baseline`; repo
+`results/` never written):
+```
+SMA baseline  SHA 9273de8341cc93f5982809df7ccb33b79b63bcd81c21ae0cbf438695aa57bcbe
+              258 lines / 39,981 normalized bytes / 230 UUIDs / 0 stderr
+```
+Confirmed at the checkpoint with `file:line`: `Action.quantity` (`actions.py:272`),
+`ActionOutcome` (`:411`), the four-fact record (`:490-594`), `TransferEvent`
+(`:598`), the dict `OrderGroup` (`:617-660`), `_modify_order`
+(`order_synthesis.py:106`), `ExecutionRequest` (`execution.py:52`), and the
+compound `_execute_*` commit (`backtest_engine.py:450-617`).
+
+**Dispositions.**  `TransferEvent` and `ActionOutcome` were referenced only by
+the retired classes/tests, so both were **deleted**; `OrderOutcome` takes over.
+
+**Corpus size correction:** the prompt says 12 cases; the corpus had **11**.
+
+**Book-commit equivalence (stated).**  Old: one compound order per ActionGroup →
+one `Trade` per create.  New: filled orders are grouped by `action_id`; with one
+action per group (the gate) and one `action_id` per action (always), this is the
+same one-trade-per-ActionGroup commit.  A structure-scoped single-leg
+modification uses the anchor delta, and `delta / anchor` is exactly the old
+share-of-total fraction (ratio `1`); multi-leg modification stays gated.
+
+**Rulings (user-approved).**
+- **C1 check chain** — kept via a temporary private `Order` → check-view adapter
+  in `_dispatch_synthesized_order`; deleted in Phase C.  Preserves the four
+  calendar rejects, stderr = 0 and every calendar test.
+- **C2 `finalize`** — `finalize(disposition, order_ids, order_outcomes,
+  group_note=None)`: the disposition stays first so `REJECTED` / `REPLACED`
+  survive until Phase C.
+- **C3 tags** — `TradeSpec` / `StructureSpec` tags are not on `Order`; the commit
+  phase derives them from the record's action (needed for the SMA's
+  `short_ma` / `long_ma` trade tags).
+- **C4 test bridge** — `tests/order_shim.py` deleted; `test_backtester.py` now
+  builds `ActionGroup`s via local `_new_trade` / `_unwind` helpers.
+- **C5 execution lineage** — `ExecutionContext` gains
+  `date` / `action_group_id` / `strategy_id`; `ExecutionReport` / `Record` gain
+  `action_id` / `order_group_id` / `probe_status` / `blocked_by` and drop
+  `action: ActionType`.  The ROLL test was deleted with the dict path.
+
+### Source changes
+- `orders.py`: added `OrderOutcome` (`FILLED` / `BLOCKED`) and `OrderGroup`
+  (`order_group_id` minted, non-empty, holds only `Order`).
+- `actions.py`: `Action.quantity` → `size`; `ActionGroupRecord` stores
+  `order_ids` / `order_outcomes` (parallel, write-once) and drops
+  `modification_notes`; `ActionOutcome`, `TransferEvent`, `actions.OrderGroup`
+  removed; `OrderOutcome` imported from `orders.py`.
+- `order_synthesis.py`: rewritten for `Order` conversion
+  (`action_group_to_order_group(action_group, action_ids, ctx)`), with
+  `_delta_legs` (anchor formula), `_full_close_legs`, T-1 `_trade_state`, and
+  fail-loud unresolvable scopes / empty-book whole-book unwind / zero-anchor
+  partial add.  `_modify_order` and the dict producers are gone.
+  `synthesize(action_groups, ctx, action_ids)` threads the log's ids.
+- `execution.py`: `ExecutionRequest` deleted; `execute_group(order_group, ctx)`
+  probes every order, blocks all N on any failure (`probe_status` per order,
+  `blocked_by = DATA_MISSING` or `GROUP_ATOMICITY:<trigger>`), else fills all at
+  T close.  `leg_dict_from_order_leg` is the inverse leg mapping.
+- `execution_log.py`: `ExecutionRecord` carries `action_id`, `order_group_id`,
+  `probe_status`, `blocked_by`.
+- `backtest_engine.py`: `synthesize(..., action_ids)`; dispatch runs the check
+  adapter, calls `execute_group`, writes one execution record per report,
+  finalizes the record with `order_ids` / `order_outcomes`, and commits only on
+  an all-`FILLED` group.  New `_commit_order_group` / `_commit_open` /
+  `_commit_extend` / `_commit_structure` group by `action_id`, raise on a mixed
+  open/target action, and derive tags from the action spec.  The compound
+  `_execute_*` methods are deleted.
+
+### Tests
+- `tests/test_order_synthesis.py` rewritten: `BOOK_CORPUS` (11 cases) is applied
+  through `_apply_orders_to_stub_book` and compared as book state, plus direct
+  `Order` assertions (`action_id`, 32-hex `order_id`, target ids, leg side /
+  quantity / contract extras).  New fail-loud cases: unknown trade, empty-book
+  unwind, zero-anchor add, mismatched `action_ids`.
+- `tests/test_execution.py` rebuilt on `OrderGroup`; adds group atomicity and
+  lineage tests.  `tests/test_execution_log.py` adds the new fields.
+- `tests/test_actions.py` / `test_orders.py` migrated to `size` / `OrderOutcome`
+  and the moved `OrderGroup` tests.  `tests/test_signal.py` reads `action.size`.
+- `tests/order_shim.py` deleted; `test_backtester.py` rewritten to emit
+  `ActionGroup`s and to drive unwind equivalence through the real dispatch path.
+
+### Test-count reconciliation (baseline 583 → applied 595, +12)
+| Test file | Before | After | Delta |
+|---|---:|---:|---:|
+| `tests/test_actions.py` | 110 | 108 | **−2** |
+| `tests/test_backtester.py` | 38 | 37 | **−1** |
+| `tests/test_execution.py` | 18 | 21 | **+3** |
+| `tests/test_execution_log.py` | 9 | 10 | **+1** |
+| `tests/test_order_synthesis.py` | 64 | 68 | **+4** |
+| `tests/test_orders.py` | 16 | 23 | **+7** |
+| all other files | 328 | 328 | 0 |
+| **total** | **583** | **595** | **+12** |
+
+### Gates (applied tree)
+```
+Gate A  SMA baseline (scratch, pre-edit)   SHA 9273de83…; 258 lines / 39,981 bytes / 230 UUIDs / 0 stderr
+Gate B  SMA applied  (scratch)             SHA 9273de83… -> IDENTICAL (canonical diff empty)
+Gate C  full suite                         python -m pytest -q -> 595 passed, 2 warnings
+Gate D  greps                              no actions.OrderGroup / _modify_order /
+                                           Action.quantity / ExecutionRequest / TransferEvent /
+                                           ActionOutcome / modification_notes / action_outcomes /
+                                           order_shim / TargetTrade / compound-dict prose
+Gate E  untouched                          sma_crossover.py 1c45240a…, data_view.py 906c4e45…
+                                           (sizing_price at data_view.py:169)
+```
+
+Environment: Python 3.12 (`conda run -n backtest`).  `results/` not written by
+the gates (both scratch copies).
+
+### Scope
+- Phase B of five.  The check-chain adapter, `Disposition` /
+  `DispositionKind` / `REPLACED`, `check_rules.py`, SMA sizing and
+  `data_view.sizing_price` are untouched by design and belong to C1/C2.
+
+## 2026-10-22 – Phase C: SMA T‑1 fractional sizing, `is_tradable`, remove check rules + disposition taxonomy
+
+### Prompt
+Final phase of the flattening.  Intentional **break** of SMA stdout
+byte-identity (the only phase that does), **stderr stays 0**.  Signals emit only
+tradable actions via `BaseSignal.is_tradable`; no check rules; no disposition
+taxonomy; SMA sizes fractional at the T-1 reference close.
+
+### Merged-scope note (C1 + C2)
+Disposition-taxonomy removal is bundled with the SMA sizing change rather than
+split out.  Consequence: the disposition removal is **not protected by a
+byte-identity gate** (stdout breaks anyway).  It is protected only by invariant
+tests on `ActionGroupRecord.finalize` and by the fact that it is dead-code
+removal — post-B the `Disposition` field was only ever *written*, never read by
+consumer-visible behaviour.
+
+### Ruling checkpoint (verified before edits)
+```
+SMA baseline (scratch, canonical)  SHA cc6b08fbfa7466dca4f9084a37998775db9100b5af09a13409b1a2118ed62560
+                                  257 lines / 46,189 raw / 39,979 normalized / 230 UUIDs / 0 stderr
+SMA predicted (staged)             SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+Baseline collected tests           595
+```
+- SMA signature `generate_action_groups(self, data_view, action_group_log,
+  position_book)`; T is `data_view.date`.
+- `CalendarProvider.is_valid_day(holiday_code, date) -> bool`.
+  Calendar codes: `BacktestConfig.simulation_calendar_codes` (union) and the
+  existing per-ticker `BacktestConfig.ticker_to_calendar_code` (reused, not
+  duplicated).
+- Unmapped-ticker policy: **fail-closed** with a configured provider
+  (`ValueError`); calendar-blind when no provider.
+- Price guard `price is None or price <= 0` preserved.  The old
+  `shares <= 0` early return is **retained**: under fractional sizing it is
+  unreachable for a positive notional/price, but reachable for a non-positive
+  `notional`, so it stays as a cheap config guard.
+
+### Calendar-gating equivalence (the four HK-closed days)
+| date | pre-C | post-C | eventual exit |
+|---|---|---|---|
+| 2009-01-26 | UNWIND emitted, rejected downstream | no emission / no record | — |
+| 2009-01-27 | UNWIND emitted, rejected downstream | no emission / no record | — |
+| 2009-01-28 | UNWIND emitted, rejected downstream | no emission / no record | — |
+| 2009-01-29 | UNWIND fills | UNWIND fills | **2009-01-29** |
+| 2012-04-04 | UNWIND emitted, rejected downstream | no emission / no record | — |
+| 2012-04-05 | UNWIND fills | UNWIND fills | **2012-04-05** |
+
+Demonstrated, not asserted: the signal is stateless and re-emits the cross on
+the next open day, so the eventual close is identical.  Only the four closed-day
+records disappear (461 → 457 action-group records).  The same mechanism removed
+four would-be NEWs that pre-C silently vanished on union-open/US-closed dates
+(2002-09-02, 2015-02-16 ×2, 2016-05-30) because the loop-day close was missing;
+post-C they vanish by an explicit gate.  stdout unchanged by (b).
+
+### Two-source stdout diff attribution
+| run | trades | cost | return_gross |
+|---|---:|---:|---:|
+| baseline (int, T) | 230 | 7,889.76 | 334,940.587755 |
+| fractional only (T) | 230 | 7,895.27 | 335,308.737370 |
+| T-1 only (int) | 230 | 7,899.90 | 335,514.885533 |
+| post-C (fractional + T-1 + gate) | 230 | **7,905.31** | **335,882.529559** |
+
+- **(a) sizing** — fractional shares ≈ +$5.51 cost; T-1 reference ≈ +$10.14;
+  combined +$15.55 / +$942 gross (non-additive: per-trade rounding and the T-1
+  reference interact).
+- **(b) calendar handling** — **0 stdout magnitude**.  Pre-C already executed
+  nothing on those days (rejected downstream) or emitted nothing (missing T
+  close); post-C simply does not create the records.  It is the source of the
+  **record-count** change (461 → 457), not of any metric change.
+
+### Applied byte record
+```
+SMA applied (canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                         (== the staged prediction; a mismatch would STOP, not re-baseline)
+                        257 lines / 46,189 raw / 39,979 normalized / 230 UUIDs / 0 stderr
+```
+Canonical method: UUID tokens (`8-4-4-4-12` or 32-hex) → `UUID_0001…` in
+first-encounter order, then SHA-256 over the raw stdout bytes.  **New
+baseline.**  The byte-identity failure protocol is deliberately *not* used.
+
+### stderr
+**0 warnings** on the four HK-closed days (the whole run emits 0).  Closed
+markets produce no order, so `SimulatedExecution` never warns.
+
+### Source changes
+- `signals/base_signal.py`: `calendar_provider` / `ticker_to_calendar_code`
+  constructor deps (copied); `is_tradable` (fail-closed, documented).
+- `signals/sma_crossover.py`: forwards deps; gates per ticker before any read;
+  sizes `notional / reference_price`; both guards preserved.
+- `data_view.py`: `reference_price(ticker) == get_price(ticker)` (T-1, no
+  look-ahead, no fill limit); `sizing_price` deleted.
+- `check_rules.py` deleted; `backtest_engine.py` loses the check view, the
+  rule-chain types, chain threading and the config seam that selected them;
+  dispatch is execute → finalize → commit.
+- `actions.py`: the disposition taxonomy and
+  `ActionGroup.original_action_group_id` deleted;
+  `ActionGroupRecord.finalize(order_ids, order_outcomes, group_note=None)`
+  with a private `_finalized` write-once sentinel set only on success.
+- `action_group_log.py`: the disposition import and the replacement transition
+  removed.
+- `execution.py`: docstring no longer references the removed rule context.
+- `examples/sma_crossover_example.py`: provider built before the signal and
+  passed to it.
+
+### Calendar-reject test rewrite
+`TestBacktesterCalendarRule` → `TestCalendarGating` + `TestSmaCalendarGating`.
+The mock-signal tests now pin the *engine* truth (no engine gate; a union-closed
+day with a price row fills; a consistent-closed day blocks at execution and
+warns).  The SMA tests pin signal-side gating on the real fixtures: **no
+`ActionGroupRecord` exists** on 2009-01-26/27/28 and 2012-04-04; the trades
+close on 2009-01-29 and 2012-04-05 (equivalence demonstrated in the
+checkpoint), 457 records all finalized, and **zero warnings**.
+
+### Naming decision — portfolio-layer `ExecutionStatus.REJECTED` → `DECLINED`
+The planned portfolio-layer enum (§10) used `REJECTED`.  Renamed to `DECLINED`
+to disambiguate it from the **removed** action-layer `DispositionKind.REJECTED`:
+same word, different layer, different semantics.  The rename prevents future
+readers from conflating portfolio gate outcomes with the deleted action-layer
+taxonomy.  *Not* done for grep satisfaction.  §10 semantics are unchanged and
+those notes are planned-only, never live code.
+
+### Deferred `REPLACED` readd
+Registered in `docs/phase2_plan.md`: the replacement-lineage field on
+`ActionGroup` and the log transition are re-added with the **scaling rule**
+(the only consumer — scaling supersedes a signal action with derived actions).
+
+### Tests (595 → 573)
+| file | before | after | delta | reason |
+|---|---:|---:|---:|---|
+| `tests/test_check_rules.py` | 25 | 0 | −25 | deleted with the check chain |
+| `tests/test_actions.py` | 108 | 98 | −10 | −7 disposition, −3 replacement lineage |
+| `tests/test_backtester.py` | 37 | 40 | +3 | −4 rule tests, +7 gating/equivalence tests |
+| `tests/test_data_view.py` | 29 | 30 | +1 | −4 sizing, +5 reference (no-look-ahead A/B/C + mapped + feed) |
+| `tests/test_signal.py` | 20 | 29 | +9 | +6 `is_tradable`, +3 SMA gating |
+| all other files | 376 | 376 | 0 | untouched |
+| **total** | **595** | **573** | **−22** | |
+
+### Gates (applied tree)
+```
+Gate A  SMA staged prediction   be8d9825…  (hard gate — applied must equal this)
+Gate B  SMA applied             be8d9825…  -> MATCH; new baseline
+Gate C  stderr                  0 on the four HK-closed days
+Gate D  full suite              python -m pytest -q -> 573 passed, 2 warnings
+Gate E  greps (live code + design prose; historical worklog exempt)
+        sizing_price / CalendarValidationRule / RuleChain / RuleContext /
+        _check_view / Disposition / REPLACED / original_action_group_id /
+        check_rules / order_rules / DEFAULT_CHECK_RULES / REJECTED /
+        DISPATCHED -> zero hits, except the single deferred-`REPLACED`
+        registration (phase2_plan + this entry) and §10's planned
+        DECLINED naming note
+```
+Multi-action guard ordering in `_dispatch_synthesized_order` confirmed:
+the `len(...actions) != 1` guard precedes `actions[0]`.
+
+### Scope / process
+No git operations.  `results/` not written by the gates (scratch copies only).
+
+## 2026-10-22 – Task 5d-1a: B1 NEW-extend trade validation + `LegSpec.size` positivity
+
+### Prompt
+Post-implementation review found two clear-cut defects.  Both fix without a
+behaviour change to the SMA example (neither path is triggered by current
+signals), so output byte-identity is preserved.  **B2 (`reference_price` fallback)
+and B3 (same-day modification handling) are held pending design rulings and are
+not touched here.**
+
+### Ruling checkpoint (verified before edits)
+```
+SMA baseline (scratch, canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                   257 lines / 46,189 raw / 39,979 normalized / 230 UUIDs / 0 stderr
+Collected tests (actual)           573
+```
+- `_trade_state(trade_id, ctx, strategy_id)` returns the T-1 `TradeSnapshot` or
+  raises `ValueError("no active trade ...")`; already used by whole-trade UNWIND
+  (`order_synthesis.py:210`).
+- B1 site: the NEW + `StructureSpec` + `trade_id` branch of `_action_to_orders`.
+- `LegSpec.size` validation site: `LegSpec.__post_init__`, after the numeric check.
+- Zero stays legal (schema-level non-traded/edge content; a NEW leg's zero is
+  refused later by `_order_leg`), `None` stays legal (guarded by `_order_leg`).
+
+### B1 — NEW-extend now validates the target trade
+**Layer-mismatch fix.**  The extend path emitted `Order(structure_id=None,
+trade_id=X)` for any `X`, so an unknown trade surfaced only downstream as
+`DATA_MISSING` at execution.  Conversion now calls
+`_trade_state(action.trade_id, ctx, strategy_id)` before materialising extend
+orders, so an unknown trade raises `ValueError` at conversion -- consistent with
+partial-add structure/trade validation and whole-trade UNWIND.
+
+Create-NEW (`TradeSpec`) is deliberately unaffected: it opens a trade and has no
+T-1 target to resolve.
+
+### `LegSpec.size` positivity
+`__post_init__` now rejects a negative size:
+`"LegSpec.size must be non-negative; direction is carried by side"`.
+Previously `abs(leg.size)` in conversion turned `LegSpec(size=-100, side=LONG)`
+into BUY 100, contradicting `signed_size`.  Zero and positive sizes remain
+accepted.
+
+### Tests (573 → 577, +4)
+| file | change | delta |
+|---|---|---:|
+| `tests/test_order_synthesis.py` | +extend unknown trade raises, +extend known trade succeeds | +2 |
+| `tests/test_actions.py` | +negative size rejected, +zero/positive accepted | +2 |
+
+### Gates (applied tree)
+```
+Gate A  SMA applied (scratch, canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                          -> IDENTICAL to pre-edit baseline; 257 lines / 46,189 raw /
+                                             39,979 normalized / 230 UUIDs
+Gate B  stderr                            0
+Gate C  full suite                        python -m pytest -q -> 577 passed, 2 warnings
+```
+Canonical method is unchanged from the Phase C baseline (UUID tokens -> `UUID_0001…`
+in first-encounter order, then SHA-256 over raw stdout).
+
+### Held for design rulings (not fixed here)
+- **B2** — `DataView.reference_price` fallback behaviour.
+- **B3** — same-day modification handling.
+SMA signal, `DataView.reference_price`, `SimulatedExecution._probe_target` and the
+`execution.py:157` warning text are untouched.
+
+### Scope / process
+No git operations.  `results/` not written by the gates (scratch copies only).

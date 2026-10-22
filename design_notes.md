@@ -12,7 +12,7 @@
   - [3.5 CalendarProvider](#35-calendarprovider)
   - [3.6 Pricer](#36-pricer-basepricer--concrete-implementations)
   - [3.7 Signal](#37-signal-abstract-and-example)
-  - [3.8 OrderGenerator](#38-ordergenerator)
+  - [3.8 Order assembly: synthesis chain](#38-order-assembly-synthesis-chain)
   - [3.9 Backtester](#39-backtester)
   - [3.10 Summary](#310-summary)
   - [3.11 Data Extractor](#311-data-extractor)
@@ -77,6 +77,14 @@ backtester/
     trade.py                            # (* Phase 2 *) Trade class
     backtest_engine.py                  # (* Phase 1 *) Backtester daily loop
     calendar_provider.py                # (* Phase 2 *) CalendarProvider (holiday calendars)
+    actions.py                          # (* 5a *) Action schema, ActionGroupRecord, AggregationContext
+    orders.py                           # (* Phase B *) Order schema: Order, OrderLeg, OrderSide, OrderGroup, OrderOutcome
+    action_group_log.py                 # (* 5a *) Append-only action-group log + strategy-scoped view
+    data_view.py                        # (* 5a *) T-1-clamped view handed to signals
+    position_books.py                   # (* 5a *) Read-only T-1 position book
+    order_synthesis.py                  # (* 5a *) ActionGroup -> order synthesis + synthesis rule chain
+    execution.py                        # (* 5b-1 *) Execution seam: ExecutionBackend, SimulatedExecution
+    execution_log.py                    # (* 5b-1 *) Write-once execution log + fill_id
     summary.py                          # (* Phase 1 *) Summary (thin data coordinator)
     cost_model.py                       # (* Phase 1 *) CostModel (includes EquityCostCalculator)
     metrics_registry.py                 # (* Phase 2 *) Pluggable BaseMetricCalculator registry
@@ -116,10 +124,19 @@ The former `Instrument` class has been split into two types:
 
 **`Contract`** – an immutable (frozen) dataclass capturing the static
 identity of a financial instrument (`ticker`, `asset_class`, `multiplier`,
-`currency`, `params`).  Pricers accept a `Contract`, never mutable
-position state.  The freeze is shallow; callers must not mutate `params`.
-The set of infrastructure keys excluded from `params` (`_INFRA_KEYS`) now
-lives in `BasePricer._build_contract()`.
+`currency`, `params`), plus two **calendar metadata** fields added in Task 5b-2:
+`trading_calendar_code: str | None` and `settlement_calendar_codes: tuple[str, ...]`.
+Unlike the identity fields, the calendar codes are **configuration metadata, not
+instrument identity**: the pricer stamps `trading_calendar_code` from the
+configured ticker → code mapping during `resolve_instrument` (so a mapped
+instrument's `Contract` carries the calendar its order-side validation needs),
+and the codes are deliberately excluded from the pricer's internal cache key
+(§3.6).  `settlement_calendar_codes` is reserved and populated empty until a
+later task needs settlement-day checks.  Pricers accept a `Contract`, never
+mutable position state.  The freeze is shallow; callers must not mutate
+`params`.  The set of infrastructure keys excluded from `params`
+(`_INFRA_KEYS`, now including both calendar fields) lives in
+`BasePricer._build_contract()`.
 
 **Forward note:** The current `asset_class` field uses compound strings
 (e.g. `"equity_option"`) that encode both the broad asset class and the
@@ -252,8 +269,8 @@ It is the natural entity for cost quotation, execution, and rolling.
   - `roll(new_structure, date)` – records a single `roll` event (unit size and cost exposure) on the old structure, closes it, and opens the new structure with a cost‑free `open`. The new structure inherits the old structure’s `original_entry_date`. The new structure also inherits the old structure’s tags, unless the `new_structure` dict explicitly provides a `'tags'` key (which then replaces the inherited tags).
 
 - **Cost exposure:**  
-  The `StrategyStructure` is a **pure event recorder** — it performs no cost‑exposure computation of its own. The backtester calls `pricer.compute_cost_exposure()` (see §3.6) for each cost‑bearing leg at order‑execution time and passes the resulting `{leg_id: per_unit_dict}` mapping to the structure’s lifecycle methods. The structure stores this dict directly in the event log entry under the key `"cost_exposures"`.  
-  The set of cost‑bearing legs is determined at order‑execution time by checking each leg’s `cost_leg` flag. The backtester uses this flag to know which legs to call `compute_cost_exposure` for.  
+  The `StrategyStructure` is a **pure event recorder** — it performs no cost‑exposure computation of its own. Since Task 5b‑1 the **execution‑side** writer `write_cost_exposures` (`backtester/execution.py`) calls `pricer.compute_cost_exposure()` (see §3.6) for each cost‑bearing leg of a **filled** structure, in the commit phase, and passes the resulting `{leg_id: per_unit_dict}` mapping to the structure’s lifecycle methods. The structure stores this dict directly in the event log entry under the key `"cost_exposures"`.  
+  The set of cost‑bearing legs is determined at order‑execution time by checking each leg’s `cost_leg` flag; the writer uses this flag to know which legs to call `compute_cost_exposure` for.  
   The `CostModel` only reads the logged `cost_exposures` values from the event log; it has no direct dependency on the pricer.
 
 - **Analytical grouping (optional):**  
@@ -334,11 +351,11 @@ The framework uses a **DataFeed** class from Phase 1 – a single, concrete clas
 **Initialization sequence (summary):**
 1. Create the `DataFeed` with a `CsvBackend` (later, an `SqlBackend`).
 2. Create typed data providers (`EquityPriceProvider`, `VolSurfaceProvider`, `RateCurveProvider`, etc.), passing them the `DataFeed`.
-3. Create pricers (`EquityPricer`, `EquityOptionPricer`, etc.), passing each the typed providers it requires.
-4. Create the signal (passing the `DataFeed` if the signal needs it).
+3. Create pricers (`EquityPricer`, `EquityOptionPricer`, etc.), passing each the typed providers it requires and — for calendar-aware contracts — the `ticker_to_calendar_code` mapping, so `resolve_instrument` stamps `Contract.trading_calendar_code` (Task 5b-2).
+4. Create the signal with its required `strategy_id` (Task 5a).  The signal no longer receives the `DataFeed`; it reads market data only through the T-1-clamped `DataView` the loop builds.
 5. Create the `CalendarProvider`, passing it the `DataFeed` — holidays are served through the backend contract exactly like prices, so the provider is constructed like every other typed provider (§3.5).
 6. Assemble the `asset_class_configs` dictionary, where each entry’s `AssetClassConfig` bundles the `pricer`, `risk_measures`, `pnl_calculator`, and `record_pricing_inputs`.
-7. Create the `Backtester` with the config — the signal, `asset_class_configs`, the required `calendar_provider` (no default, so omitting it raises `TypeError`), and `simulation_calendar_codes`.
+7. Create the `Backtester` with the config — the signal, `asset_class_configs`, the required `calendar_provider` (no default, so omitting it raises `TypeError`), `simulation_calendar_codes`, and the optional `ticker_to_calendar_code` seam (shared by the `DataView`, the pricer and the signal's tradability gate).
 8. After the backtest, create a `Summary` instance with the desired `SummarySpec` and call `summary.generate(trade_history, cost_model, ...)` to produce the requested reports.
 All objects are created once and reused across the entire backtest and any validation folds.
 
@@ -354,7 +371,7 @@ See Section 8 for the full evolution plan, including SQL migration, typed prov
 
 ### 3.5 CalendarProvider
 
-The CalendarProvider is a shared service that provides trading‑day calendars to the backtester, OrderGenerator (§3.8), and pricers. It is **I/O‑free**: it holds no directory, no file handles and no cache. Holiday *data* is served by the data layer through the `DataFeed` contract (`get_holiday_dates`, §3.4); calendar *semantics* — the business‑day base, union/intersection arithmetic, `"all"` handling — live here. That split is what reconciles the earlier statement that calendars are a cross‑cutting concern rather than market data: the concern is cross‑cutting, the raw dates are still data and are fetched like any other dataset. Storage of holiday dates lives in the backend per the §3.4 decision, which records why the storage half is unified, the alternatives rejected and the sanctioned future split.
+The CalendarProvider is a shared service that provides trading‑day calendars to the backtester, the `DataView` and signals (§3.7), and pricers. It is **I/O‑free**: it holds no directory, no file handles and no cache. Holiday *data* is served by the data layer through the `DataFeed` contract (`get_holiday_dates`, §3.4); calendar *semantics* — the business‑day base, union/intersection arithmetic, `"all"` handling — live here. That split is what reconciles the earlier statement that calendars are a cross‑cutting concern rather than market data: the concern is cross‑cutting, the raw dates are still data and are fetched like any other dataset. Storage of holiday dates lives in the backend per the §3.4 decision, which records why the storage half is unified, the alternatives rejected and the sanctioned future split.
 
 **Holiday calendar model:**
 - Calendars are defined by holiday codes (e.g. Bloomberg‑style `"US"`, `"HK"`).
@@ -366,31 +383,32 @@ The CalendarProvider is a shared service that provides trading‑day calendars t
 - A special code `"all"` returns every calendar day.
 
 **Multi‑asset handling:**
-- Supports **union** (for the simulation loop) and **intersection** (for order execution).
-- For multi‑leg orders, the OrderGenerator uses intersection to verify all legs' markets are open.
-- **Intersection is realized in Task 5's `CalendarValidationRule`** via per‑leg `is_valid_day` checks — there is deliberately no separate intersection method on the provider, and the absence of one is not a missing API.
+- Supports **union** (for the simulation loop) and per‑instrument open/closed checks (for signal gating).
+- A signal gates emission per ticker with `BaseSignal.is_tradable` (§3.7): it emits nothing on a day its instrument's market is closed.  A structure is the atomic unit of modification, so no separate order‑side intersection API is needed.
+- An unmapped ticker fails closed when a provider is configured (a configuration error), so a closed-market emission can never reach execution and produce a data warning.
 - The union calendar used for simulation may therefore introduce days on which a given leg's market is closed. Those days are **not** masked out of the DataFeed; the leg simply has no price, the pricer returns `None`, and the existing missing‑data mechanics append `NaN` while holding `current_price` at its last valid mark (§3.9).
 
 **Core methods:**
 - `trading_days(holiday_codes, start, end) -> list[str]` — the **union** calendar for simulation, inclusive of both `start` and `end`.
 - `is_valid_day(holiday_code, date) -> bool` — single‑code check; used for order‑execution checks.
 - `next_valid_day(holiday_code, date) -> str` — first valid day strictly after `date`; used by pricers (settlement, fixing) and the backtester (futures rolls).
+- `prev_valid_day(holiday_code, date) -> str` — last valid day strictly before `date` (added for the `DataView`, §3.7): the mirror image of `next_valid_day`.
 
 **Naming split (deliberate):** `trading_days` keeps its name because it produces the *simulation* calendar and matches the pipeline‑wide vocabulary (`BacktestResult.trading_days`, `Summary.generate(trading_days=...)`). The two per‑code primitives are named `is_valid_day` / `next_valid_day` — not `is_trading_day` / `next_trading_day` — because they are calendar‑kind‑agnostic: the same methods will later serve trading, settlement, and fixing calendars unchanged.
 
 **Implemented behaviour (Phase 2):**
 - **Constructor:** `CalendarProvider(data_feed)`. There is no directory parameter and no `None`‑mode: all holiday access goes through the feed, so the provider cannot observe storage and holds no cache. It is a pure function of its arguments plus the feed.
-- **Semantics are call‑time only.** Nothing about the calendar is decided at construction; the codes passed to each call are the single knob. (One declaration point per consumer is preserved: `BacktestConfig.simulation_calendar_codes` for simulation, per‑leg codes later for `CalendarValidationRule`.)
+- **Semantics are call‑time only.** Nothing about the calendar is decided at construction; the codes passed to each call are the single knob. (One declaration point per consumer is preserved: `BacktestConfig.simulation_calendar_codes` for simulation; per‑instrument codes, resolved through `BacktestConfig.ticker_to_calendar_code`, for the `DataView` scoping and the signal's `is_tradable` gate, §3.7.)
 - **CSV schema:** one file per calendar code at `{backend base_dir}/holidays/{CODE}.csv` — a header row `date` and one `YYYY-MM-DD` holiday per row; each row is a full non‑trading day. This convention is owned by `CsvBackend`, mirroring how it owns `<TICKER>_eod.csv`. The `date` column is read **by name**, never by position; dates are normalized with `pd.to_datetime(...)`/`strftime('%Y-%m-%d')` and de‑duplicated into an immutable `frozenset`. Empty date cells are rejected with a `ValueError` rather than becoming inert `NaN` members. Additional columns are warned about once per file per backend instance (attributed to the provider frame, so a consumer sees their own call site) and otherwise ignored (reserved for future half‑day/hours support). Half‑days and point‑in‑time vintages are out of scope for Phase 2.
 - **Caching:** per code, in the backend, consistent with price‑series caching — and in a **separate cache namespace** from prices. A ticker and a calendar code may share a name (the NYSE ticker `DE` vs the German calendar code), so sharing one dictionary would let one dataset return the other's object; the separation is structural, not conventional.
-- **Unknown or empty codes fail loudly.** A code whose file does not exist raises `FileNotFoundError` naming the code and the expected path, from every entry point. The old business‑days fallback for unknown codes is **removed**: a calendar code is a configuration identifier, and a typo must fail loudly everywhere — otherwise `CalendarValidationRule` (§3.8) would mask configuration errors as calendar‑shaped order rejections.
+- **Unknown or empty codes fail loudly.** A code whose file does not exist raises `FileNotFoundError` naming the code and the expected path, from every entry point. The old business‑days fallback for unknown codes is **removed**: a calendar code is a configuration identifier, and a typo must fail loudly everywhere — otherwise a typo would silently read as "market closed" and suppress emissions.
 - **Ordering semantics (fail‑loud):** `"all"` short‑circuits **before any backend call**; otherwise the code's holiday set is resolved *before* any weekend or membership test. Consequently an unknown or empty code raises on **any** weekday, including Saturday and Sunday — where a weekend short‑circuit would otherwise return `False` and hide the typo. Weekday evaluation and holiday‑set membership come after resolution.
 - **Normalization convention:** both per‑code methods parse the input exactly once through one shared helper, which derives the calendar‑day string and truncates any time component explicitly. `"2024-01-04 23:00:00"` therefore behaves exactly as `"2024-01-04"` in both methods, and the time part never leaks into `next_valid_day`'s offset arithmetic or returned value.
 - **Union semantics:** the union of per‑code trading days equals business days minus the **intersection** of all codes' holiday sets — a day is dropped only if it is a holiday in *every* listed code. A holiday that falls on a weekend is naturally ignored because it is not in the business‑day base. `"all"` short‑circuits **before** any holiday loading, so `all.csv` is never requested and `"all"` is never modelled as an empty holiday set (which would wrongly drop weekends).
 - **Iteration guard:** `next_valid_day` raises `RuntimeError` if no valid day is found within 1000 days, so a malformed or empty calendar cannot loop forever.
 
 **Signal data scoping:**
-Before requesting price data from the DataFeed, the signal's data‑scoping layer (part of the OrderGenerator) uses the CalendarProvider to find the last valid trading day for each instrument. This ensures indicators are computed only on actual trading days.
+Before requesting price data, the signal's data‑scoping layer — the per-loop-day `DataView` (§3.7) — uses the CalendarProvider to find the last valid trading day for each instrument. This ensures indicators are computed only on actual trading days.  (The 5a rewrite moved this from the old OrderGenerator into the `DataView`.)
 
 **Future extensions:**
 - **(a) Calendar kinds.** Trading / settlement / fixing calendars for the same market arrive as additional opaque code strings (e.g. `"US_SETTLE"`). No API change is required.
@@ -433,14 +451,16 @@ Before requesting price data from the DataFeed, the signal's data‑scoping laye
      - `EquityPricer`: `{"notional_per_unit": leg_state.current_price}`
      - `EquityOptionPricer`: `{"vega_per_contract": total_vega / leg_state.current_size}`
      - `FXForwardPricer`: `{"dv01_per_unit": computed_dv01 / leg_state.current_size}`
-     - For multi‑leg structures (e.g., a straddle), the backtester calls this method once per cost‑bearing leg.
+      - For multi‑leg structures (e.g., a straddle), the execution‑side `write_cost_exposures` writer calls this method once per cost‑bearing leg of a filled structure (Task 5b‑1).
 - Concrete pricers (`EquityPricer`, `FXForwardPricer`, `EquityOptionPricer`, etc.) implement these methods using the appropriate typed data providers.
+- A pricer is constructed with the optional `ticker_to_calendar_code` mapping (Task 5b‑2); `resolve_instrument` stamps `Contract.trading_calendar_code` from it.  The pricer stores only the mapping and performs no calendar math — the `CalendarProvider` (§3.5) owns the semantics.
 
 **Single‑instance & caching:**
 - Pricers are designed to be **instantiated once** and shared across all instruments, trades, and backtest runs. A single `EquityOptionPricer`, for example, will price every option in the portfolio.
 - Each pricer maintains an internal cache to avoid redundant computation. The cache key is the **full instrument identity** — i.e., all the attributes that uniquely define the contract (ticker, asset class, plus the contents of `params`) — combined with the date.
   - For a simple equity, the key is essentially `(ticker, date)`.
   - For a specific option (e.g., a 23‑delta HSI call expiring on 2025‑12‑05), the key includes the instrument’s ticker, strike, expiry, and option type from `params`, ensuring that two options with the same ticker but different strikes receive distinct cached entries.
+  - **Calendar codes are deliberately excluded.** `trading_calendar_code` and `settlement_calendar_codes` are configuration metadata stamped in Task 5b‑2, not instrument identity, so they are **not** part of the cache key: adding or changing a ticker's calendar must not invalidate or fork its price cache.  (The `EquityPricer` has no cache today; this rule binds the caching pricers when they arrive.)
 - On the first call for a given key, the pricer performs all expensive data fetching and model calculations. **Which values are computed and cached depends on the backtest configuration and which methods are called:**  
   - The pricer always computes and caches the base `price`.  
   - Risk measures (greeks) are **only** computed and cached if the asset class's `risk_measures` list in `asset_class_configs` is non‑empty. If no risk decomposition is requested, no greeks are calculated or stored.  
@@ -453,154 +473,331 @@ Before requesting price data from the DataFeed, the signal's data‑scoping laye
 
 ### 3.7 Signal (abstract and example)
 
-- **BaseSignal** is an abstract class with a method:
-  `generate_signals(current_date, portfolio_state: PortfolioState | None = None, trade_history_snapshot: tuple[TradeRecord, ...] | None = None) -> list[dict]`
-  Each returned dictionary is a **TargetTrade** with the following structure (shown as a Python dictionary):
-  ```python
-  {
-      'Action': 'NEW' | 'UNWIND' | 'ROLL',
-      'trade_id': str | None,
-      'info': [ ... ]   # structure depends on Action
-  }
-  ```
-- **Portfolio state requirement:**  
-  `BaseSignal` has a class attribute `requires_portfolio_state: bool` (default `False`).  
-  The backtester reads this flag: only if `True` does it build a `PortfolioState` snapshot and pass it to the signal.  
-- **Trade history requirement:**  
-  `BaseSignal` also has a class attribute `requires_trade_history: bool` (default `False`).  
-  If `True`, the backtester builds a `trade_history_snapshot` (a tuple of `TradeRecord` objects) from the current `trade_history` list and passes it to the signal.  
-  This allows the signal to access past trade information without mutating live objects.
+A signal **emits action groups**, not orders: the mechanical translation from an
+`ActionGroup` to an `OrderGroup` of `Order` objects is synthesis's job (§3.8).
 
-- **Semantics of the `TargetTrade` dictionary:**
+The object a signal emits is an `ActionGroup`; the pipeline stage that turns it
+into orders is **action group synthesis**, recorded in the `ActionGroupLog`.
 
-  | Action   | trade_id  | info content | Meaning |
-  |----------|-----------|--------------|---------|
-  | `NEW`    | `None`    | List of structure dicts (each with `legs`) | **Create a new trade** with the given structures. Structure IDs may be provided or auto‑generated. |
-  | `NEW`    | Not `None` | List of structure dicts where `structure_id` is **not** set (or `None`) | **Add new structures** to the existing trade. |
-  | `NEW`    | Not `None` | A list containing a single structure dict with an **existing** `structure_id` and a `'size'` key | **Partial‑add** to that structure: increase its size by `size` units, scaling all legs proportionally. |
-  | `UNWIND` | Not `None` | Empty list (`[]`) or omitted | **Fully unwind the entire trade** – all structures are closed. |
-  | `UNWIND` | Not `None` | List of structure dicts, each with an existing `structure_id` and **no** `'size'` key | **Fully unwind each specified structure**. If all structures are unwound, the trade is closed. |
-  | `UNWIND` | Not `None` | List containing a single structure dict with an existing `structure_id` and a `'size'` key | **Partial‑unwind** that structure: reduce its size by `size` units. |
-  | `ROLL`   | Not `None` | List of roll descriptors, each containing `'old_structure_id'` and `'new_structure'` (a structure dict with `legs` and optional `structure_id`) | **Roll one or more structures**: close the old structure(s) and simultaneously open new one(s) with a single cost event. The new structures inherit the `original_entry_date` from the old ones. |
+- **`BaseSignal`** is an abstract class with a required constructor argument
+  `strategy_id` and one method:
+  `generate_action_groups(data_view: DataView, action_group_log: ActionGroupLogView, position_book: PositionBook) -> list[ActionGroup]`.
+  It returns :class:`ActionGroup` objects (one per action scope).  There is no
+  `requires_portfolio_state` / `requires_trade_history` flag and no
+  `generate_signals()`: the loop always builds the T-1 position book and its
+  trade history, so the flags that used to gate the snapshots are gone.
 
-- **`ROLL` info structure:**
-  Each element in the `info` list is a dictionary, shown below as a template:
-  ```python
-  {
-    'old_structure_id': 'struct_123',          # ID of the structure to close (must exist and be active)
-    'new_structure': {                         # definition of the replacement structure
-        'structure_id': 'struct_456',          # optional; if omitted, backtester generates one
-        'legs': [                              # list of leg dictionaries, same format as for NEW
-            {'ticker': 'HSI', 'size': 10, 'asset_class': 'equity_future', 'multiplier': 50},
-            # ... more legs if multi‑leg structure
-        ],
-        'tags': ['hedge']                      # optional; if absent, inherits old structure's tags
-    }
-  }
-  ```
-  Multiple roll entries can be provided to roll several structures (e.g., different hedge legs) in a single signal. The new structure’s ID is generated automatically (or the signal may optionally provide one). The new structure inherits the old structure’s `original_entry_date`. By default, the new structure also inherits the old structure’s tags. To override the tags, provide a `'tags'` key inside the `new_structure` dictionary.
+- **`DataView` (T-1 clamped).**  The loop builds one `DataView` per loop day and
+  it is the **only** market-data handle the signal receives — the signal holds
+  no feed of its own.  `get_price` raises when asked for an `as_of` after the
+  cutoff (`T - 1`) and `get_series` end-clamps to it, so the loop day's own
+  close is structurally unobservable.  Per-instrument calendar scoping
+  (`BacktestConfig.ticker_to_calendar_code`) applies only to `as_of` /
+  last-valid-day resolution; `get_series` deliberately never filters rows by
+  calendar (a price row on a holiday-listed day is kept — the anomalous-day
+  case).  The sizing read is `DataView.reference_price`, exactly
+  `get_price(ticker)`: the last observable (calendar-valid when mapped) close at
+  or before the cutoff.  The loop day's own close is unreachable by
+  construction, and there is no forward-fill limit — absence of any observation
+  at or before the cutoff is the only `None` case.
 
-- **Leg dictionary fields:**  
-  Common fields (always present): `ticker`, `size` (for `NEW` or partial‑add).  
-  Optional common fields: `multiplier`, `currency`, `tags`, `asset_class` (if not resolvable from a ticker‑to‑asset‑class mapping).  
-  All other fields are treated as **instrument‑specific parameters** and are stored in the `Contract.params` dictionary. Examples:
-  - Equities: no extra fields needed.
-  - Equity options: `'strike'`, `'expiry'`, `'option_type'` (and possibly `'exercise_style'`). Alternatively, `'delta'` and `'tenor'` may be given for OTC options.
-  - FX forwards: `'maturity'` (an absolute date) **or** `'tenor'` (e.g., `'1M'`, `'3M'`), along with `'notional_currency'`, `'base_currency'`. The pricer resolves the tenor to an absolute maturity date.
-  - Swaps: `'maturity'` (or `'tenor'`), `'fixed_rate'`, `'payment_frequency'`, `'day_count'`, etc.
-  The backtester does **not** validate or interpret these parameters; it simply passes them through. Only the pricer (and later, the execution module) knows what to do with them.
+- **`BaseSignal.is_tradable(date, tickers) -> bool`.**  True iff every ticker's
+  market is open on `date`.  It reads the provider and the
+  `ticker_to_calendar_code` mapping the signal was constructed with.  Unmapped
+  tickers are **fail-closed** (a configured provider + missing code raises); a
+  signal with no provider is calendar-blind.  Signals call it before emitting,
+  so the engine needs no check stage and a closed day is silent.
 
-- **Instrument resolution:**  
-  The leg dictionary may omit instrument‑specific parameters that are not known at signal‑generation time (e.g., the exact strike of an OTC option, the forward rate of an FX forward, or the absolute maturity date when only a tenor is given). The pricer’s `resolve_instrument` method (Section 3.6) is responsible for filling in any missing fields at execution time. The backtester simply passes the leg dictionary to the pricer and uses the completed result.
+- **`ActionGroupLogView`** is a read-only, strategy-scoped window onto the run's
+  :class:`~backtester.action_group_log.ActionGroupLog`; **`PositionBook`** is the
+  read-only T-1 position snapshot.  A signal can inspect its own emission
+  history and its positions but cannot mutate them or see another strategy's.
 
-- The signal is **stateless**: it does not retain any internal memory that cannot be reconstructed from the data passed to it at each call. It uses market data available *up to* `current_date - 1` (i.e., yesterday’s close, or earlier) and, optionally, the current `portfolio_state` snapshot and/or the `trade_history_snapshot`, to produce orders for `current_date`.  
+#### 3.7.1 Action schema
 
-  For continuation runs (where the backtester is re‑started from a previous state), any necessary positional awareness (e.g., whether the strategy is already in a position) is derived from the `PortfolioState` snapshot or the `trade_history_snapshot`—not from serialized internal state. A signal that requires such awareness simply sets the appropriate flag (`requires_portfolio_state` or `requires_trade_history`) and reads the relevant data from the snapshot(s).  
+The schema is **spec objects + actions + a group**:
 
-  The backtester calls `signal.generate_signals(date=T, portfolio_state=state_T-1, trade_history_snapshot=snapshot_T-1)` and **immediately** executes the returned orders at the close of day T.
+- **`LegSpec`** — one leg: `contract_spec` (a `ContractSpec` holding the
+  immutable contract fields), `side` (a `Side`), `size`, and leg-level `tags`.
+  The signed size is `size` for `LONG` and `-size` for `SHORT` (`signed_size`).
+- **`StructureSpec`** — a structure's **content**: `legs` and structure-level
+  `tags`.  **`legs[0]` is the anchor leg** (see below).  A multi-leg instrument
+  (call spread, straddle, FX forward, basket) is **one structure with multiple
+  legs**, atomic in lockstep.
+- **`TradeSpec`** — a new trade's content: `structures` and the trade-level
+  `tags` (applied when the commit phase creates the trade).  A trade may
+  contain **multiple structures**, which is how scaling-in and grouping are
+  expressed; multiple structures per trade never model a multi-leg instrument.
+- **`Action`** — `type` (`NEW` / `UNWIND`), at most **one** `spec`
+  (`TradeSpec | StructureSpec | None`), `trade_id`, `structure_id`, and `size`
+  (the modification amount, a positive magnitude on the anchor leg).
+- **`ActionGroup`** — `strategy_id`, `provenance` (from the documented
+  constants — `"signal"` for alpha), a required `actions` tuple (≥1), and the
+  identifiers the log owns: `action_group_id` / `emission_date` (assigned at
+  emission; the log raises if a signal set either).  There is deliberately
+  **no** group-level `tags` (trade-level tags ride `TradeSpec`) and no
+  replacement-lineage field (replacement belongs to the deferred scaling rule;
+  see below).
 
-- **PortfolioState snapshot (optional):**  
-  When `requires_portfolio_state` is `True`, the backtester creates a **`PortfolioState` snapshot** at the end of day T‑1 (after all T‑1 processing is complete, before any day‑T work).  
-  This snapshot is a read‑only, frozen dataclass containing:
-  - `date` – the “as of” date (T‑1).
-  - `trades` – a tuple of `TradeSnapshot` objects.
-  - Each `TradeSnapshot` holds a tuple of `StructureSnapshot` objects, and each `StructureSnapshot` holds a tuple of `LegSnapshot` objects.
-  - `LegSnapshot` includes: `ticker`, `asset_class`, `size`, `entry_price`, `current_price` (as of T‑1 close), `daily_total_pnl` (the full time series up to T‑1), `component_pnls: dict`, and `risk_measures: dict`.
-  - The snapshot provides **only the raw leg data**. It does not pre‑compute cumulative realized/unrealized P&L or any other derived metric. If a signal needs those values, it computes them on‑the‑fly from the raw fields (e.g., `total_gross = sum(daily_total_pnl)`, `unrealized = (current_price - entry_price) * size`).
-  - `TradeSnapshot` may also include a `trade_id` field so the signal can reference trades.
-  - The snapshot contains **no** live references to `Trade`/`LegState` objects.
+**Anchor leg.**  `StructureSpec.legs[0]` is the **anchor** leg.  A modification
+quantity is expressed on the anchor; the other legs scale proportionally.  A
+single convention lets the signed-quantity formula below be stated on one
+number.
 
-- **TradeHistory snapshot (optional):**  
-  When the backtester calls `generate_signals()`, if the signal’s `requires_trade_history` flag is `True`, the backtester also passes a `trade_history_snapshot` argument. This snapshot is a **tuple of `TradeRecord` dataclasses**, each an immutable, read‑only summary of one trade.  
-  The snapshot is built at the **end of day T‑1** (after all T‑1 processing, before any day‑T work), exactly like the `PortfolioState`. It reflects the full trade history as it stood at that point—no day‑T price or order information is included.  
+**Signed quantity.**  `anchor_current` is the anchor leg's **signed** book size.
+The action quantity is a positive magnitude:
 
-  A `TradeRecord` contains:
-  - `trade_id: str`
-  - `entry_date: str` (date of first structure open)
-  - `exit_date: str | None` (date of last structure close, or `None` if still open)
-  - `tags: tuple[str, ...]` (frozen copy of the trade’s tags)
-  - `is_open: bool` (convenience flag derived from `exit_date`)
-
-  No mutable references to live `Trade`, `Structure`, or `LegState` objects are exposed. The signal can safely inspect this snapshot to enforce cooldowns, count trades, or apply any other logic that requires knowledge of past trading activity, without any risk of corrupting the backtester’s internal state.
-
-- **SMACrossoverSignal** (example): parameters `short_window`, `long_window`, a list of `tickers`, and a target `notional`. It evaluates each ticker independently and converts the target notional into shares via `int(notional / price)`. Uses market data up to `current_date - 1`.  
-  `requires_portfolio_state = True` – it checks the `PortfolioState` snapshot for any open trade holding a given ticker to determine whether it is currently in a position. No internal state is stored; the signal is fully stateless.  
-  Returns orders like the examples shown below (in Python dict form):
-  ```python
-  # Open new long
-  {'Action': 'NEW', 'trade_id': None, 'info': [{'structure_id': None, 'legs': [{'ticker': 'SPY', 'size': 100}]}]}
-  # Close (full unwind)
-  {'Action': 'UNWIND', 'trade_id': 'trade_123', 'info': []}
-  ```
-
-- **Notional‑to‑shares conversion (sizing intent):**
-
-  > *Phase 1 simplification:* The signal currently converts a target notional into shares using `int(notional / current_price)`, where `current_price` is the adjusted close on the execution date. This produces "fake" shares that keep P&L correct in the backtest but do not represent realistic trade quantities.
-  > *Phase 2 plan:* The conversion will move to the `OrderGenerator` (§3.8). In backtest mode, the `OrderGenerator` will still use adjusted close for sizing, preserving the existing P&L integrity. In live production, it will use spot prices to compute actual trade sizes. The signal will output only a pure notional intent, remaining fully agnostic to the execution context.
-  > *Future:* A later refactoring will unify the backtest and live execution paths so that trade quantities are consistent in both environments, without compromising the accuracy of the backtest.
-
-- **Separation of alpha and execution:**  
-  **In Phase 1**, `BaseSignal.generate_signals()` directly produces `TargetTrade` dictionaries for simplicity. The signal may delegate mechanical operations (scaling, hedging, rolling) to separate helper modules that also emit `TargetTrade` dicts.
-
-  **In Phase 2**, the design separates alpha from execution:
-  - Alpha signals produce **pure intent dicts** (e.g. `{"action": "BUY", "ticker": "SPY", "target_size": 200}`) — no mechanical concerns.
-  - A separate **OrderGenerator** (§3.8) transforms these intents into executable `TargetTrade` orders by applying a chain of swappable `OrderRule` instances (scaling, hedging, rolling, calendar validation, scheduling).
-  - The alpha signal remains stateless and calendar‑unaware.
-  - Existing helper modules (`ScalingModule`, `DeltaHedgeModule`, `RollModule`) will be migrated into `OrderRule` implementations within the OrderGenerator.
-  These modules are not required in Phase 1 but are planned for Phase 2.
-  A truncated `DataView` will be provided to the signal by the Phase 2 `OrderGenerator`, structurally preventing access to data beyond T‑1 and making the no‑look‑ahead convention structural rather than conventional.
-
-### 3.8 OrderGenerator
-
-The OrderGenerator is a stateless component that sits between the alpha signal and the backtester. It transforms a pure **alpha intent dict** into executable `TargetTrade` orders by applying a chain of swappable **OrderRule** instances. Among its mechanical rules, the `OrderGenerator` will convert a notional‑based alpha intent into an exact number of shares. In backtest mode it will use adjusted close for sizing; in live production it will use spot prices. A future phase will further align the two contexts.
-
-**Alpha intent format (example):**
-```python
-{"action": "BUY", "ticker": "SPY", "target_size": 200}
+```
+|anchor_new| = |anchor_current| + (NEW ? +quantity : -quantity)
+anchor_new   = sign(anchor_current) x |anchor_new|
 ```
 
-**Initialization and execution:**
-- The OrderGenerator is initialized with a list of `OrderRule` instances, following the same registry pattern as the CostModel's `BaseCostCalculator` (§3.13).
-- On each call it receives: the intent, current date, portfolio state, trade history snapshot, and the CalendarProvider.
-- It runs each rule in sequence; the final rule emits the `TargetTrade` dicts (or an empty list if the order is discarded).
+The action is direction-agnostic; the order delta's side comes from the leg's
+`Side`.
 
-**Stateless:** No internal queues. Orders that cannot be executed are discarded and may be regenerated by the signal on the next trading day.
+**Action-shape matrix (construction-time).**  Any shape not listed is rejected
+fail-loud by `Action.__post_init__`:
 
-**Phase 2 implementation plan:**
-The first rule to be built is **CalendarValidationRule**, which uses the CalendarProvider (§3.5) to reject orders when any leg's market is closed. Later, additional rules will be added: `ScalingRule`, `DeltaHedgeRule`, `RollRule`, and `TradingSchedule`.
+| type | spec | trade_id | structure_id | quantity |
+|---|---|---|---|---|
+| `NEW` | `TradeSpec` | – | – | – |
+| `NEW` | `StructureSpec` | ✓ | – | – |
+| `NEW` | – | ✓ | ✓ | ✓ (>0) |
+| `UNWIND` | – | ✓ | ✓ | ✓ (0<q<\|anchor\|) |
+| `UNWIND` | – | ✓ | ✓ | – |
+| `UNWIND` | – | ✓ | – | – |
+| `UNWIND` | – | – | – | – |
 
-**CalendarValidationRule:**
-- Checks each leg's holiday calendar(s) to determine if its market is open on the execution date.
-- If any leg is on holiday, the entire order is **rejected** (discarded) — no partial trade is allowed.
-- It does **not** postpone; the signal will naturally re‑evaluate on the next open day.
+`trade_id` is required on the two structure-scoped `UNWIND` rows, exactly as it
+is on a partial add: the converter validates it against the book.
 
-**TradingSchedule (future):** Adjusts a fixed‑frequency schedule (e.g., "every Monday") by recomputing the first fully open day of the week using the CalendarProvider, remaining stateless.
+**Validation split.**
+
+- **Construction-time** (`Action.__post_init__`, data only): the matrix above,
+  `quantity > 0` when present, type checks, one spec per action, and spec type
+  matches shape (`TradeSpec` only on create, `StructureSpec` only on extend,
+  `None` otherwise).
+- **Conversion-time** (book-dependent): the partial-unwind bound
+  `0 < quantity < |anchor_current|`, and structure↔trade consistency.  The two
+  named gates below are also conversion-time.
+
+**Granularity and gates.**  One `NEW` per trade creation or trade extension;
+one `UNWIND` per scope addressed (a structure, a whole trade, or the whole
+book).  The single-action subset gates (pipeline/schema accepts the shape,
+conversion or the pipeline rejects): **multi-action groups** (the pipeline
+rejects >1 action before conversion), **multi-leg modifications**, and
+**short-structure partial modifications**.  A full-structure unwind is the
+atomic close and is always allowed.
+
+**Replacement lineage (deferred).**  There is no replacement-lineage field on
+`ActionGroup` today.  Replacement is a *scaling* concern: the scaling rule
+supersedes a signal's action with derived actions and will register the
+predecessor→derived link when it lands.  Until then the field would be
+write-only surface with no reader, so it is deliberately absent; the deferred
+readd is registered in `docs/phase2_plan.md` together with the scaling rule.
+Synthesis attribution is carried by `provenance` alone (`roll_rule` is a
+conscious reserved constant; `netting_rule` is deliberately **not** a
+provenance — netting is not an action-group source).
+
+**Fractional policy (interim).**  An action keeps exact fractional values.
+Conversion carries them into `OrderLeg.quantity` unchanged: equity uses
+adjusted data and fractional shares are fine, so nothing rounds.  Lot rounding
+is deferred; no lot-sizing config exists.  A future risk/liquidity reduction
+that would zero the size is refused at action construction (`size > 0`), not expressed as a zero-sized modification.
+
+**Netting lineage reservation.**  The execution log reserves the full lineage
+`order ↔ action ↔ trade ↔ group` end-to-end: `order_id` →
+`action_group_id` → the group's actions' `trade_id` / `structure_id`.  This is
+the hook a future netting module hangs off.
+
+**Netting is execution/order-layer.**  The action layer is netting-agnostic:
+position accounting reflects the economic effect whatever the order-level
+origin.  Netting is realized as an internal transfer in the execution log,
+never as an action-layer fate.
+
+- **The signal is stateless** and calendar-unaware: it derives "am I in this
+  position?" from the `PositionBook`, not from serialized state, so a
+  continuation run is reproducible.
+
+- **SMACrossoverSignal** (example): parameters `short_window`, `long_window`,
+  `tickers`, `notional`, `ticker_currency`, and a required `strategy_id`.  It
+  evaluates each ticker independently and converts the target notional into
+  fractional shares via `notional / price` using `DataView.reference_price`
+  (the T-1 reference close).  It emits a
+  `NEW` action group (a `TradeSpec` carrying the trade tags) when the short SMA
+  is above the long SMA and it holds nothing, and a structure-scoped `UNWIND`
+  action group carrying the holding's `trade_id` and `structure_id` when it
+  crosses back below.  It is fully stateless.
+
+- **Sizing (fractional, T-1).**  Notional → shares happens in the signal, at the
+  T-1 reference close, with no rounding.  Moving it into synthesis is future
+  work; the T-1 read is already structural, so no look-ahead is possible.
+
+- **Separation of alpha and execution (as built).**  The alpha signal emits
+  `ActionGroup`s.  A synthesis stage (§3.8) runs a **synthesis rule chain** and
+  converts each surviving group into an `OrderGroup` of `Order` objects, which
+  pass straight to the execution seam (`backtester/execution.py`, §3.9).  There
+  is no strategy-layer check stage and no rejection path.  The signal never
+  builds an order.
+
+#### 3.7.2 Trade and structure semantics
+
+A **structure** is the atomic unit of *modification*.  A **trade** is a
+user-defined grouping of structures with **no single direction**; its **entry
+date is fixed** from open to close (set once when the first structure is added),
+and it exits when its **last** structure closes.
+
+**Empty-trade removal and `exit_date` are deferred until the ActionGroup
+completes.**  Under the multi-action gate this is trivially satisfied today
+(single-action groups cannot produce the intermediate empty state), so it is
+stated as **engine-program surface, unbuilt**.  Consequence to record: an
+empty-but-unremoved trade is **same-day re-openable**.
+
+
+### 3.8 Order assembly: synthesis chain
+
+Order assembly is a single **synthesis chain**, stateless, sitting between the
+signal and the execution seam.  It was once a single planned `OrderGenerator`
+(§3.7's legacy note):
+
+1. **Synthesis chain** (`backtester/order_synthesis.py`) — transforms the day's
+   **ActionGroup list** *before orders exist*.  Rules are
+   `rule(action_groups, ctx) -> list[ActionGroup]`.  By default the chain is
+   **empty**, so synthesis is a pass-through; `action_group_to_order_group`
+   converts each surviving group into an `OrderGroup` of `Order` objects, each
+   carrying its minted `order_id` and producing `action_id`.
+   `DEFAULT_RULE_ORDER` documents the rule order future plugins register
+   against — `("roll", "auto_unwind", "hedge_rebalance", "scaling")`.  Netting
+   is deliberately **absent**: it is an order-level module, not a synthesis
+   rule.  **The converter also runs the synthesis rule chain** — action group
+   synthesis and order conversion are colocated in `OrderSynthesis`; netting
+   stays out-of-band.
+
+   `synthesize` returns a `tuple[OrderGroup, ...]` — **exactly one OrderGroup
+   per input ActionGroup, positionally aligned** with the appended records.  It
+   receives the day's `action_ids` in parallel with the groups, so every `Order`
+   carries its producing `action_id`.  A synthesis rule that removes an input
+   group fails loudly: synthesis never rejects or drops, and rejection is
+   exclusively conversion-stage.
+
+   Conversion resolves the T-1 book for structure-scoped actions and
+   materializes `Order` objects directly.  A structure-scoped modification
+   expresses its `size` on the anchor leg; every other leg's delta is the
+   anchor delta scaled by `leg.size / anchor.size` (the old share-of-total
+   distribution for the single-leg structures that modification permits;
+   multi-leg modification stays gated).  A whole-book or whole-trade UNWIND
+   fans out one full-close `Order` per addressed structure.
+
+   `OrderGroup` carries an `order_group_id`, minted unconditionally at
+   construction, and is non-empty by construction (`orders == ()` raises
+   `ValueError`).  It deliberately carries **no** `action_group_id`: the engine
+   pairs each OrderGroup to its record by positional `zip`, and the execution
+   log reserves the `order ↔ action ↔ group` lineage end-to-end, so a future
+   netting author must not expect a back-reference on `OrderGroup`.
+
+   **Rule-emitted groups are rejected until the stamping stage lands**: a rule
+   may neither *add* a group that was never appended to the log nor *remove* an
+   input group.  The pre-stamp workaround is therefore structurally forbidden
+   (the stamping intermediate stage is the registered unlock — see
+   `docs/phase2_plan.md`).
+
+   **Multi-action gate.**  The single-action subset's pipeline rejects any
+   ActionGroup with more than one Action here, *before* order conversion.  It
+   is a **pipeline** rejection, not a schema one: the schema accepts the
+   `actions` tuple shape.  The crash on `synthesize` is intended; orphaned
+   records (already appended) are terminal.
+
+**No order-side validation at the strategy layer.**  The engine has no
+rejection path: a signal emits only what it is willing to dispatch, and
+calendar gating lives in `BaseSignal.is_tradable` (§3.7).  A
+closed market is handled by *not emitting*, not by rejecting downstream — which
+is what keeps `stderr == 0`.  Eligibility / risk / margin / portfolio limits
+are portfolio-layer concerns (§10), not strategy-layer rules.
+
+**No disposition.**  An emitted `ActionGroup` has no action-layer fate.  Its
+record carries only order-layer facts, written once by
+`ActionGroupRecord.finalize(order_ids, order_outcomes, group_note=None)`:
+parallel non-empty `order_ids` / `order_outcomes`, each outcome an
+`OrderOutcome`, and a str-or-`None` `group_note`.  Write-once is a private
+`_finalized: bool` sentinel (never a data field), set only after validation
+succeeds.  An execution block is an *order outcome* (`OrderOutcome.BLOCKED`)
+plus an execution-log `blocked(DATA_MISSING)` — not a group fate.  Groups
+execute atomically: one failed probe blocks every order in the group, and the
+passing orders record `GROUP_ATOMICITY:<trigger_order_id>`.
+
+**Reserved synthesis paths.**
+- **Synthesis never rejects or drops.** It auto-generates mechanical actions
+  (roll, auto-unwind, hedge-rebalance) on their own schedule, and scaling in/out
+  *replaces* a signal action with derived actions.  An empty `OrderGroup` is
+  impossible by construction, so the old dropped-group branch cannot exist.
+- **`AggregationContext.execution_log` / `.calendar` / `.config`** are **reserved
+  for synthesis plugins** (Roll / Scaling will read prior fills, the provider,
+  and the run config when they land).  They are deliberately present and unused
+  until then; contrast the **removed** `ExecutionContext.calendar`, whose
+  consumer moved to the signal's tradability gate.  Do not remove them as
+  "unused".  The context is **frozen** — a mutable context handed to every rule
+  would be a cross-rule contamination hazard.
+
+**TradingSchedule (future):** adjusts a fixed-frequency schedule (e.g., "every
+Monday") by recomputing the first fully open day of the week using the
+CalendarProvider, remaining stateless.  Scaling / hedge / roll rules arrive as
+synthesis rules (transform action groups).
+
+**Future extension points (documented, not implemented).**  **Roll**, **flip**,
+**delta-hedge**, **scaling** rules, **netting**, **multi-action groups**,
+**multi-leg modifications**, and **short-structure partial modifications** are
+future engine-program surface.  The schema accepts their shapes; the pipeline
+and conversion gates reject them until the engine program lands.
+
+**Layer table (netting as a future slot).**
+
+| Layer | Input | Output |
+|---|---|---|
+| signal, synthesis rules | market/portfolio state | `ActionGroup` |
+| order conversion | `ActionGroup` | `OrderGroup` (`orders`, 1:1 with Actions) |
+| **netting — FUTURE SLOT** | orders-in | orders-out (documented only) |
+| execution | an `Order` | fills |
+| book application | fills | trade / structure / leg updates |
+| cost | events | cost events |
+
+**Netting one-liners (future).**  Detect rolls *before* net.  Netting input is
+the day's orders **organized by originating group plus lineage**.  The netting
+module is an order-in / order-out stage between conversion and execution;
+`AggregationContext.execution_log` / `.calendar` / `.config` are reserved for
+its (and the other plugins') reads.
+
+**Atomicity, partial fills and synthesis model.**
+
+- *Group atomicity is enforced at execution (`SimulatedExecution` fill-or-block). Live execution cannot
+  enforce execution-stage atomicity; in the rare case where both orders reach
+  the broker and one fills while the other blocks, the live adapter records the
+  group as flat (`(BLOCKED, BLOCKED, ...)`), sets `group_note`, and the trader
+  unwinds manually. The cost underestimate (one unwind per occurrence) is
+  bounded by the frequency of both-submitted partial fills, which is low.*
+- *Partial fills are out of scope. Each order fills fully or blocks. The future
+  composition mapping records quantity contributions per pre-net order, not
+  per-fill allocations.*
+- *Synthesis auto-generates mechanical actions (roll, auto-unwind,
+  hedge-rebalance) on their own schedule; scaling in/out replaces a signal's
+  action with derived actions to distribute execution over time. Synthesis does
+  not reject or drop.*
+- *`ExecutionRecord` now carries the durable `order_group_id` / `action_id`
+  foreign keys, plus `probe_status` / `blocked_by` for group atomicity.*
+
+**Referenceability.**  The id chain is `action_group_id` → `action_ids`
+(parallel to `actions`) → `order_group_id` → `order_ids` → `fill_id`.
+`ActionGroupRecord` carries the action-group facts (`order_ids`,
+`order_outcomes`); each `Order` carries its own `order_id` and `action_id`.
 
 ### 3.9 Backtester
 
 - The backtester is initialised with a single configuration object (`BacktestConfig`) that bundles all settings:
-  - `signal` – the `BaseSignal` instance that generates trading orders.
+  - `signal` – the `BaseSignal` instance that generates action groups.
   - `start_date`, `end_date` – the simulation period.
+  - `calendar_provider` (required, no default) and `simulation_calendar_codes` – the union simulation calendar (§3.5).
+  - `data_feed` and `ticker_to_calendar_code` – the feed the daily T-1 `DataView` draws from, and the ticker → calendar-code mapping the `DataView` uses for per-instrument scoping (§3.7).
+  - `order_synthesis` (default `None` → empty synthesis chain) – the order-assembly seam (§3.8).
+  - `execution_backend` (default `None` → `SimulatedExecution`) – the backtest/live parity boundary (`backtester/execution.py`).
   - `asset_class_configs` – a dictionary mapping each **asset class** to an `AssetClassConfig` dataclass.  
     An `AssetClassConfig` contains:
     - `pricer` – the `BasePricer` instance responsible for pricing all instruments of this asset class.
@@ -609,7 +806,7 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
     - `record_pricing_inputs` – an optional boolean (default `False`). If `True`, the pricer is instructed to return the raw pricing inputs (e.g., implied vol, forward price) that were used on each date. These are stored on `LegState.pricing_inputs`.
 
 - **No pre‑defined instrument universe.** The backtester does not hold a list of instruments ahead of time.  
-  Instruments are created dynamically by the signal when it returns `TargetTrade` dictionaries. Each `TargetTrade` specifies the `Contract` (ticker, asset class, multiplier, etc.) that the backtester uses to open a new `Trade`.  
+  Instruments are created dynamically from the orders a signal's **`ActionGroup`s** become: the signal emits action groups, synthesis (§3.8) converts them into `Order` objects, and each `Order` specifies the `Contract` (ticker, asset class, multiplier, etc.) that the backtester uses to open a new `Trade`.  
   If a signal generates an instrument whose `asset_class` is not recognised (i.e., not present in `asset_class_configs`), the backtester raises an error immediately.
 
 - **Internal state:**
@@ -618,6 +815,8 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
   - `trade_history` – list of **all** trades ever opened. A trade is added to `trade_history` when it is first created and **never removed**.  
     After a trade is closed, it remains in `trade_history` in its final state; it is simply removed from `active_trades`.  
     `trade_history` provides the immutable, complete audit trail for post‑backtest analysis.
+  - `action_group_log` – the run's append-only **action-group log** (reset at the start of each run): every emitted group plus the facts written once by `ActionGroupRecord.finalize`: `order_ids` / `order_outcomes` (per-order ids and position-change facts) and `group_note` (a reserved group-level annotation).  The log also mints `action_ids`, parallel to the group's actions.  The id chain is `action_group_id → action_ids → order_group_id → order_ids`.
+  - `execution_log` – the run's write-once **execution log** (reset each run): one terminal record per execution outcome (`FILLED` with a `fill_id`, or `BLOCKED` with a `blocked_code`), plus the trade↔execution linkage.  Data-availability blocks live here.
 
 - **Daily loop order:**  
   For each trading day T (as determined by the `CalendarProvider`'s union simulation calendar — `BacktestConfig.calendar_provider.trading_days(simulation_calendar_codes, start_date, end_date)`):
@@ -649,30 +848,24 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
              value.
            - **Opening‑day alignment:** At trade creation, the backtester records a 0.0 P&L on the entry date and (when `record_pricing_inputs` is enabled) the entry‑day pricing inputs, so all per‑leg time series are aligned from day 1.
 
-  2. **Request and execute today’s orders:**  
-      *(Phase 1:* calls `signal.generate_signals()` directly. *Phase 2:* calls signal to get alpha intents, then passes them through the OrderGenerator (§3.8) to obtain `TargetTrade` orders.*)
-      - **Portfolio state snapshot (conditional):**
-       If `signal.requires_portfolio_state` is `True`, the backtester has already created a `PortfolioState` from `active_trades` at the end of day T‑1 (after all T‑1 processing). This snapshot is passed as `portfolio_state`.  
-       If the flag is `False` (default), `portfolio_state` is `None`.
-     - **Trade history snapshot (conditional):**  
-       If `signal.requires_trade_history` is `True`, the backtester has already built a `trade_history_snapshot` – a tuple of `TradeRecord` objects – at the end of day T‑1 from the `trade_history` list as it stood at that time (all trades ever opened up to and including day T‑1). This snapshot is passed as `trade_history_snapshot`.  
-       If the flag is `False` (default), `trade_history_snapshot` is `None`.
-     - Call `signal.generate_signals(current_date=T, portfolio_state=state_T-1, trade_history_snapshot=snapshot_T-1)`. The signal returns a list of `TargetTrade` dictionaries.
+  2. **Request and execute today’s orders (the action-group pipeline, as built):**  
+      The Phase 1 `signal.generate_signals()` call is gone. Each day the loop:
+      1. builds the T-1 `DataView`, the `PositionBooks` and the `AggregationContext`;
+      2. calls `signal.generate_action_groups(data_view, action_group_log.for_strategy(id), position_book)`;
+      3. appends the returned groups to the **action-group log** (`action_group_id` and `emission_date` are stamped at emission; the loop asserts the emission date is `T`);
+      4. runs the **synthesis chain** (§3.8), producing a `tuple[OrderGroup, ...]` — one OrderGroup per input group, positionally aligned — each holding `Order` objects with their own `order_id` / `action_id`;
+      5. for each record/OrderGroup pair **in order**, dispatches the group to the **execution seam** (`backtester/execution.py`) — the execute → finalize → commit ordering lives in one function, `_dispatch_synthesized_order`.
 
-     - *Implementation note:* Building the full snapshot from `trade_history` is O(#trades). For typical strategy‑level trade counts (hundreds to low thousands) this is negligible. If it ever becomes a performance concern, future optimisations could include a signal‑declared lookback window or an incremental update, but these are not required for Phase 1.
-
-     - **Data availability check (all orders):**  
-       Before executing any order (whether `NEW`, `UNWIND`, or `ROLL`), the backtester verifies that the pricer can produce a valid `price()` for every instrument involved on date T.  
-       - If all prices are valid, the order is executed as described below.  
-       - If any instrument returns `None` (data gap exceeding the forward‑fill limit), the entire order is **rejected** (skipped, with a warning logged). This simulates a real‑world execution failure where the market is not reliably priced. No trades are opened, closed, or rolled on that day for the affected instruments.  
-       Short disruptions (≤ the forward‑fill limit) are handled automatically by data providers and do not cause rejection.
+      - **No rejection path.**  A group either fills (and commits) or blocks at execution.  The per-order ids and outcomes are recorded on the record (`order_ids`, `order_outcomes`).  A missing price (data gap beyond the forward-fill limit) is an *order outcome*: the execution backend decides it, the engine writes an execution-log record `blocked(code="DATA_MISSING")` (plus the single warning) and does **not** commit to the book (Flow A).  An order built but blocked is discarded before persistence — never added then removed.  The signal is responsible for not emitting on a closed market (§3.7).
+      - *Implementation note:* the position book and trade-history snapshot are now built **every** day (the 5a rewrite removed the `requires_*` gates), an O(#trades) cost that is negligible at strategy trade counts.
 
      - **Instrument resolution (all `NEW` orders):**  
        For every `NEW` order, before creating any `Trade` or `StrategyStructure`, the backtester passes each leg dictionary to the appropriate pricer via `pricer.resolve_instrument(leg_dict, date=T)`.  
         - If the pricer returns a `Contract`, the backtester uses it to construct the `LegState`.  
-        - **Infrastructure keys discarded:** The common‑keys filter (see §3.1) now also strips `"cost_leg"`, `"structure_id"`, and `"leg_id"` so they never appear in `Contract.params`.  
+        - **Infrastructure keys discarded:** The common‑keys filter (see §3.1) strips `"cost_leg"`, `"structure_id"`, `"leg_id"`, and both calendar fields so they never appear in `Contract.params`.  
+        - The pricer stamps `Contract.trading_calendar_code` from its constructor-injected `ticker_to_calendar_code` mapping — this is the only place the field is populated.  
         - The backtester then calls `pricer.price(contract, date=T)` to obtain the execution price. This value is set as both the `entry_price` and the initial `current_price` of the leg.  
-        - If the pricer returns `None` (required market data missing), the entire `NEW` order is rejected.  
+        - If the pricer returns `None` (required market data missing), the `NEW` order is blocked at execution.  
         This step completely isolates all instrument‑specific parameter resolution inside the pricer. The backtester has no knowledge of how any missing fields were filled in.
 
       - **LegState construction, `leg_id`, and cost‑leg identification:** When the completed leg dictionary is returned by `resolve_instrument`, the backtester constructs the `LegState` object. At this point, the backtester:  
@@ -708,11 +901,11 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
 
       - Tags are only applied when a new trade is created. For existing trades, the tags remain unchanged.
 
-      - **Cost‑exposure computation (all order types):**  
-        Before any `StrategyStructure` lifecycle method is called, the backtester computes the cost exposures for the transaction:
+      - **Cost‑exposure computation (commit phase, filled structures only):**  
+        Since Task 5b‑1 this lives in the **execution‑side** writer `write_cost_exposures` (`backtester/execution.py`), called during the commit phase for a **filled** structure only (a blocked order writes no cost event):
         1. For each cost‑bearing leg in the affected structure(s) (identified by `leg_state.cost_leg`), call `pricer.compute_cost_exposure(leg, date=T)`.  
         2. **For NEW orders**, the exposure is computed on the freshly‑constructed `LegState` using the entry price.  
-        3. **For UNWIND and partial‑add orders**, the exposure is computed on the **pre‑event** leg state (before `current_size` or `entry_price` are modified).  
+        3. **For UNWIND and partial‑add orders**, the exposure is computed on the **pre‑event** leg state (before `current_size` or `entry_price` are modified) — the writer runs before the lifecycle method mutates sizes.  
         4. Collect the results into a `{leg_id: per_unit_dict}` mapping.  
         5. If any `compute_cost_exposure` call returns `None` (data unavailable), log a warning and exclude that leg from the `cost_exposures` map for this event (the event is still recorded; the affected leg is simply treated as cost‑free for this transaction).  
         6. Pass `cost_exposures` through `Trade` methods to the `StrategyStructure` lifecycle method, which stores it in the event log entry under `"cost_exposures"`.  
@@ -743,8 +936,8 @@ The first rule to be built is **CalendarValidationRule**, which uses the Calenda
   - Groups configuration by asset class, with consistent risk‑measure and data‑source settings.
   - Fully separates cost calculation (deferred to the summary phase, via structure‑level event logs), so cost assumptions can be changed without re‑running the backtest.
   - Maintains leg‑level daily P&L series and cumulative realised/unrealised P&L, enabling straightforward post‑backtest analysis and P&L attribution.
-  - Supports scaling‑in, scaling‑out, partial adds/unwinds, and rolling of structures, all through a uniform dictionary‑based signal output.
-  - Is fully backward‑compatible with Phase 1: a single `'equity'` asset class, one pricer, no risk measures, no overrides, and every trade contains one structure with one leg.
+  - Supports scaling‑in, scaling‑out, partial adds/unwinds, and rolling of structures, all through a uniform action-group interface.
+  - Is fully backward‑compatible with Phase 1: a single `'equity'` asset class, one pricer, no risk measures, no overrides, and every trade contains one structure with one leg.  With no `ticker_to_calendar_code` mapping configured (or no provider passed to the signal), the signal is calendar-blind, so gating changes nothing for a calendar-blind config.
 
 - **Future extension – order retry on missing data:**  
   In later phases, a `'on_missing'` field could be added to `TargetTrade` dictionaries (values `'reject'` or `'retry'`). Retried orders would be held in a pending queue and executed on the first subsequent day with valid data, mimicking real‑world execution disruptions. This is not needed for Phase 1 daily‑frequency equities.
@@ -1232,7 +1425,7 @@ The framework supports decomposing daily PnL into user‑specified risk factors 
 ### 3.13 Cost Model (transaction cost handling)
 
 Transaction costs are fully decoupled from the backtester’s daily P&L loop.  
-The backtester records cost‑relevant events at the **structure** level: each `StrategyStructure` logs events (open, partial add, partial/full unwind, roll) together with the structure’s per‑unit risk exposure at that moment.  
+Cost-relevant events are recorded at the **structure** level by the **execution-side** commit phase (Task 5b‑1): the `write_cost_exposures` writer (`backtester/execution.py`) computes the per‑unit exposures for a **filled** structure, and each `StrategyStructure` logs events (open, partial add, partial/full unwind, roll) together with those exposures.  A blocked order writes no cost event.  
 A separate `CostModel` object converts those structure‑level events into a cost time series during the summary phase, delegating asset‑specific cost arithmetic to a per‑asset‑class `BaseCostCalculator`.
 
 **Key design properties:**
@@ -1350,7 +1543,18 @@ No functionality is lost. To add a new asset class (e.g., equity options), write
 ```markdown
 Backtester
 ├── active_trades: list[Trade]
-└── trade_history: list[Trade]
+├── trade_history: list[Trade]
+├── action_group_log: ActionGroupLog  (append-only; action_group_id -> action_ids)
+└── execution_log: ExecutionLog    (write-once; one record per outcome)
+
+Daily flow
+signal (T-1 DataView)
+  -> ActionGroup[]  -> ActionGroupLog.append_many  (stamps id + emission_date)
+  -> OrderSynthesis.synthesize (synthesis rule chain, empty by default)
+       -> tuple[OrderGroup, ...] { order_group_id, orders: Order[] }  (1 per group)
+  -> for each (record, OrderGroup):  ExecutionBackend.execute_group
+       -> ExecutionLog.append per order -> commit on all FILLED
+       record facts: order_ids, order_outcomes, group_note
 
 Trade
 ├── active_structures: list[StrategyStructure]
@@ -1361,8 +1565,8 @@ StrategyStructure
 └── event_log: list[CostEvent]
 
 LegState (mutable)             Contract (frozen)
-├── per‑leg PnL, risk          └── immutable instrument
-└── ref → Contract                  identity (ticker, ...)
+├── per‑leg PnL, risk          └── immutable instrument identity
+└── ref → Contract                 (+ calendar metadata)
 ```
 
 ## 4. Validation framework (to be built after core backtester)
@@ -1481,8 +1685,8 @@ Build the following in order, each tested before moving on:
 4. **StrategyStructure** – a standalone class with `legs` (list of `LegState`, always one leg in Phase 1), an event log for cost, and lifecycle methods `open(date)`, `unwind(date, fraction=1.0)`, and `roll(new_structure, date)` (stubbed – raises `NotImplementedError` in Phase 1). Building this as a real class from day one avoids any refactoring of `Trade`, the backtester, or signals when multi‑leg support is added later.
 5. **Trade** – with `active_structures` / `structure_history`, lifecycle methods (`add_structure`, `unwind_structure`), tags, and cost‑event recording. In Phase 1 every trade contains exactly one structure with one leg. `roll_structure` may be implemented as a stub; it is not exercised by the SMA example.
 6. **CostModel** – `CostModel` with `EquityCostCalculator` that charges a constant bps fee on notional, applied at each structure event. Returns a dictionary of **per‑leg daily cost series** (in the leg’s local currency), matching the `Summary`’s expected interface (Section 3.13).
-7. **BaseSignal** and **SMACrossoverSignal** – signal returns `TargetTrade` dictionaries with `NEW` / `UNWIND` actions; one‑day lag handled internally.
-8. **Backtester** – full daily loop with P&L computation, instrument resolution, data‑availability checks, and order execution (`NEW` and `UNWIND`). `ROLL` handling can be stubbed; it is not required for the SMA example.
+7. **BaseSignal** and **SMACrossoverSignal** – signal returns `TargetTrade` dictionaries with `NEW` / `UNWIND` actions; one‑day lag handled internally. *(Phase‑1 as-built text, superseded in Task 5a — see Phase 2 above: signals now return `ActionGroup`s and the `DataView` handles the lag. Left as the historical Phase‑1 record.)*
+8. **Backtester** – full daily loop with P&L computation, instrument resolution, data‑availability checks, and order execution (`NEW` and `UNWIND`). `ROLL` handling can be stubbed; it is not required for the SMA example. *(Phase‑1 as-built text; the data‑availability check later moved into the execution seam — see Phase 2.)*
 9. **Summary** – accepts `SummarySpec`, produces standard reports (equity curve, trade summary, metrics, hit ratio, drawdown table), and calls `CostModel.compute_costs()`.
 10. **Example script** – `examples/sma_crossover_example.py` that:
     - Loads a CSV of SPY daily data (date, close) from a local file.
@@ -1492,9 +1696,21 @@ Build the following in order, each tested before moving on:
 11. **Unit tests** – for Contract/LegState, MarketData, Trade, and CostModel using pytest. StrategyStructure tests are covered by Trade tests until it becomes a standalone class.
 
 ### Phase 2: Validation
-1. **CalendarProvider** (§3.5): Implement with CSV holiday files, union logic, and core methods (`trading_days`, `is_valid_day`, `next_valid_day`). Replace `BacktestConfig.calendar_ticker` with a required `BacktestConfig.calendar_provider` plus `simulation_calendar_codes`. Intersection semantics for execution are deferred to `CalendarValidationRule` below.
-2. **OrderGenerator** (§3.8): Build the rule‑chain infrastructure. Implement **CalendarValidationRule** as the first `OrderRule`, using CalendarProvider to reject orders on holidays. Migrate any existing scaling/hedging logic into additional rules as needed.
-3. **Backtester pipeline update:** Modify the daily loop to use the new signal → OrderGenerator → execution pipeline (§3.9).
+
+**Order pipeline (Task 5) — as built and split across three steps.**
+1. **Task 5a (done; schema restructured since):** the signal action-group interface (`BaseSignal.generate_action_groups`), the T-1-clamped `DataView`, the append-only `ActionGroupLog` with the `action_group_id -> action_ids` chain, `PositionBooks`, and the pass-through **synthesis** chain (`OrderSynthesis`; `action_group_to_order_group` materializes `Order` objects). Breaking: `generate_signals` and the `requires_*` flags are gone; signals return `list[ActionGroup]`.  (Originating names: `Intent`/`LegIntent`/`StructureIntent`/`WorkingSet`/`IntentLog`/`intent_to_target_trade`; see the Action schema §3.7.)
+2. **Task 5b-1 (done):** the **execution seam** (`ExecutionBackend` / `SimulatedExecution` — the backtest/live parity boundary), the write-once **execution log** + `fill_id`, the execution-side cost-exposure writer (`write_cost_exposures`), and trade↔execution linkage. The data-availability pre-check collapses into `SimulatedExecution` blocking; a blocked group has `order_outcomes == (BLOCKED,)` and an execution-log `blocked(DATA_MISSING)`.  `SimulatedExecution` is all-or-nothing by as-built design (no partial fills; live partial-fill handling deferred).
+3. **Task 5b-2 (superseded by Phase C):** the order-side validation stage was
+   **removed**.  Calendar gating moved into the signal
+   (`BaseSignal.is_tradable`), the engine gained no rejection path, and the
+   action-layer disposition taxonomy was deleted.
+   `Contract.trading_calendar_code` / `settlement_calendar_codes` remain
+   (stamped during `resolve_instrument`).  The deferred replacement-lineage
+   readd is registered against the **scaling rule**, its only consumer.
+
+**CalendarProvider (Task 4, done):** CSV holiday files, union logic, and the per-code primitives (`trading_days`, `is_valid_day`, `next_valid_day`, `prev_valid_day`). `calendar_ticker` replaced by a required `BacktestConfig.calendar_provider` plus `simulation_calendar_codes`.
+
+**Validation pipeline (Tasks 6-8).**
 4. Implement `FoldGenerator` with purge/embargo.
 5. Implement nested parameter selection: walk‑forward loop that, per fold, does grid search using a sub‑training/sub‑validation split within the train window, then evaluates best params on validation.
 6. Extend Summary to aggregate out‑of‑sample trades across folds.
@@ -1512,10 +1728,11 @@ Build the following in order, each tested before moving on:
 
 ## 7. Important conventions
 
-- **Signal lag:** Signal output is always based on data up to T‑1, and orders are executed at T close. The signal itself handles the lag internally; the backtester never delays orders.
+- **Signal lag:** Signal output is always based on data up to T‑1, and orders are executed at T close. A signal no longer handles the lag itself: the per-loop-day `DataView` (§3.7) structurally clamps it to `T-1` (`get_price` raises beyond the cutoff, `get_series` end-clamps), and the backtester never delays orders.
+- **Vintage rule (T informs what happened, never what we decided):** The **order side** reads only `≤ T-1` plus advance-known data — signals see the T-1 `DataView`, and the tradability gate reads configured/static data (the ticker → calendar-code map) without resolving or pricing at T. The **execution side** owns `T`: it is the only place that resolves instruments and reads the loop day's prices, and commit-phase cost exposures are computed there. The rule bounds *decisions* by information that was actually available at decision time; T may be used to record what subsequently happened, but never to inform the decision itself. It is why the order side does **no** `resolve_instrument` (§3.8) and why `SimulatedExecution` owns the availability predicate (§3.9).
 - **Transaction costs:** Cost events are recorded on `StrategyStructure` objects at every lifecycle event (open, partial add, partial unwind, roll, full close). The `CostModel` converts those events into a daily cost series during the summary phase. Gross and net P&L are always separate.
 - **Contract parameters:** All instrument‑specific fields beyond `ticker`, `asset_class`, `multiplier`, `currency`, and `tags` are stored in the `params` dictionary. The backtester never inspects `params`; only the pricer does.
-- **Instrument resolution:** The leg dictionary in a `TargetTrade` may omit instrument‑specific parameters (e.g., strike, maturity). The pricer’s `resolve_instrument()` method fills in any missing fields at execution time.
+- **Instrument resolution:** The leg dictionary built from an `OrderLeg` may omit instrument‑specific parameters (e.g., strike, maturity). The pricer’s `resolve_instrument()` method fills in any missing fields at execution time.
 - **P&L is always return‑centric:** The LegState stores daily P&L changes, not cumulative balances. Cumulative P&L, realized/unrealized splits, and other derived metrics are computed on‑the‑fly by the Summary.
 - **Cost and FX are post‑processing:** The backtester never computes costs or converts currencies. Both are handled externally by the `CostModel` and the Summary (or the user), allowing assumptions to be changed without re‑running the simulation.
 - **Missing data:** Data providers forward‑fill short gaps (≤ configurable limit). For longer gaps, the pricer returns `None`, the backtester records `NaN` in the leg’s P&L, but `current_price` is not updated, preserving cumulative P&L integrity.
@@ -1622,7 +1839,7 @@ Other data types in the platform have their own dedicated interfaces and storage
 |-----------|----------|---------------------|
 | **Market data** | Prices, vol surfaces, rate curves, alternative data | `DataFeed` (this section) |
 | **Validation data** | Strategy graveyard, CPCV results, reproducibility configurations | `GraveyardStore` (see Section 4.3) |
-| **Execution data** | OMS orders, fills, slippage reports | Execution pillar (see Section 9) – consumed via `TargetTrade` return channel |
+| **Execution data** | OMS orders, fills, slippage reports | Execution pillar (see Section 9) – consumed via the research engine's synthesis/execution seam (whose internal order representation is the legacy `TargetTrade` dict) |
 | **Operational data** | Risk limits, margin calls, cash balances | Risk & Margin pillar (see Section 9) |
 
 This separation ensures that the research engine never depends on the schemas of other pillars. Adding a new execution report or a new graveyard metric requires no changes to the `DataFeed`, the pricers, or the backtester.
@@ -1661,8 +1878,8 @@ This research framework is one of four pillars that together form a complete sys
 | Pillar | Purpose | Key interfaces |
 |--------|---------|----------------|
 | **Data** | Ingestion, cleaning, storage, and serving of market and alternative data. | Produces clean, timestamped, multi‑source data consumed by the `DataFeed`. |
-| **Research** | Strategy simulation, validation, and analysis. *(This project.)* | Consumes cleaned data; produces `TargetTrade` dicts (for execution), `PortfolioState` snapshots (for risk), and `trade_history` (for analysis). |
-| **Execution** | Order management, broker connectivity, and fill reconciliation. | Consumes `TargetTrade` dicts from the research engine; produces execution reports. |
+| **Research** | Strategy simulation, validation, and analysis. *(This project.)* | Consumes cleaned data; produces `ActionGroup`s (the strategy layer's output), `PortfolioState` snapshots (for risk), and `trade_history` (for analysis). The legacy `TargetTrade` order dict is internal to the research engine's synthesis/execution seam, not the strategy layer's boundary. |
+| **Execution** | Order management, broker connectivity, and fill reconciliation. | Consumes the orders the research engine's synthesis/execution seam produces (internal `TargetTrade` dicts today); produces execution reports. |
 | **Risk & Margin** | Real‑time risk monitoring, margin calculations, funding and cash‑flow modelling. | Consumes position, greek, and P&L data from the research engine and execution reports. |
 
 Each pillar is designed to be built and maintained independently, communicating through stable, well‑defined interfaces. The research framework already implements the interfaces that the other pillars will consume, so those pillars can be developed later without any changes to the backtester or summary modules.
@@ -1672,13 +1889,15 @@ This section is a long‑term vision statement; none of the other pillars are re
 **OMS and trade lifecycle management**  
 The same leg‑structure‑trade hierarchy used in the backtester carries through to production systems. In the Order Management System (OMS), a dedicated tab can display underlying‑level risks before execution, giving traders an immediate view of net exposures per ticker.
 
-After execution, the `OrderGenerator` (see §3.8) produces any mechanical adjustments (rolls, hedge orders, scheduled unwinds, and other scheduled future events) which are fed to the trade lifecycle management application. In that application, the `lot_id` grouping is used to visually connect rolled structures together, so a trader can see the full history of a position across contract rolls.
+After execution, the order-assembly stages (see §3.8) produce any mechanical adjustments (rolls, hedge orders, scheduled unwinds, and other scheduled future events) which are fed to the trade lifecycle management application. In that application, the `lot_id` grouping is used to visually connect rolled structures together, so a trader can see the full history of a position across contract rolls.
 
 This architectural continuity—from backtest to OMS to lifecycle monitoring—ensures that the same data structures and risk metrics are used consistently, reducing translation errors between research and production.
 
 ## 10. Portfolio Layer (Planned)
 
 > **Status:** This section specifies the planned Portfolio Layer, a coordination layer that spans the Research, Risk, and Execution pillars. It is **forward‑looking and not part of the current Phase 1 or Phase 2 implementation**. It builds on the existing Backtester, Event Log, CostModel, Pricer, and Trade/Structure/Instrument classes.
+
+> **Reconciliation with Task 5 (2026‑10‑04).** Task 5 has now realized the **order/execution primitives** this section composes: the action-group log (what a strategy wanted), the synthesis chain (how an action group becomes an order), the execution seam (`ExecutionBackend`, the single decision point for an order's outcome), and the execution log (`ExecutionRecord`, the terminal outcome). The Portfolio Layer is the *multi-strategy composition* of those primitives: its `NettingEngine` merges N strategies' action-group/execution logs, its `RiskConstraint`/`PortfolioAllocator`/`StrategySizer` are the portfolio-level check/modify rules, and its `BaseExecutionHandler` is the live counterpart of the `ExecutionBackend` seam. Nothing in Task 5 is single-strategy-specific by construction — the per-strategy scoping (`strategy_id` on action groups and execution records, `PositionBooks.for_strategy`) is deliberately present so the Portfolio Layer can consume the same logs rather than a parallel representation. The §10 names (`BacktesterResult` / `BaseCostModel`) remain the forward-looking aliases for the current `BacktestResult` / `CostModel`.
 
 > **Terminology mapping:** The Portfolio Layer specification below uses `BacktesterResult` and `BaseCostModel`; in the current codebase these correspond to `BacktestResult` and `BaseCostCalculator`/`CostModel`, respectively. When the Portfolio Layer is implemented, these names will be aligned with the existing code.
 
@@ -1695,7 +1914,7 @@ This architectural continuity—from backtest to OMS to lifecycle monitoring—e
 ### 10.2 Two Parallel State Tracks
 
 ```
-StrategyPortfolioState  (intent)
+StrategyPortfolioState  (action groups)
   = "What I would hold if every signal were executed"
   = Raw output of the strategy backtester — never mutated
   = Produced by Backtester (Layer 2)
@@ -1714,12 +1933,12 @@ ActualPortfolioState  (execution)
 │  Layer 2 — Strategy Layer  (parallel, mutually unaware)          │
 │                                                                  │
 │  Strategy 1 → Backtester → StrategyPortfolioState series         │
-│                           → Event Log (intent)                   │
+│                           → ActionGroupLog                       │
 │  Strategy 2 → Backtester → StrategyPortfolioState series         │
-│                           → Event Log (intent)                   │
+│                           → ActionGroupLog                       │
 │  …                                                               │
 │  Strategy N → Backtester → StrategyPortfolioState series         │
-│                           → Event Log (intent)                   │
+│                           → ActionGroupLog                       │
 └──────────────────────────────────────────────────────────────────┘
                          │
                          │  N state series + N event logs
@@ -1899,7 +2118,9 @@ class ExecutionRecord:
 class ExecutionStatus(Enum):
     FILLED = "filled"
     PARTIALLY_FILLED = "partial"
-    REJECTED = "rejected"
+    DECLINED = "declined"   # portfolio-layer gate outcome (planned); named
+                            # "declined" to avoid confusion with the removed
+                            # action-layer taxonomy
 ```
 
 #### 10.4.6 BaseExecutionHandler
@@ -2112,7 +2333,7 @@ Day T:
       ▼
   Portfolio Layer checks risk limits
       ├── Pass → ExecutionRecord(status=FILLED, filled=100)
-      └── Fail → ExecutionRecord(status=REJECTED, filled=0,
+      └── Fail → ExecutionRecord(status=DECLINED, filled=0,
                    rejected=100,
                    reason="SPX concentration limit exceeded")
 

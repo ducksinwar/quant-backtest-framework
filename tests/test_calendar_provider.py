@@ -3,7 +3,8 @@
 Two suites with a deliberate split:
 
 * **Pure calendar math** (union, ``is_valid_day``, ``next_valid_day``,
-  ``"all"``) runs against a hand-written **stub backend** holding hard-coded
+  ``prev_valid_day``, ``"all"``) runs against a hand-written **stub backend**
+  holding hard-coded
   holiday sets.  The math is decoupled from CSV parsing, so a pandas or
   fixture-format change cannot make a calendar-math test fail.
 * **Integration** (file discovery, parsing, caching, warnings, missing files)
@@ -634,3 +635,109 @@ class TestNextValidDay:
     def test_saturday_rolls_to_monday(self):
         prov, _ = _stub_provider()
         assert prov.next_valid_day("US", "2024-01-06") == "2024-01-08"
+
+
+class TestPrevValidDay:
+    def test_previous_day_before_a_business_day(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-03") == "2024-01-02"
+
+    def test_skips_over_weekend(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-08") == "2024-01-05"
+
+    def test_skips_over_holiday(self):
+        # 2024-01-04 is a US holiday, so the last valid day before 01-05 is 01-03.
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-05") == "2024-01-03"
+
+    def test_skips_over_consecutive_weekend_and_holiday(self):
+        # 2024-02-05 is a Monday, 02-03/02-04 a weekend, 02-02 a US holiday.
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-02-05") == "2024-02-01"
+
+    def test_across_year_boundary(self):
+        # 2025-01-01 is a Wednesday and not a US holiday.
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2025-01-02") == "2025-01-01"
+
+    def test_across_year_boundary_over_new_year_holiday(self):
+        # NY is closed on 2025-01-01, so it rolls back to 2024-12-31.
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("NY", "2025-01-02") == "2024-12-31"
+
+    def test_strictly_before_not_inclusive(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-03") != "2024-01-03"
+
+    def test_all_code_returns_previous_calendar_day(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("all", "2024-01-08") == "2024-01-07"
+
+    def test_all_code_across_weekend(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("all", "2024-01-07") == "2024-01-06"
+
+    def test_all_code_across_year_boundary(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("all", "2025-01-01") == "2024-12-31"
+
+    def test_all_code_short_circuits_before_any_backend_call(self):
+        prov = CalendarProvider(_strict_feed())
+        assert prov.prev_valid_day("all", "2024-01-08") == "2024-01-07"
+        prov._feed.get_holiday_dates.assert_not_called()
+
+    def test_timestamp_string_is_truncated_to_its_date_part(self):
+        prov, _ = _stub_provider()
+        # 2024-01-04 is a US holiday; the time component must not leak into
+        # the offset arithmetic or into the returned value.
+        assert prov.prev_valid_day("US", "2024-01-05 23:00:00") == "2024-01-03"
+        assert prov.prev_valid_day("US", "2024-01-04 15:30:45") == "2024-01-03"
+
+    def test_iteration_guard_raises_runtime_error(self):
+        # A pathological (all-days) calendar, no ~1000-row fixture needed.
+        dense = frozenset(
+            (datetime.date(2020, 1, 1) + datetime.timedelta(days=i)).isoformat()
+            for i in range(
+                (datetime.date(2030, 12, 31) - datetime.date(2020, 1, 1)).days + 1
+            )
+        )
+        prov, _ = _stub_provider({"DENSE": dense})
+        with pytest.raises(RuntimeError) as excinfo:
+            prov.prev_valid_day("DENSE", "2024-01-01")
+        message = str(excinfo.value)
+        assert "DENSE" in message
+        # Assert against the constant, not a copied literal: the message and the
+        # loop bound must not be able to drift apart.
+        assert str(_MAX_LOOKAHEAD_DAYS) in message
+        assert "2024-01-01" in message
+
+    def test_iteration_guard_not_triggered_for_sparse_calendar(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-03") == "2024-01-02"
+
+    def test_monday_rolls_back_to_friday(self):
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-08") == "2024-01-05"
+
+    def test_target_date_is_the_first_valid_day_of_the_year(self):
+        # 2024-01-01 is a Monday and not a US holiday, so the calendar must
+        # step back across the year boundary to Friday 2023-12-29.
+        prov, _ = _stub_provider()
+        assert prov.prev_valid_day("US", "2024-01-01") == "2023-12-29"
+
+    def test_empty_holiday_file_behaves_as_weekdays_only(self):
+        prov, _ = _stub_provider({"EMPTY": frozenset()})
+        assert prov.prev_valid_day("EMPTY", "2024-01-08") == "2024-01-05"
+        assert prov.prev_valid_day("EMPTY", "2024-01-03") == "2024-01-02"
+
+    @pytest.mark.parametrize("date_str", ["2024-01-04", "2024-01-06"])
+    def test_unknown_code_raises_on_weekday_and_weekend(self, date_str):
+        prov, _ = _stub_provider()
+        with pytest.raises(FileNotFoundError):
+            prov.prev_valid_day("NOPE", date_str)
+
+    def test_empty_string_code_raises(self):
+        prov, _ = _stub_provider()
+        with pytest.raises(FileNotFoundError):
+            prov.prev_valid_day("", "2024-01-03")

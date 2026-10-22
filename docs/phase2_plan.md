@@ -56,16 +56,76 @@
   - Data‑layer `trading_days()` removed from `CsvBackend` / `DataFeed` (calendars are cross‑cutting, not market data).
 - **Dependencies:** None
 
-### Task 5: OrderGenerator & Signal Intent Interface
-- [ ] **Goal:** Separate mechanical order rules from alpha signals.
-- **Deliverables:**
-  - `AlphaIntent` dict (BUY, SELL, CLOSE with ticker, notional).
-  - `OrderRule` ABC and `OrderGenerator` chain (first rule: `CalendarValidationRule`).
-  - `BaseSignal` gains optional `generate_intents()`; `SMACrossoverSignal` updated.
-  - `Backtester` uses new pipeline when `OrderGenerator` present; legacy `generate_signals()` still works.
-   - Notional‑to‑shares conversion moves into `OrderGenerator`.
-   - `OrderGenerator` introduces a truncated `DataView` that prevents signals from accessing data beyond T‑1, making the no‑look‑ahead property structural rather than conventional (finding 1.2).
+### Task 5: Order pipeline — action-group interface, execution seam
+
+Task 5 was delivered in three steps. The as‑built pipeline is
+`signal → ActionGroup → (synthesis chain) → OrderGroup → execution seam → book`,
+with an append‑only **action‑group log** and a write‑once **execution log**. The
+order assembly is a single **synthesis chain** that transforms action groups
+(`rule(action_groups, ctx)`); the engine has no check stage.  The order‑id
+fan‑out is handled by `ActionGroupRecord` (`action_ids` → `order_ids`).
+
+> **Naming note.** The schema was renamed in the single‑action‑subset task:
+> `Intent`→`ActionGroup`, `LegIntent`→`LegSpec`, `StructureIntent`→`StructureSpec`,
+> `WorkingSet`→`OrderGroup`, `IntentLog`→`ActionGroupLog`, modules
+> `intents.py`→`actions.py` and `intent_log.py`→`action_group_log.py`. The
+> pipeline stage is now **action group synthesis** and its log is the
+> `ActionGroupLog`; the old names survive only in historical records.
+
+- [ ] **Task 5a (done): Signal action-group interface, pass‑through synthesis, action-group log.**
+  - `BaseSignal.generate_action_groups(data_view, action_group_log, position_book) -> list[ActionGroup]`; a required `strategy_id`; the `requires_portfolio_state` / `requires_trade_history` flags and `generate_signals()` are removed.
+  - `ActionGroup` schema (`ContractSpec`, `LegSpec`, `StructureSpec`, `TradeSpec`, `Action`, `Side`, `OrderGroup`, `AggregationContext`), the append‑only `ActionGroupLog` + strategy-scoped view, the T-1-clamped `DataView`, and `PositionBooks`.
+  - `OrderSynthesis` producing `OrderGroup`s of `Order` objects; each order carries its own `order_id` / `action_id`.
+  - Notional‑to‑shares happens in the signal via `DataView.reference_price` (the T-1 reference close) with fractional sizes.  Moving sizing into synthesis remains future work.
+- [ ] **Task 5b‑1 (done): Execution seam, execution log, cost‑writer swap.**
+  - `ExecutionBackend` / `SimulatedExecution` (the backtest/live parity boundary) and `ExecutionReport`; the write‑once `ExecutionLog` + `fill_id`; trade↔execution linkage.
+  - The data‑availability pre‑check collapses into `SimulatedExecution` blocking (the single warning emitter); a blocked group has `order_outcomes == (BLOCKED,)`, an execution‑log `blocked(DATA_MISSING)`, and is never committed (Flow A).
+  - `write_cost_exposures` moves the cost‑exposure computation to the execution side (filled structures only).
+- [x] **Task 5b‑2 (landed, then superseded by Phase C): Contract calendar fields.**
+  - The order‑side validation stage (its rule types, the short‑circuit chain and
+    the config seam that selected them) was **removed**.  Calendar gating is
+    signal‑side (`BaseSignal.is_tradable`); there is no engine rejection path
+    and no action‑layer disposition taxonomy.
+  - `Contract.trading_calendar_code` / `settlement_calendar_codes` remain,
+    populated during `resolve_instrument` from the pricer‑constructor‑injected
+    `ticker_to_calendar_code` mapping.
 - **Dependencies:** Tasks 2, 3, 4
+- **Remaining (future):** lot rounding; the synthesis plugins (roll/auto‑unwind/hedge/scaling) and the out‑of‑band netting module; **deferred `REPLACED` re‑add** — the replacement‑lineage field on `ActionGroup` and the log transition are registered against the **scaling rule**, which is their only consumer (scaling supersedes a signal's action with derived actions); portfolio‑layer checks (eligibility, risk/liquidity/margin, portfolio limits) belong to §10, not the strategy layer; `ROLL` execution.  Equity uses adjusted data and conversion carries fractional sizes unchanged (no rounding).
+
+#### Consolidated gate registry
+
+The single‑action‑subset task lands the schema/skeleton and **gates** every
+shape outside its realized scope. Each gate is **fail‑loud** and **named**; the
+schema accepts the shape and the pipeline or conversion rejects it. This is the
+one registry; individual gates are not restated elsewhere.
+
+| Gate | Kind | Placement | Behavior | Concrete trigger |
+|---|---|---|---|---|
+| **Multi-action ActionGroups** | pipeline | `OrderSynthesis.synthesize`, **before** order conversion | reject groups with >1 Action until the engine program lands | `test_multi_action_group_is_rejected_before_conversion` |
+| **Multi-leg modifications** | conversion | `order_synthesis` gate, needs the book's legs | reject a partial add/unwind on a structure with >1 leg | `test_multi_leg_partial_add_is_rejected` |
+| **Short-structure partial modifications** | conversion | `order_synthesis` gate, needs signed anchor size | reject a partial add/unwind on a short structure | `test_short_structure_partial_add_is_rejected`, `…_unwind_is_rejected` |
+| **Stamping intermediate stage** | engine-program | between synthesis rules and order conversion | rule-emitted groups are rejected until the stamping stage appends un‑stamped groups to the log; the pre‑stamp workaround is structurally forbidden | `test_a_rule_may_not_emit_a_group_never_appended` |
+| **Order-id fan-out** | schema/pipeline | `ActionGroupRecord` (per-action `action_ids`, per-order `order_ids` / `order_outcomes`) ↔ `OrderGroup` (`order_group_id`, N `Order`s with their own ids) | Each action and each order has its own id; the record carries parallel facts written once by `finalize`. | — |
+| **T-1 sizing** | landed | `DataView.reference_price` | T-1 reference price, fractional sizing; no look-ahead. | `test_returns_the_t_minus_1_close_when_t_is_present` |
+| **Replacement lineage (`REPLACED` re‑add)** | engine-program | `ActionGroup` + `ActionGroupLog` | register with the **scaling rule**: scaling sets the predecessor pointer and the log performs the transition; no other consumer exists today. | — |
+| **Netting module** | future slot | between order conversion and execution (order-in → order-out, documented only) | detect rolls *before* net; netting input = orders organized by originating group + lineage | — |
+| **Underlying-identity field** | schema | `Contract.params` → resolved identity | move original-intent params off `Contract.params` so `Contract` is a pure hashable identity (Phase 4 risk aggregation / multi-leg netting prerequisite) | — |
+
+#### Explicit unwind-all form (future)
+
+- [ ] **Explicit unwind‑all form** — give the unwind‑all fan‑out its own action/flag so a `structure_id=None` UNWIND cannot silently close the whole book.
+
+#### Resolved — digest-method reconcile (R7)
+
+The historical content‑digest literals (`e9a25c6d…` cost, `e2825941…` event) did
+**not** reproduce under any serialization/normalization method tried, while the
+stdout SHA did. **Closed by the single‑action‑subset task:** the stdout gate
+adopts one **canonical, position‑independent, UUID‑substituted** method — each
+dashed/hex UUID token is replaced with a sequential `UUID_0001…` in
+first‑encounter order, then SHA‑256 — and was **re‑baselined once on the
+pre‑change tree** (`cc6b08fbfa7466dca4f9084a37998775db9100b5af09a13409b1a2118ed62560`).
+Content digests stay **session‑comparative** by scope choice (same harness, same
+session), not because a reproducible literal is impossible.
 
 ---
 
@@ -111,6 +171,6 @@
 
 ## Phase 3+ (Future)
 - [ ] Introduce a `CostExposure` TypedDict for type safety in the cost‑exposure path (finding 2.1).
-- [ ] Replace `requires_portfolio_state` / `requires_trade_history` class attributes with constructor‑enforced declarations or properties (finding 2.3).
+- [x] ~~Replace `requires_portfolio_state` / `requires_trade_history` class attributes with constructor‑enforced declarations or properties (finding 2.3).~~ **Resolved in Task 5a**: both flags were removed; the loop always builds the T‑1 position book and trade history, and `BaseSignal` now requires a constructor `strategy_id`.
 - [ ] Extract a `MissingDataAligner` class from `Summary` if the class grows beyond its current scope (finding 2.5).
 - [ ] Migrate original trading intent (tenor, delta, etc.) from `Contract.params` to `LegState.original_intent` so that `Contract` becomes a pure, hashable instrument identity (prerequisite for Phase 4 risk aggregation and multi‑leg netting).

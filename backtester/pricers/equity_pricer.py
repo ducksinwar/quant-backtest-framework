@@ -2,7 +2,8 @@ from backtester.pricers.base_pricer import BasePricer
 
 
 class EquityPricer(BasePricer):
-    def __init__(self, provider):
+    def __init__(self, provider, ticker_to_calendar_code=None):
+        super().__init__(ticker_to_calendar_code=ticker_to_calendar_code)
         self.provider = provider
 
     def price(self, contract, date: str) -> float | None:

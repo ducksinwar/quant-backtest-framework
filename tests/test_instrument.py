@@ -24,6 +24,18 @@ class TestContract:
         assert c.currency == "HKD"
         assert c.params == {"sector": "financials"}
 
+    def test_calendar_fields_default(self):
+        c = Contract(ticker="SPY", asset_class="equity")
+        assert c.trading_calendar_code is None
+        assert c.settlement_calendar_codes == ()
+
+    def test_calendar_fields_custom(self):
+        c = Contract(
+            ticker="2800.HK", asset_class="equity",
+            trading_calendar_code="HK",
+        )
+        assert c.trading_calendar_code == "HK"
+
     def test_params_default_factory_isolates_instances(self):
         c1 = Contract(ticker="A", asset_class="equity")
         c2 = Contract(ticker="B", asset_class="equity")

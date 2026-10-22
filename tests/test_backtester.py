@@ -1,5 +1,7 @@
 import dataclasses
-from unittest.mock import MagicMock, PropertyMock
+import warnings
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -18,23 +20,104 @@ from backtester.snapshots import (
     TradeRecord,
     TradeSnapshot,
 )
+from backtester.actions import (
+    Action,
+    ActionGroup,
+    ActionType,
+    AggregationContext,
+    ContractSpec,
+    LegSpec,
+    PROVENANCE_SIGNAL,
+    Side,
+    StructureSpec,
+    TradeSpec,
+)
+from backtester.action_group_log import ActionGroupLog
+from backtester.order_synthesis import action_group_to_order_group
+from backtester.orders import OrderOutcome
+from backtester.signals.sma_crossover import SMACrossoverSignal
+from backtester.position_books import PositionBooks
 from backtester.strategy_structure import StrategyStructure
 from backtester.trade import Trade
 
+#: Committed fixtures (the example's dataset).
+MARKET_DATA_DIR = Path(__file__).resolve().parents[1] / "market_data"
 
-def _make_mock_signal(orders_lookup=None, requires_portfolio=False, requires_history=False):
-    """Create a mock signal that returns pre-programmed orders per date."""
-    mock = MagicMock()
-    type(mock).requires_portfolio_state = PropertyMock(return_value=requires_portfolio)
-    type(mock).requires_trade_history = PropertyMock(return_value=requires_history)
 
-    if orders_lookup:
-        def generate_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
-            return orders_lookup.get(current_date, [])
-        mock.generate_signals.side_effect = generate_side_effect
+def _group(action, *, strategy_id="mock"):
+    return ActionGroup(
+        action_group_id=None,
+        strategy_id=strategy_id,
+        provenance=PROVENANCE_SIGNAL,
+        actions=(action,),
+    )
+
+
+def _new_trade(ticker, size, *, asset_class="equity", multiplier=None,
+               tags=(), trade_id=None, structure_id="S1"):
+    """A NEW action: open a trade, or extend one when ``trade_id`` is set."""
+    spec_kwargs = {"asset_class": asset_class}
+    if multiplier is not None:
+        spec_kwargs["multiplier"] = multiplier
+    if trade_id is not None and structure_id is not None:
+        action = Action(
+            type=ActionType.NEW,
+            trade_id=trade_id,
+            structure_id=structure_id,
+            size=size,
+        )
+        return _group(action)
+    structure = StructureSpec(
+        legs=(
+            LegSpec(
+                ContractSpec(ticker, **spec_kwargs),
+                Side.LONG if size >= 0 else Side.SHORT,
+                abs(size),
+            ),
+        ),
+        tags=tuple(tags),
+    )
+    if trade_id is None:
+        action = Action(
+            type=ActionType.NEW,
+            spec=TradeSpec(structures=(structure,), tags=tuple(tags)),
+        )
     else:
-        mock.generate_signals.return_value = []
+        action = Action(
+            type=ActionType.NEW, spec=structure, trade_id=trade_id
+        )
+    return _group(action)
 
+
+def _unwind(trade_id=None, structure_id=None, size=None):
+    return _group(
+        Action(
+            type=ActionType.UNWIND,
+            trade_id=trade_id,
+            structure_id=structure_id,
+            size=size,
+        )
+    )
+
+
+def _make_mock_signal(orders_lookup=None, strategy_id="mock"):
+    """Create a mock signal that returns pre-programmed action groups per date.
+
+    The lookup values are already ActionGroups built by ``_new_trade`` /
+    ``_unwind``.  The interface is
+    ``generate_action_groups(data_view, action_group_log, position_book)``:
+    the lookup is keyed by ``data_view.date`` (the loop day) and the T-1
+    position book replaces the old portfolio_state / trade_history_snapshot
+    arguments.
+    """
+    mock = MagicMock()
+    mock.strategy_id = strategy_id
+
+    def generate_action_groups(data_view, action_group_log=None, position_book=None):
+        groups = (orders_lookup or {}).get(data_view.date, [])
+        return list(groups)
+
+    mock.generate_action_groups.side_effect = generate_action_groups
     return mock
 
 
@@ -124,26 +207,13 @@ class TestBacktesterBasic:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [{"ticker": "TEST", "size": 100, "asset_class": "equity"}],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
             "2024-01-05": [
-                {
-                    "Action": "UNWIND",
-                    "trade_id": None,
-                    "info": [],
-                }
+                _unwind()
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
 
         bt_config = BacktestConfig(
             signal=signal,
@@ -171,7 +241,7 @@ class TestBacktesterBasic:
         pricer = EquityPricer(provider)
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
 
-        signal = _make_mock_signal(orders_lookup={}, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup={})
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -194,26 +264,13 @@ class TestBacktesterBasic:
 
         orders = {
             "2024-01-03": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [{"ticker": "TEST", "size": 100, "asset_class": "equity"}],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
             "2024-01-08": [
-                {
-                    "Action": "UNWIND",
-                    "trade_id": None,
-                    "info": [],
-                }
+                _unwind()
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -242,19 +299,10 @@ class TestBacktesterPnl:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [{"ticker": "TEST", "size": 100, "asset_class": "equity"}],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -282,26 +330,10 @@ class TestBacktesterPnl:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {
-                                    "ticker": "TEST",
-                                    "size": 10,
-                                    "multiplier": 50.0,
-                                    "asset_class": "equity",
-                                }
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 10, multiplier=50.0)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -333,14 +365,9 @@ class TestBacktesterPnl:
         signal = _make_mock_signal(
             orders_lookup={
                 "2024-02-01": [
-                    {
-                        "Action": "NEW",
-                        "trade_id": None,
-                        "info": [{"structure_id": None, "legs": [{"ticker": "X", "size": 100, "asset_class": "equity"}]}],
-                    }
+                    _new_trade("X", 100)
                 ],
             },
-            requires_portfolio=False,
         )
 
         # simulation_calendar_codes=None declares "no holiday calendars", so
@@ -365,83 +392,91 @@ class TestBacktesterPnl:
         assert any(np.isnan(x) for x in leg.daily_total_pnl)
 
 
-class TestBacktesterPortfolioState:
-    def test_portfolio_state_passed_when_flag_true(self, simple_csv):
+class TestBacktesterPositionBook:
+    """The T-1 position book is always built and passed; no flag gates it."""
+
+    def _run(self, simple_csv, signal, start="2024-01-02", end="2024-01-05"):
         backend = CsvBackend(base_dir=simple_csv)
         data_feed = DataFeed(backend)
         provider = EquityPriceProvider(data_feed)
         pricer = EquityPricer(provider)
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
-
-        signal = _make_mock_signal(requires_portfolio=True, requires_history=False)
-
         bt_config = BacktestConfig(
             signal=signal,
-            start_date="2024-01-02",
-            end_date="2024-01-05",
+            start_date=start,
+            end_date=end,
             asset_class_configs={"equity": config},
             calendar_provider=CalendarProvider(data_feed),
             simulation_calendar_codes=None,
         )
-        bt = Backtester(bt_config)
-        bt.run()
+        return Backtester(bt_config).run()
 
-        for call in signal.generate_signals.call_args_list:
-            _, kwargs = call
-            if kwargs.get("portfolio_state") is not None:
-                assert isinstance(kwargs["portfolio_state"], PortfolioState)
-                break
+    def test_book_and_log_view_are_always_passed(self, simple_csv):
+        captured = []
 
-    def test_trade_history_snapshot_passed_when_flag_true(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        data_feed = DataFeed(backend)
-        provider = EquityPriceProvider(data_feed)
-        pricer = EquityPricer(provider)
-        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        def capture(data_view, action_group_log, position_book):
+            captured.append((data_view, action_group_log, position_book))
+            return []
 
-        signal = _make_mock_signal(requires_portfolio=False, requires_history=True)
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = capture
+        self._run(simple_csv, signal)
 
-        bt_config = BacktestConfig(
-            signal=signal,
-            start_date="2024-01-02",
-            end_date="2024-01-05",
-            asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(data_feed),
-            simulation_calendar_codes=None,
+        assert len(captured) == 4  # 2024-01-02 .. 2024-01-05
+        for data_view, action_group_log, position_book in captured:
+            assert data_view.cutoff < data_view.date
+            assert isinstance(
+                position_book.portfolio_state, (PortfolioState, type(None))
+            )
+            assert isinstance(position_book.trade_history, tuple)
+            assert action_group_log.strategy_id == "mock"
+
+    def test_book_holds_the_open_position_from_the_next_day(self, simple_csv):
+        captured = []
+
+        def capture(data_view, action_group_log, position_book):
+            captured.append((data_view.date, position_book))
+            if data_view.date == "2024-01-02":
+                return [
+                    _new_trade("TEST", 100)
+                ]
+            return []
+
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = capture
+        self._run(simple_csv, signal)
+
+        books = dict(captured)
+        assert books["2024-01-02"].portfolio_state is None  # nothing held yet
+        book = books["2024-01-03"]
+        holding = book.find_holding("TEST")
+        assert holding is not None
+        assert holding.leg.size == 100.0
+        assert holding.structure_id
+        assert book.is_in_position("TEST") is True
+        assert (
+            book.trade_id_for_structure(holding.structure_id)
+            == holding.trade_id
         )
-        bt = Backtester(bt_config)
-        bt.run()
 
-        for call in signal.generate_signals.call_args_list:
-            _, kwargs = call
-            if kwargs.get("trade_history_snapshot") is not None:
-                assert isinstance(kwargs["trade_history_snapshot"], tuple)
-                break
+    def test_action_group_log_view_grows_with_this_strategy(self, simple_csv):
+        seen_lengths = []
 
-    def test_snapshot_none_when_flags_false(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        data_feed = DataFeed(backend)
-        provider = EquityPriceProvider(data_feed)
-        pricer = EquityPricer(provider)
-        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        def capture(data_view, action_group_log, position_book):
+            seen_lengths.append(len(action_group_log))
+            if data_view.date == "2024-01-02":
+                return [
+                    _new_trade("TEST", 100)
+                ]
+            return []
 
-        signal = _make_mock_signal(requires_portfolio=False, requires_history=False)
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = capture
+        self._run(simple_csv, signal)
 
-        bt_config = BacktestConfig(
-            signal=signal,
-            start_date="2024-01-02",
-            end_date="2024-01-05",
-            asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(data_feed),
-            simulation_calendar_codes=None,
-        )
-        bt = Backtester(bt_config)
-        bt.run()
-
-        for call in signal.generate_signals.call_args_list:
-            _, kwargs = call
-            assert kwargs["portfolio_state"] is None
-            assert kwargs["trade_history_snapshot"] is None
+        # A live, strategy-scoped window: empty before the first emission and
+        # one record richer from the next day on.
+        assert seen_lengths == [0, 1, 1, 1]
 
 
 class TestBacktesterUnknownAssetClass:
@@ -454,19 +489,10 @@ class TestBacktesterUnknownAssetClass:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [{"ticker": "TEST", "size": 100, "asset_class": "fx_option"}],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100, asset_class="fx_option")
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -480,35 +506,8 @@ class TestBacktesterUnknownAssetClass:
             bt.run()
 
 
-class TestBacktesterRoll:
-    def test_roll_raises_not_implemented(self, simple_csv):
-        backend = CsvBackend(base_dir=simple_csv)
-        data_feed = DataFeed(backend)
-        provider = EquityPriceProvider(data_feed)
-        pricer = EquityPricer(provider)
-        config = AssetClassConfig(pricer=pricer, risk_measures=[])
-
-        orders = {
-            "2024-01-02": [
-                {"Action": "ROLL", "trade_id": "some_id", "info": []}
-            ],
-        }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
-        bt_config = BacktestConfig(
-            signal=signal,
-            start_date="2024-01-02",
-            end_date="2024-01-05",
-            asset_class_configs={"equity": config},
-            calendar_provider=CalendarProvider(data_feed),
-            simulation_calendar_codes=None,
-        )
-        bt = Backtester(bt_config)
-        with pytest.raises(NotImplementedError):
-            bt.run()
-
-
 class TestBacktesterDataAvailability:
-    def test_new_order_rejected_when_price_is_none(self, simple_csv):
+    def test_new_order_blocked_when_price_is_none(self, simple_csv):
         backend = CsvBackend(base_dir=simple_csv)
         data_feed = DataFeed(backend)
 
@@ -535,21 +534,10 @@ class TestBacktesterDataAvailability:
 
         orders = {
             "2024-01-03": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -559,9 +547,28 @@ class TestBacktesterDataAvailability:
             simulation_calendar_codes=None,
         )
         bt = Backtester(bt_config)
-        result = bt.run()
+        with pytest.warns(UserWarning, match="data not available"):
+            result = bt.run()
         history = list(result.trade_history)
         assert history == []
+
+        # The group became orders handed to execution; the block is the order
+        # outcome and the execution-log status.
+        records = bt.action_group_log.records
+        assert len(records) == 1
+        record = records[0]
+        assert record.order_ids
+        assert record.order_outcomes == (OrderOutcome.BLOCKED,)
+        assert record.group_note is None
+
+        exec_records = bt.execution_log.records
+        assert len(exec_records) == 1
+        assert exec_records[0].status == "BLOCKED"
+        assert exec_records[0].blocked_code == "DATA_MISSING"
+        assert exec_records[0].fill_id is None
+        assert exec_records[0].fills == ()
+        assert exec_records[0].order_id == record.order_ids[0]
+        assert exec_records[0].action_group_id == records[0].action_group.action_group_id
 
     def test_unwind_order_not_rejected_when_price_available(self, simple_csv):
         backend = CsvBackend(base_dir=simple_csv)
@@ -572,24 +579,13 @@ class TestBacktesterDataAvailability:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
             "2024-01-05": [
-                {"Action": "UNWIND", "trade_id": None, "info": []}
+                _unwind()
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -615,41 +611,22 @@ class TestBacktesterSnapshotSemantics:
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
 
         captured_states = []
-
-        def capture_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
-            if portfolio_state is not None:
-                captured_states.append((current_date, portfolio_state))
-            return []
-
-        signal = _make_mock_signal(requires_portfolio=True, requires_history=False)
-        signal.generate_signals.side_effect = capture_side_effect
-
-        # Open trade on day 1 so we can inspect snapshots
-        # Use the direct signal approach: first call returns NEW, rest empty
         call_count = [0]
 
-        def step_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
-            if portfolio_state is not None:
-                captured_states.append((current_date, portfolio_state))
+        def step_side_effect(data_view, action_group_log=None, position_book=None):
+            if position_book.portfolio_state is not None:
+                captured_states.append(
+                    (data_view.date, position_book.portfolio_state)
+                )
             call_count[0] += 1
             if call_count[0] == 1:
                 return [
-                    {
-                        "Action": "NEW",
-                        "trade_id": None,
-                        "info": [
-                            {
-                                "structure_id": None,
-                                "legs": [
-                                    {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                                ],
-                            }
-                        ],
-                    }
+                    _new_trade("TEST", 100)
                 ]
             return []
 
-        signal.generate_signals.side_effect = step_side_effect
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = step_side_effect
 
         bt_config = BacktestConfig(
             signal=signal,
@@ -695,21 +672,10 @@ class TestBacktesterCostExposure:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -741,24 +707,13 @@ class TestBacktesterCostExposure:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
             "2024-01-05": [
-                {"Action": "UNWIND", "trade_id": None, "info": []}
+                _unwind()
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -790,21 +745,10 @@ class TestBacktesterRecordPricingInputs:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -829,21 +773,10 @@ class TestBacktesterRecordPricingInputs:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -902,14 +835,9 @@ class TestBacktesterPricingInputsNanPadding:
         )
 
         orders = {
-            "2024-01-02": [{
-                "Action": "NEW", "trade_id": None,
-                "info": [{"structure_id": None, "legs": [
-                    {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                ]}],
-            }],
+            "2024-01-02": [_new_trade("TEST", 100)],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal, start_date="2024-01-02", end_date="2024-01-08",
             asset_class_configs={"equity": config},
@@ -963,21 +891,10 @@ class TestBacktesterOrderRejectionWarning:
 
         orders = {
             "2024-01-03": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
         bt_config = BacktestConfig(
             signal=signal,
             start_date="2024-01-02",
@@ -1000,43 +917,25 @@ class TestBacktesterTradeHistorySnapshot:
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
 
         captured_snapshots = []
-
-        def capture_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
-            if trade_history_snapshot is not None:
-                captured_snapshots.append((current_date, trade_history_snapshot))
-            return []
-
-        signal = _make_mock_signal(requires_portfolio=False, requires_history=True)
-        signal.generate_signals.side_effect = capture_side_effect
-
         call_count = [0]
 
-        def step_side_effect(current_date, portfolio_state=None, trade_history_snapshot=None):
-            if trade_history_snapshot is not None:
-                captured_snapshots.append((current_date, trade_history_snapshot))
+        def step_side_effect(data_view, action_group_log=None, position_book=None):
+            captured_snapshots.append(
+                (data_view.date, position_book.trade_history)
+            )
             call_count[0] += 1
             if call_count[0] == 1:
                 return [
-                    {
-                        "Action": "NEW",
-                        "trade_id": None,
-                        "info": [
-                            {
-                                "structure_id": None,
-                                "legs": [
-                                    {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                                ],
-                            }
-                        ],
-                    }
+                    _new_trade("TEST", 100)
                 ]
             elif call_count[0] == 2:
                 return [
-                    {"Action": "UNWIND", "trade_id": None, "info": []}
+                    _unwind()
                 ]
             return []
 
-        signal.generate_signals.side_effect = step_side_effect
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = step_side_effect
 
         bt_config = BacktestConfig(
             signal=signal,
@@ -1064,6 +963,554 @@ class TestBacktesterTradeHistorySnapshot:
         assert closed_found, "TradeRecord with is_open=False, exit_date set should appear after close"
 
 
+class TestUnwindShapeEquivalence:
+    """Per-structure UNWIND == whole-trade UNWIND, execution-identical.
+
+    Both forms are representable as action groups; this converts both into
+    ``Order`` groups and drives them through the engine's check -> execute ->
+    commit path to prove the equivalence on a single-structure trade.
+    """
+
+    def _engine(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        return Backtester(
+            BacktestConfig(
+                signal=_make_mock_signal(),
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+
+    def _ctx_for(self, trade=None):
+        if trade is None:
+            books = PositionBooks()
+        else:
+            leg = LegSnapshot(
+                ticker="TEST",
+                asset_class="equity",
+                size=100.0,
+                entry_price=100.0,
+                current_price=105.0,
+                leg_id="L1",
+            )
+            structure = StructureSnapshot(
+                legs=(leg,),
+                structure_id=trade.active_structures[0].structure_id,
+            )
+            books = PositionBooks(
+                PortfolioState(
+                    date="2024-01-05",
+                    trades=(
+                        TradeSnapshot(trade_id=trade.trade_id,
+                                      structures=(structure,)),
+                    ),
+                ),
+                (),
+            )
+        return AggregationContext(
+            date="2024-01-03",
+            action_group_log=ActionGroupLog(),
+            execution_log=None,
+            position_books=books,
+            calendar=None,
+            config=None,
+        )
+
+    def _dispatch(self, bt, group, date, trade=None):
+        from backtester.execution import SimulatedExecution
+
+        record = bt.action_group_log.append(group, date)
+        order_group = action_group_to_order_group(
+            record.action_group, record.action_ids, self._ctx_for(trade)
+        )
+        bt._dispatch_synthesized_order(
+            record, order_group, date, SimulatedExecution()
+        )
+        return record
+
+    def _engine_with_open_trade(self, simple_csv):
+        bt = self._engine(simple_csv)
+        self._dispatch(bt, _new_trade("TEST", 100), "2024-01-02")
+        return bt, bt.active_trades[0]
+
+    def test_per_structure_unwind_reproduces_whole_trade_unwind(
+        self, simple_csv
+    ):
+        whole_bt, whole_trade = self._engine_with_open_trade(simple_csv)
+        self._dispatch(
+            whole_bt,
+            _unwind(trade_id=whole_trade.trade_id),
+            "2024-01-03",
+            trade=whole_trade,
+        )
+
+        per_bt, per_trade = self._engine_with_open_trade(simple_csv)
+        structure_id = per_trade.active_structures[0].structure_id
+        self._dispatch(
+            per_bt,
+            _unwind(trade_id=per_trade.trade_id, structure_id=structure_id),
+            "2024-01-03",
+            trade=per_trade,
+        )
+
+        assert whole_trade.entry_date == per_trade.entry_date == "2024-01-02"
+        assert whole_trade.exit_date == per_trade.exit_date == "2024-01-03"
+        assert whole_trade.active_structures == per_trade.active_structures
+        assert whole_trade.active_structures == []
+        assert whole_bt.active_trades == per_bt.active_trades == []
+
+        whole_events = whole_trade.structure_history[0].event_log
+        per_events = per_trade.structure_history[0].event_log
+        assert [e["event_type"] for e in whole_events] == [
+            "open",
+            "full close",
+        ]
+        assert [e["event_type"] for e in per_events] == ["open", "full close"]
+        for whole_event, per_event in zip(whole_events, per_events):
+            assert whole_event["date"] == per_event["date"]
+            # Leg ids are generated per engine, so compare the economics:
+            # the size deltas and the per-leg cost exposures.
+            assert sorted(whole_event["leg_size_changes"].values()) == sorted(
+                per_event["leg_size_changes"].values()
+            )
+            assert sorted(
+                e["notional_per_unit"]
+                for e in whole_event["cost_exposures"].values()
+            ) == sorted(
+                e["notional_per_unit"]
+                for e in per_event["cost_exposures"].values()
+            )
+
+        assert (
+            whole_trade.structure_history[0].legs[0].current_size
+            == per_trade.structure_history[0].legs[0].current_size
+            == 0.0
+        )
+
+
+class TestBacktesterActionGroupLog:
+    """The loop's action-group pipeline: emission, finalize and the id chain."""
+
+    def test_dispatched_record_carries_the_order_id(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        orders = {
+            "2024-01-02": [
+                _new_trade("TEST", 100)
+            ],
+        }
+        signal = _make_mock_signal(orders_lookup=orders)
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        result = bt.run()
+
+        records = bt.action_group_log.records
+        assert len(records) == 1
+        record = records[0]
+        assert record.action_group.actions[0].type is ActionType.NEW
+        assert record.action_group.emission_date == "2024-01-02"
+        assert len(record.action_group.action_group_id) == 32
+        assert record.order_ids
+        assert record.order_outcomes == (OrderOutcome.FILLED,)
+        assert len(record.action_ids) == len(record.action_group.actions)
+        # Every accessor hands back the same live record, and the order id
+        # never entered the legacy dict that execution consumed.
+        assert bt.action_group_log.record_for(record.action_group.action_group_id) is record
+        assert bt.action_group_log.last_action_group("mock") is record
+        assert len(result.trade_history) == 1
+
+    def test_no_action_groups_on_a_quiet_day(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        signal = _make_mock_signal(orders_lookup={})
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        bt.run()
+
+        assert bt.action_group_log.records == ()
+        assert len(bt.action_group_log) == 0
+
+    def test_whole_trade_unwind_round_trips_through_the_loop(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        def side_effect(data_view, action_group_log=None, position_book=None):
+            if data_view.date == "2024-01-02":
+                return [_new_trade("TEST", 100)]
+            if data_view.date == "2024-01-03":
+                holding = position_book.find_holding("TEST")
+                assert holding is not None
+                return [_unwind(trade_id=holding.trade_id)]
+            return []
+
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = side_effect
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        result = bt.run()
+
+        assert len(result.trade_history) == 1
+        assert result.trade_history[0].exit_date == "2024-01-03"
+        assert bt.active_trades == []
+        # The whole-trade UNWIND action group indexed under its trade_id.
+        whole = bt.action_group_log.records[-1]
+        assert whole.action_group.actions[0].type is ActionType.UNWIND
+        assert (
+            whole.action_group.actions[0].trade_id
+            == result.trade_history[0].trade_id
+        )
+        assert bt.action_group_log.by_trade(
+            whole.action_group.actions[0].trade_id
+        ) == (whole,)
+
+
+class TestBacktesterExecutionSeam:
+    """The loop's execution seam: report -> log -> trade linkage (5b-1)."""
+
+    def _run(self, simple_csv, orders, start, end):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        bt = Backtester(
+            BacktestConfig(
+                signal=_make_mock_signal(orders_lookup=orders),
+                start_date=start,
+                end_date=end,
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        return bt, bt.run()
+
+    def test_fill_writes_execution_log_and_trade_linkage(self, simple_csv):
+        orders = {
+            "2024-01-02": [
+                _new_trade("TEST", 100)
+            ],
+        }
+        bt, result = self._run(simple_csv, orders, "2024-01-02", "2024-01-05")
+
+        assert len(result.trade_history) == 1
+        trade = result.trade_history[0]
+        exec_records = bt.execution_log.records
+        assert len(exec_records) == 1
+        rec = exec_records[0]
+        assert rec.status == "FILLED"
+        assert rec.fill_time == "2024-01-02"
+        assert rec.fill_id and len(rec.fill_id) == 32
+        assert rec.fills and rec.fills[0].ticker == "TEST"
+        assert rec.fills[0].size == 100.0
+
+        # trade <-> execution linkage
+        assert trade.order_id == rec.order_id
+        assert trade.fill_id == rec.fill_id
+        assert trade.execution_marker == "external"
+        assert bt.execution_log.record_for_fill(trade.fill_id) is rec
+        assert (
+            bt.action_group_log.records[0].action_group.action_group_id
+            == rec.action_group_id
+        )
+
+    def test_built_but_blocked_structure_is_never_persisted(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+
+        class GappyPricer:
+            def resolve_instrument(self, leg_dict, date):
+                return Contract(
+                    ticker=leg_dict.get("ticker", ""), asset_class="equity"
+                )
+
+            def price(self, contract, date):
+                return None if date == "2024-01-03" else 100.0
+
+            def valuation_data(self, contract, date, measures):
+                return {}
+
+            def pricing_inputs(self, contract, date):
+                return {}
+
+            def compute_cost_exposure(self, contract, date):
+                return {"notional_per_unit": 100.0}
+
+        config = AssetClassConfig(pricer=GappyPricer(), risk_measures=[])
+        orders = {
+            "2024-01-03": [
+                _new_trade("TEST", 100)
+            ],
+        }
+        bt = Backtester(
+            BacktestConfig(
+                signal=_make_mock_signal(orders_lookup=orders),
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        with pytest.warns(UserWarning, match="data not available"):
+            result = bt.run()
+
+        # Flow A: nothing was added then removed -- the build is discarded
+        # before persistence, so no trade exists and no orphan structure does.
+        assert list(result.trade_history) == []
+        assert bt.active_trades == []
+        assert len(bt.execution_log) == 1
+        assert bt.execution_log.records[0].status == "BLOCKED"
+
+    def test_unwind_pre_mutation_cost_timing(self, simple_csv, monkeypatch):
+        from backtester.strategy_structure import StrategyStructure
+
+        events = []
+        original_unwind = StrategyStructure.unwind
+
+        def unwinding(self, date, fraction=1.0, cost_exposures=None):
+            events.append("unwind")
+            return original_unwind(
+                self, date, fraction=fraction,
+                cost_exposures=cost_exposures,
+            )
+
+        monkeypatch.setattr(StrategyStructure, "unwind", unwinding)
+
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+
+        class TracePricer(EquityPricer):
+            def compute_cost_exposure(self, contract, date):
+                events.append("cost")
+                return super().compute_cost_exposure(contract, date)
+
+        pricer = TracePricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        orders = {
+            "2024-01-02": [
+                _new_trade("TEST", 100)
+            ],
+            "2024-01-05": [
+                _unwind()
+            ],
+        }
+        bt = Backtester(
+            BacktestConfig(
+                signal=_make_mock_signal(orders_lookup=orders),
+                start_date="2024-01-02",
+                end_date="2024-01-09",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+        bt.run()
+
+        # The unwind cost exposure must be computed *before* the unwind event.
+        assert "unwind" in events
+        unwind_idx = events.index("unwind")
+        assert "cost" in events[:unwind_idx]
+
+
+class TestCalendarGating:
+    """Calendar gating is signal-side; the engine has no check stage."""
+
+    def test_engine_no_longer_gates_on_the_calendar(self, simple_csv):
+        """A price row on a union-closed day now fills: no engine check."""
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        # 2024-01-04 is a US holiday, has a price row, and the US+UK union
+        # keeps the day.  The retired check chain used to reject this.
+        signal = _make_mock_signal(
+            orders_lookup={"2024-01-04": [_new_trade("TEST", 100)]}
+        )
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-09",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=["US", "UK"],
+                ticker_to_calendar_code={"TEST": "US"},
+            )
+        )
+        result = bt.run()
+
+        assert len(result.trade_history) == 1
+        assert bt.execution_log.records[0].status == "FILLED"
+
+    def test_a_missing_price_still_blocks_at_execution(self, simple_csv):
+        """A consistent-closed day has no row, so execution blocks + warns."""
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        signal = _make_mock_signal(
+            orders_lookup={"2024-02-02": [_new_trade("TEST", 100)]}
+        )
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-02-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=["US", "UK"],
+                ticker_to_calendar_code={"TEST": "US"},
+            )
+        )
+        with pytest.warns(UserWarning, match="data not available"):
+            result = bt.run()
+
+        assert list(result.trade_history) == []
+        record = bt.action_group_log.records[0]
+        assert record.order_outcomes == (OrderOutcome.BLOCKED,)
+        assert bt.execution_log.records[0].status == "BLOCKED"
+
+    def test_unmapped_ticker_is_calendar_blind(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+
+        signal = _make_mock_signal(
+            orders_lookup={"2024-01-04": [_new_trade("TEST", 100)]}
+        )
+        bt = Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-09",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=["US", "UK"],
+            )
+        )
+        assert len(bt.run().trade_history) == 1
+
+
+@pytest.fixture(scope="module")
+def sma_run():
+    """The real SMA example once; the four HK-closed dates are pinned on it."""
+    if not (MARKET_DATA_DIR / "2800.HK_eod.csv").exists():
+        pytest.skip("repo market_data fixtures are not present")
+    backend = CsvBackend(base_dir=str(MARKET_DATA_DIR))
+    data_feed = DataFeed(backend)
+    mapping = {"SPY": "US", "QQQ": "US", "2800.HK": "HK", "SXRT.DE": "DE"}
+    pricer = EquityPricer(
+        EquityPriceProvider(data_feed), ticker_to_calendar_code=mapping
+    )
+    calendar = CalendarProvider(data_feed)
+    signal = SMACrossoverSignal(
+        short_window=20,
+        long_window=50,
+        tickers=list(mapping),
+        notional=100_000,
+        ticker_currency={"2800.HK": "HKD", "SXRT.DE": "EUR"},
+        strategy_id="sma_crossover",
+        calendar_provider=calendar,
+        ticker_to_calendar_code=mapping,
+    )
+    bt = Backtester(
+        BacktestConfig(
+            signal=signal,
+            start_date="2000-01-01",
+            end_date="2025-12-31",
+            asset_class_configs={
+                "equity": AssetClassConfig(pricer=pricer, risk_measures=[])
+            },
+            calendar_provider=calendar,
+            simulation_calendar_codes=["US", "HK", "DE"],
+            ticker_to_calendar_code=mapping,
+            data_feed=data_feed,
+        )
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = bt.run()
+    return bt, result, [str(w.message) for w in caught]
+
+
+class TestSmaCalendarGating:
+    FOUR = ("2009-01-26", "2009-01-27", "2009-01-28", "2012-04-04")
+
+    def test_no_action_group_record_exists_on_the_four_hk_closed_days(
+        self, sma_run
+    ):
+        bt, _result, _warnings = sma_run
+        emitted = {
+            record.action_group.emission_date
+            for record in bt.action_group_log.records
+        }
+        for day in self.FOUR:
+            assert day not in emitted
+
+    def test_the_trades_close_on_the_next_open_day(self, sma_run):
+        """Pre-C reject -> T+1 re-emit; post-C non-emission -> same exit."""
+        _bt, result, _warnings = sma_run
+        exits = {
+            trade.exit_date
+            for trade in result.trade_history
+            if trade.structure_history[0].legs[0].contract.ticker == "2800.HK"
+        }
+        assert "2009-01-29" in exits  # next HK open after 01-26/27/28
+        assert "2012-04-05" in exits  # next HK open after 04-04
+
+    def test_every_record_is_finalized_and_none_rejected(self, sma_run):
+        """No rejection path: 457 records, every one carries its facts."""
+        bt, _result, _warnings = sma_run
+        records = bt.action_group_log.records
+        assert len(records) == 457
+        assert all(record.order_ids for record in records)
+
+    def test_the_run_emits_no_warnings(self, sma_run):
+        _bt, _result, caught = sma_run
+        assert caught == []
+
+
 class TestCalendarIntegration:
     """The CalendarProvider, not the price data, defines the simulation loop."""
 
@@ -1078,21 +1525,10 @@ class TestCalendarIntegration:
 
         orders = {
             "2024-01-02": [
-                {
-                    "Action": "NEW",
-                    "trade_id": None,
-                    "info": [
-                        {
-                            "structure_id": None,
-                            "legs": [
-                                {"ticker": "TEST", "size": 100, "asset_class": "equity"}
-                            ],
-                        }
-                    ],
-                }
+                _new_trade("TEST", 100)
             ],
         }
-        signal = _make_mock_signal(orders_lookup=orders, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup=orders)
 
         bt_config = BacktestConfig(
             signal=signal,
@@ -1141,7 +1577,7 @@ class TestCalendarIntegration:
         pricer = EquityPricer(provider)
         config = AssetClassConfig(pricer=pricer, risk_measures=[])
 
-        signal = _make_mock_signal(orders_lookup={}, requires_portfolio=False)
+        signal = _make_mock_signal(orders_lookup={})
 
         bt_config = BacktestConfig(
             signal=signal,

@@ -3,9 +3,19 @@ class Trade:
         self,
         trade_id: str,
         tags: list[str] | None = None,
+        order_id: str | None = None,
+        fill_id: str | None = None,
+        execution_marker: str = "external",
     ):
         self.trade_id = trade_id
         self.tags = tags
+        #: Execution linkage (bookkeeping only; 5b-1 trades are always
+        #: ``external``).  ``order_id`` / ``fill_id`` identify the opening
+        #: execution and may be empty for directly-constructed trades; closing
+        #: executions live in the execution log, queryable by ``order_id``.
+        self.order_id = order_id
+        self.fill_id = fill_id
+        self.execution_marker = execution_marker
         self.active_structures: list = []
         self.structure_history: list = []
         self.entry_date: str | None = None

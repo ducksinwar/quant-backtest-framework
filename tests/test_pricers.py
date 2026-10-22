@@ -72,6 +72,43 @@ class TestEquityPricer:
         assert result.currency == "HKD"
         assert result.multiplier == 1.0
 
+    def test_resolve_instrument_stamps_the_calendar_code_from_the_map(self):
+        pricer = EquityPricer(MagicMock(), ticker_to_calendar_code={"SPY": "US"})
+        c = pricer.resolve_instrument(
+            {"ticker": "SPY", "size": 100, "asset_class": "equity"},
+            "2024-01-15",
+        )
+        assert c.trading_calendar_code == "US"
+        assert c.settlement_calendar_codes == ()
+
+    def test_resolve_instrument_unmapped_ticker_has_no_calendar_code(self):
+        pricer = EquityPricer(MagicMock(), ticker_to_calendar_code={"SPY": "US"})
+        c = pricer.resolve_instrument(
+            {"ticker": "QQQ", "size": 100, "asset_class": "equity"},
+            "2024-01-15",
+        )
+        assert c.trading_calendar_code is None
+
+    def test_pricer_with_no_map_leaves_the_calendar_code_none(self):
+        pricer = EquityPricer(MagicMock())
+        c = pricer.resolve_instrument(
+            {"ticker": "SPY", "size": 100, "asset_class": "equity"},
+            "2024-01-15",
+        )
+        assert c.trading_calendar_code is None
+
+    def test_calendar_keys_never_leak_into_params(self):
+        # The constructor's map is authoritative; a leg-dict value is filtered
+        # by _INFRA_KEYS and cannot override it or reach params.
+        pricer = EquityPricer(MagicMock(), ticker_to_calendar_code={"SPY": "US"})
+        c = pricer.resolve_instrument(
+            {"ticker": "SPY", "size": 100, "asset_class": "equity",
+             "trading_calendar_code": "IGNORED"},
+            "2024-01-15",
+        )
+        assert c.trading_calendar_code == "US"
+        assert "trading_calendar_code" not in c.params
+
     def test_pricing_inputs_returns_empty_dict(self, pricer, contract):
         result = pricer.pricing_inputs(contract, "2024-01-15")
         assert result == {}

@@ -45,11 +45,31 @@ def main():
     backend = CsvBackend(base_dir="market_data")
     data_feed = DataFeed(backend)
 
-    # 2. Typed provider + pricer
+    # 2. Typed provider + pricer.  The ticker -> calendar-code mapping is
+    #    injected into the pricer so it stamps Contract.trading_calendar_code
+    #    during resolve_instrument, passed to the config so the daily DataView
+    #    scopes per-instrument last-valid-day resolution, and passed to the
+    #    signal so it can gate emission on the market being open.
+    ticker_to_calendar_code = {
+        "SPY": "US",
+        "QQQ": "US",
+        "2800.HK": "HK",
+        "SXRT.DE": "DE",
+    }
     provider = EquityPriceProvider(data_feed)
-    equity_pricer = EquityPricer(provider)
+    equity_pricer = EquityPricer(
+        provider, ticker_to_calendar_code=ticker_to_calendar_code
+    )
 
-    # 3. Signal
+    # 3. Calendar: SPY/QQQ are US, 2800.HK is HK, SXRT.DE is DE.  The
+    # simulation calendar is the *union* of these three markets, so a day
+    # that is a holiday in only one market is still simulated.  Holiday files
+    # live behind the same backend as prices:
+    # market_data/holidays/{US,HK,DE}.csv.  The provider is built before the
+    # signal because the signal gates on it.
+    calendar_provider = CalendarProvider(data_feed)
+
+    # 4. Signal
     tickers = ["SPY", "QQQ", "2800.HK", "SXRT.DE"]
     notional = 100_000
     ticker_currency = {"2800.HK": "HKD", "SXRT.DE": "EUR"}
@@ -58,16 +78,11 @@ def main():
         long_window=50,
         tickers=tickers,
         notional=notional,
-        data_feed=data_feed,
         ticker_currency=ticker_currency,
+        strategy_id="sma_crossover",
+        calendar_provider=calendar_provider,
+        ticker_to_calendar_code=ticker_to_calendar_code,
     )
-
-    # 4. Calendar: SPY/QQQ are US, 2800.HK is HK, SXRT.DE is DE.  The
-    # simulation calendar is the *union* of these three markets, so a day
-    # that is a holiday in only one market is still simulated.
-    # Holiday files live behind the same backend as prices:
-    # market_data/holidays/{US,HK,DE}.csv.
-    calendar_provider = CalendarProvider(data_feed)
 
     # 5. Backtester config
     config = BacktestConfig(
@@ -83,6 +98,12 @@ def main():
         },
         calendar_provider=calendar_provider,
         simulation_calendar_codes=["US", "HK", "DE"],
+        # The same codes scope each instrument's last-valid-day / as_of
+        # resolution inside the daily DataView and gate signal emission.  They
+        # never filter price-series rows, so every SMA sees exactly the data it
+        # saw before the action-group interface landed.
+        ticker_to_calendar_code=ticker_to_calendar_code,
+        data_feed=data_feed,
     )
 
     # 6. Run backtest
