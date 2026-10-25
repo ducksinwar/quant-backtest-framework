@@ -46,20 +46,14 @@ conda run -n backtest pip install <package>
 ```
 Do not install project dependencies globally or into another environment.
 
-## Testing Infrastructure (environment-specific)
-- On normal environments (Linux/macOS/standard Windows) pytest's built-in
-  `tmp_path` works; no extra configuration is needed and `tests/conftest.py`
-  does not exist in the repository.
-- Under restricted-token sandboxes on Windows (e.g. the DeepSeek harness),
-  `tmp_path` fails with `PermissionError [WinError 5]` because pytest creates
-  temp dirs with an explicit 0o700 mode whose Security Descriptor breaks DACL
-  inheritance (https://github.com/deepseek-ai/deepseek-harness/discussions/81).
-- If and only if you hit that error: create a LOCAL, UNTRACKED
-  `tests/conftest.py` (gitignored; never commit it) that overrides `tmp_path`
-  to create per-test dirs via `os.makedirs()` (no explicit mode) under
-  `tests/.tmp/`, with per-test teardown and a session-start sweep of stale
-  `tests/.tmp/*`.
+## Testing Infrastructure
+- pytest's built-in `tmp_path` works as-is here; no local override is needed.
+  Verified 2026-10-23: `python -m pytest -q` -> 581 passed, 0 failures,
+  0 errors, no `PermissionError [WinError 5]`.
+- A local, untracked `tests/conftest.py` previously overrode `tmp_path` to work
+  around restricted-token sandboxes under the DeepSeek harness. That harness is
+  no longer in use, so the override and its scratch directory `tests/.tmp/`
+  have been deleted. Do not recreate either.
 - Never pass `--basetemp`, never create probe/diagnostic directories, and
   never request elevated or full-access permissions to work around temp-dir
-  permission errors. If the error reappears despite the override, stop and
-  report it.
+  permission errors. If `WinError 5` reappears, stop and report it.

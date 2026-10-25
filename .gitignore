@@ -177,8 +177,11 @@ pyrightconfig.json
 market_data/*.csv
 !market_data/SPY_eod.csv
 !market_data/QQQ_eod.csv
+!market_data/2800.HK_eod.csv
+!market_data/SXRT.DE_eod.csv
 *.egg-info
 nul
-fetch_data.py
 results/
 .vscode/
+scripts/
+.workbuddy/

@@ -14,7 +14,7 @@ from backtester.orders import OrderOutcome
 def _report(**kw):
     base = dict(
         order_id="o1", action_id="a1", order_group_id="g1",
-        action_group_id="i1", strategy_id="s", date="2024-01-02",
+        action_group_id="i1", date="2024-01-02",
         outcome=ExecutionOutcome.FILLED, probe_status=OrderOutcome.FILLED,
         fill_time="2024-01-02", fills=(LegFill("SPY", 5.0, 100.0),),
     )
@@ -79,11 +79,10 @@ class TestExecutionLog:
 
     def test_record_fields_are_carried_from_the_report(self):
         rec = ExecutionLog().append(_report(
-            strategy_id="strat", action_id="a9", order_group_id="g9",
+            action_id="a9", order_group_id="g9",
             fees=None, internal_transfer=None,
         ))
         assert isinstance(rec, ExecutionRecord)
-        assert rec.strategy_id == "strat"
         assert rec.action_id == "a9"
         assert rec.order_group_id == "g9"
         assert rec.fees is None

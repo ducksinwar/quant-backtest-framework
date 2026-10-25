@@ -59,7 +59,7 @@
 ### Task 5: Order pipeline — action-group interface, execution seam
 
 Task 5 was delivered in three steps. The as‑built pipeline is
-`signal → ActionGroup → (synthesis chain) → OrderGroup → execution seam → book`,
+`signal → ActionGroup → (order assembly) → OrderGroup → execution seam → book`,
 with an append‑only **action‑group log** and a write‑once **execution log**. The
 order assembly is a single **synthesis chain** that transforms action groups
 (`rule(action_groups, ctx)`); the engine has no check stage.  The order‑id
@@ -73,9 +73,9 @@ fan‑out is handled by `ActionGroupRecord` (`action_ids` → `order_ids`).
 > `ActionGroupLog`; the old names survive only in historical records.
 
 - [ ] **Task 5a (done): Signal action-group interface, pass‑through synthesis, action-group log.**
-  - `BaseSignal.generate_action_groups(data_view, action_group_log, position_book) -> list[ActionGroup]`; a required `strategy_id`; the `requires_portfolio_state` / `requires_trade_history` flags and `generate_signals()` are removed.
-  - `ActionGroup` schema (`ContractSpec`, `LegSpec`, `StructureSpec`, `TradeSpec`, `Action`, `Side`, `OrderGroup`, `AggregationContext`), the append‑only `ActionGroupLog` + strategy-scoped view, the T-1-clamped `DataView`, and `PositionBooks`.
-  - `OrderSynthesis` producing `OrderGroup`s of `Order` objects; each order carries its own `order_id` / `action_id`.
+  - `BaseSignal.generate_action_groups(data_view, action_group_log, position_book) -> list[ActionGroup]`; no `strategy_id` (identity is the signal instance; §10 ingestion re‑adds it); the `requires_portfolio_state` / `requires_trade_history` flags and `generate_signals()` are removed.
+  - `ActionGroup` schema (`ContractSpec`, `LegSpec`, `StructureSpec`, `TradeSpec`, `Action`, `Side`, `OrderGroup`, `AggregationContext`), the append‑only `ActionGroupLog`, the T-1-clamped `DataView`, and `PositionBooks`.
+  - `OrderAssembly` producing `OrderGroup`s of `Order` objects; each order carries its own `order_id` / `action_id`.
   - Notional‑to‑shares happens in the signal via `DataView.reference_price` (the T-1 reference close) with fractional sizes.  Moving sizing into synthesis remains future work.
 - [ ] **Task 5b‑1 (done): Execution seam, execution log, cost‑writer swap.**
   - `ExecutionBackend` / `SimulatedExecution` (the backtest/live parity boundary) and `ExecutionReport`; the write‑once `ExecutionLog` + `fill_id`; trade↔execution linkage.
@@ -101,15 +101,20 @@ one registry; individual gates are not restated elsewhere.
 
 | Gate | Kind | Placement | Behavior | Concrete trigger |
 |---|---|---|---|---|
-| **Multi-action ActionGroups** | pipeline | `OrderSynthesis.synthesize`, **before** order conversion | reject groups with >1 Action until the engine program lands | `test_multi_action_group_is_rejected_before_conversion` |
-| **Multi-leg modifications** | conversion | `order_synthesis` gate, needs the book's legs | reject a partial add/unwind on a structure with >1 leg | `test_multi_leg_partial_add_is_rejected` |
-| **Short-structure partial modifications** | conversion | `order_synthesis` gate, needs signed anchor size | reject a partial add/unwind on a short structure | `test_short_structure_partial_add_is_rejected`, `…_unwind_is_rejected` |
+| **Multi-action ActionGroups** | pipeline | `OrderAssembly.build_order_groups`, **before** order conversion | reject groups with >1 Action until the engine program lands | `test_multi_action_group_is_rejected_before_conversion` |
+| **Multi-leg modifications** | conversion | `order_assembly` gate, needs the book's legs | reject a partial add/unwind on a structure with >1 leg | `test_multi_leg_partial_add_is_rejected` |
+| **Short-structure partial modifications** | conversion | `order_assembly` gate, needs signed anchor size | reject a partial add/unwind on a short structure | `test_short_structure_partial_add_is_rejected`, `…_unwind_is_rejected` |
 | **Stamping intermediate stage** | engine-program | between synthesis rules and order conversion | rule-emitted groups are rejected until the stamping stage appends un‑stamped groups to the log; the pre‑stamp workaround is structurally forbidden | `test_a_rule_may_not_emit_a_group_never_appended` |
 | **Order-id fan-out** | schema/pipeline | `ActionGroupRecord` (per-action `action_ids`, per-order `order_ids` / `order_outcomes`) ↔ `OrderGroup` (`order_group_id`, N `Order`s with their own ids) | Each action and each order has its own id; the record carries parallel facts written once by `finalize`. | — |
 | **T-1 sizing** | landed | `DataView.reference_price` | T-1 reference price, fractional sizing; no look-ahead. | `test_returns_the_t_minus_1_close_when_t_is_present` |
 | **Replacement lineage (`REPLACED` re‑add)** | engine-program | `ActionGroup` + `ActionGroupLog` | register with the **scaling rule**: scaling sets the predecessor pointer and the log performs the transition; no other consumer exists today. | — |
 | **Netting module** | future slot | between order conversion and execution (order-in → order-out, documented only) | detect rolls *before* net; netting input = orders organized by originating group + lineage | — |
 | **Underlying-identity field** | schema | `Contract.params` → resolved identity | move original-intent params off `Contract.params` so `Contract` is a pure hashable identity (Phase 4 risk aggregation / multi-leg netting prerequisite) | — |
+
+#### Deferred registrations (from the strategy-layer `strategy_id` cleanup)
+
+- [ ] **`strategy_id` at §10 ingestion.** Each saved `BacktestResult` came from one strategy; at load time, wrap with `StrategyRun(strategy_id, result)` and tag `Trade` / `ExecutionRecord` if flattened. `strategy_id` is not a strategy-layer field.
+- [ ] **Split `OrderAssembly` when rules land.** Currently one class holding both the synthesis rule chain (empty) and order conversion. Split into `SynthesisChain` + `OrderConverter` when the first concrete rule (roll / auto-unwind / hedge / scaling) lands.
 
 #### Explicit unwind-all form (future)
 
@@ -136,7 +141,7 @@ session), not because a reproducible literal is impossible.
 ### Testing & hardening
 - [ ] Add invariant/property tests for P&L conservation, time‑series length alignment, and missing‑data deferral (finding 3.2).
 - [ ] Fill coverage gaps for untested branches (e.g., `total_size == 0` fallback, `per_leg` missing‑data mode) (finding 3.4).
-- [ ] Revisit the local `tests/conftest.py` sandbox workaround and the `.gitignore` debris patterns once the DSH sandbox `tmp_path` bug is confirmed fixed upstream.
+- [x] Revisit the local `tests/conftest.py` sandbox workaround and the `.gitignore` debris patterns once the DSH sandbox `tmp_path` bug is confirmed fixed upstream. **Done 2026-10-23:** the DeepSeek harness is no longer in use; `tests/conftest.py` and its `tests/.tmp/` scratch base were deleted, the matching `.gitignore` entries were dropped, and the suite runs green on pytest's built-in `tmp_path` (581 passed, 0 errors, no `WinError 5`).
 
 ### Task 6: FoldGenerator
 - [ ] **Goal:** Produce purged, embargoed walk‑forward fold tuples.
@@ -171,6 +176,6 @@ session), not because a reproducible literal is impossible.
 
 ## Phase 3+ (Future)
 - [ ] Introduce a `CostExposure` TypedDict for type safety in the cost‑exposure path (finding 2.1).
-- [x] ~~Replace `requires_portfolio_state` / `requires_trade_history` class attributes with constructor‑enforced declarations or properties (finding 2.3).~~ **Resolved in Task 5a**: both flags were removed; the loop always builds the T‑1 position book and trade history, and `BaseSignal` now requires a constructor `strategy_id`.
+- [x] ~~Replace `requires_portfolio_state` / `requires_trade_history` class attributes with constructor‑enforced declarations or properties (finding 2.3).~~ **Resolved in Task 5a**: both flags were removed; the loop always builds the T‑1 position book and trade history, and `BaseSignal` has no `strategy_id` (the one‑signal‑per‑run framework re‑adds it at §10 ingestion).
 - [ ] Extract a `MissingDataAligner` class from `Summary` if the class grows beyond its current scope (finding 2.5).
 - [ ] Migrate original trading intent (tenor, delta, etc.) from `Contract.params` to `LegState.original_intent` so that `Contract` becomes a pure, hashable instrument identity (prerequisite for Phase 4 risk aggregation and multi‑leg netting).

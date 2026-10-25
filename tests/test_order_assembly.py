@@ -1,4 +1,4 @@
-"""Order synthesis: book-state equivalence and the direct Order contract.
+"""Order assembly: book-state equivalence and the direct Order contract.
 
 The corpus pins the converter against **book state**: each case applies the
 produced ``Order`` objects to a stub book exactly as the engine's commit phase
@@ -31,9 +31,9 @@ from backtester.actions import (
     StructureSpec,
     TradeSpec,
 )
-from backtester.order_synthesis import (
+from backtester.order_assembly import (
     DEFAULT_RULE_ORDER,
-    OrderSynthesis,
+    OrderAssembly,
     action_group_to_order_group,
 )
 from backtester.orders import OrderGroup, OrderSide
@@ -237,10 +237,9 @@ def _leg(ticker, side, size, **spec_kwargs):
     return LegSpec(ContractSpec(ticker, **spec_kwargs), side, size)
 
 
-def _ag(actions, *, provenance=PROVENANCE_SIGNAL, strategy_id="mock"):
+def _ag(actions, *, provenance=PROVENANCE_SIGNAL):
     return ActionGroup(
         action_group_id=None,
-        strategy_id=strategy_id,
         provenance=provenance,
         actions=tuple(actions),
     )
@@ -568,7 +567,7 @@ def test_new_leg_carries_contract_extras():
     assert leg.params == (("strike", 5000), ("expiry", "2025-12-19"))
 
 
-class TestSynthesizePassThrough:
+class TestBuildOrderGroups:
     def test_one_order_group_per_action_group_positionally_aligned(self):
         log = ActionGroupLog()
         create = log.append(
@@ -581,7 +580,7 @@ class TestSynthesizePassThrough:
             "2024-01-08",
         )
 
-        groups = OrderSynthesis().synthesize(
+        groups = OrderAssembly().build_order_groups(
             [create.action_group, unwind.action_group],
             _ctx(),
             [create.action_ids, unwind.action_ids],
@@ -601,7 +600,7 @@ class TestSynthesizePassThrough:
             _create((StructureSpec(legs=(
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
-        group = OrderSynthesis().synthesize(
+        group = OrderAssembly().build_order_groups(
             [stamped.action_group], _ctx(), [stamped.action_ids]
         )[0]
         assert len(group.order_group_id) == 32
@@ -614,7 +613,7 @@ class TestSynthesizePassThrough:
             _create((StructureSpec(legs=(
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
-        group = OrderSynthesis().synthesize(
+        group = OrderAssembly().build_order_groups(
             [stamped.action_group], _ctx(), [stamped.action_ids]
         )[0]
         assert len(group.orders[0].order_id) == 32
@@ -627,7 +626,7 @@ class TestSynthesizePassThrough:
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
         with pytest.raises(ValueError, match="parallel to action_groups"):
-            OrderSynthesis().synthesize([stamped.action_group], _ctx(), [])
+            OrderAssembly().build_order_groups([stamped.action_group], _ctx(), [])
 
     def test_action_ids_must_be_parallel_to_each_group(self):
         log = ActionGroupLog()
@@ -636,13 +635,13 @@ class TestSynthesizePassThrough:
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
         with pytest.raises(ValueError, match="parallel"):
-            OrderSynthesis().synthesize(
+            OrderAssembly().build_order_groups(
                 [stamped.action_group], _ctx(), [()]
             )
 
     def test_unstamped_action_group_is_rejected(self):
         with pytest.raises(ValueError, match="assigned at emission"):
-            OrderSynthesis().synthesize(
+            OrderAssembly().build_order_groups(
                 [_create((StructureSpec(legs=(
                     _leg("SPY", Side.LONG, 100),)),))],
                 _ctx(),
@@ -656,14 +655,14 @@ class TestSynthesizePassThrough:
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
         with pytest.raises(ValueError, match="duplicate action_group_id"):
-            OrderSynthesis().synthesize(
+            OrderAssembly().build_order_groups(
                 [stamped.action_group, stamped.action_group],
                 _ctx(),
                 [stamped.action_ids, stamped.action_ids],
             )
 
     def test_empty_patch(self):
-        assert OrderSynthesis().synthesize([], _ctx(), []) == ()
+        assert OrderAssembly().build_order_groups([], _ctx(), []) == ()
 
 
 class TestPluginChain:
@@ -691,7 +690,7 @@ class TestPluginChain:
             _create((StructureSpec(legs=(
                 _leg("SPY", Side.LONG, 100),)),)), "2024-01-08"
         )
-        OrderSynthesis([rule_a, rule_b]).synthesize(
+        OrderAssembly([rule_a, rule_b]).build_order_groups(
             [stamped.action_group], _ctx(), [stamped.action_ids]
         )
         assert calls == ["a", "b"]
@@ -716,7 +715,7 @@ class TestPluginChain:
             ]
 
         with pytest.raises(ValueError, match="removed an ActionGroup"):
-            OrderSynthesis([remove_spy]).synthesize(
+            OrderAssembly([remove_spy]).build_order_groups(
                 [remove_me.action_group, keep_me.action_group],
                 _ctx(),
                 [remove_me.action_ids, keep_me.action_ids],
@@ -737,20 +736,20 @@ class TestPluginChain:
             ]
 
         with pytest.raises(ValueError, match="never appended"):
-            OrderSynthesis([add_clone]).synthesize(
+            OrderAssembly([add_clone]).build_order_groups(
                 [keep.action_group], _ctx(), [keep.action_ids]
             )
 
     def test_non_callable_rule_is_rejected(self):
         with pytest.raises(TypeError, match="not callable"):
-            OrderSynthesis(["scaling"])
+            OrderAssembly(["scaling"])
 
     def test_rules_property_is_the_configured_tuple(self):
         def rule(groups, ctx):
             return groups
 
-        assert OrderSynthesis([rule]).rules == (rule,)
-        assert OrderSynthesis().rules == ()
+        assert OrderAssembly([rule]).rules == (rule,)
+        assert OrderAssembly().rules == ()
 
 
 class TestConverterFailLoud:
@@ -868,7 +867,7 @@ class TestGates:
                    Action(type=ActionType.UNWIND)))
         stamped = log.append(two, "2024-01-08")
         with pytest.raises(ValueError, match="single-action"):
-            OrderSynthesis().synthesize(
+            OrderAssembly().build_order_groups(
                 [stamped.action_group], _ctx(), [stamped.action_ids]
             )
 
@@ -926,7 +925,7 @@ class TestUnwindScopes:
             for structure_id in ("S1", "S2")
         ]
 
-        out = OrderSynthesis().synthesize(
+        out = OrderAssembly().build_order_groups(
             [record.action_group for record in records],
             _ctx(self._two_structure_books()),
             [record.action_ids for record in records],
@@ -940,7 +939,7 @@ class TestUnwindScopes:
         log = ActionGroupLog()
         stamped = log.append(_unwind(), "2024-01-08")
 
-        out = OrderSynthesis().synthesize(
+        out = OrderAssembly().build_order_groups(
             [stamped.action_group], _ctx(), [stamped.action_ids]
         )
         order = out[0].orders[0]
@@ -952,7 +951,7 @@ class TestUnwindScopes:
         whole = log.append(
             _unwind(trade_id=TRADE_ID), "2024-01-08"
         )
-        whole_order = OrderSynthesis().synthesize(
+        whole_order = OrderAssembly().build_order_groups(
             [whole.action_group], _ctx(), [whole.action_ids]
         )[0].orders[0]
         assert whole_order.structure_id == STRUCTURE_ID
@@ -968,7 +967,7 @@ class TestUnwindScopes:
 
 class TestContentMapping:
     def test_one_structure_maps_to_one_order(self):
-        """Synthesis never decomposes: one created structure is one order."""
+        """Assembly never decomposes: one created structure is one order."""
         log = ActionGroupLog()
         records = [
             log.append(
@@ -977,7 +976,7 @@ class TestContentMapping:
             )
             for i in range(3)
         ]
-        out = OrderSynthesis().synthesize(
+        out = OrderAssembly().build_order_groups(
             [record.action_group for record in records],
             _ctx(),
             [record.action_ids for record in records],

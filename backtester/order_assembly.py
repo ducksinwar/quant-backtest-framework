@@ -1,17 +1,19 @@
-"""ActionGroup -> order synthesis.
+"""ActionGroup -> order assembly.
 
-``OrderSynthesis.synthesize(action_groups, ctx, action_ids)`` runs the
-configured plugin chain, then converts every ActionGroup into an
-:class:`~backtester.orders.OrderGroup` via
-:func:`action_group_to_order_group` and returns a ``tuple[OrderGroup, ...]`` --
-exactly one OrderGroup per **input** ActionGroup, positionally aligned with the
-appended records.  A synthesis rule that removes a group is a bug: synthesis
-never rejects or drops, and rejection is exclusively conversion-stage.
+The order-assembly stage between signal emission and execution: runs the
+synthesis rule chain (empty today; mechanical rules land in a later phase),
+then converts every surviving ActionGroup into an OrderGroup via
+:func:`action_group_to_order_group`.
 
-**Layering.**  The converter also runs the synthesis rule chain: action group
-synthesis and order conversion are colocated in ``OrderSynthesis``.  Netting
-stays out-of-band (a future order-in / order-out module between conversion and
-execution).
+``OrderAssembly.build_order_groups(action_groups, ctx, action_ids)`` returns a
+``tuple[OrderGroup, ...]`` -- exactly one OrderGroup per **input** ActionGroup,
+positionally aligned with the appended records.  A synthesis rule that removes a
+group is a bug: assembly never rejects or drops, and rejection is exclusively
+conversion-stage.
+
+**Layering.**  The converter runs *after* the synthesis rule chain, and both
+live in ``OrderAssembly``.  Netting stays out-of-band (a future order-in /
+order-out module between conversion and execution).
 
 **Multi-action gate.**  The single-action subset's pipeline rejects any
 ActionGroup with more than one Action here, before order conversion.  This is a
@@ -79,11 +81,7 @@ def action_group_to_order_group(
         )
     produced: list[Order] = []
     for action_id, action in zip(action_ids, action_group.actions):
-        produced.extend(
-            _action_to_orders(
-                action, action_id, ctx, action_group.strategy_id
-            )
-        )
+        produced.extend(_action_to_orders(action, action_id, ctx))
     return OrderGroup(orders=tuple(produced))
 
 
@@ -91,25 +89,22 @@ def _action_to_orders(
     action: Action,
     action_id: str,
     ctx: AggregationContext,
-    strategy_id: str,
 ) -> tuple[Order, ...]:
     """Convert one Action into its Order(s), in emission order."""
     if action.type is ActionType.NEW:
         if action.structure_id is not None:
-            return (
-                _partial_add_order(action, action_id, ctx, strategy_id),
-            )
+            return (_partial_add_order(action, action_id, ctx),)
         if isinstance(action.spec, TradeSpec):
             return tuple(
                 _content_order(action_id, structure, trade_id=None)
                 for structure in action.spec.structures
             )
-        _trade_state(action.trade_id, ctx, strategy_id)
+        _trade_state(action.trade_id, ctx)
         return (
             _content_order(action_id, action.spec, trade_id=action.trade_id),
         )
     if action.type is ActionType.UNWIND:
-        return _unwind_orders(action, action_id, ctx, strategy_id)
+        return _unwind_orders(action, action_id, ctx)
     raise ValueError(  # pragma: no cover - ActionType is closed
         f"unsupported action {action.type!r}"
     )
@@ -156,10 +151,9 @@ def _partial_add_order(
     action: Action,
     action_id: str,
     ctx: AggregationContext,
-    strategy_id: str,
 ) -> Order:
-    _validate_structure_trade(action, ctx, strategy_id)
-    structure = _structure_state(action, ctx, strategy_id)
+    _validate_structure_trade(action, ctx)
+    structure = _structure_state(action, ctx)
     _gate_multi_leg(structure, "partial add")
     _gate_short(structure, "partial add")
     return Order(
@@ -178,11 +172,10 @@ def _unwind_orders(
     action: Action,
     action_id: str,
     ctx: AggregationContext,
-    strategy_id: str,
 ) -> tuple[Order, ...]:
     if action.structure_id is not None:
-        _validate_structure_trade(action, ctx, strategy_id)
-        structure = _structure_state(action, ctx, strategy_id)
+        _validate_structure_trade(action, ctx)
+        structure = _structure_state(action, ctx)
         if action.size is not None:
             # Multi-leg and short structures are gated for *modifications*
             # only; a full-structure unwind is the atomic close.
@@ -208,12 +201,12 @@ def _unwind_orders(
         )
 
     if action.trade_id is not None:
-        trade = _trade_state(action.trade_id, ctx, strategy_id)
+        trade = _trade_state(action.trade_id, ctx)
         addressed = tuple(
             (structure, trade.trade_id) for structure in trade.structures
         )
     else:
-        book = ctx.position_books.for_strategy(strategy_id)
+        book = ctx.position_books.full()
         addressed = tuple(
             (structure, trade.trade_id)
             for trade in book.trades
@@ -293,9 +286,7 @@ def _full_close_legs(structure) -> tuple[OrderLeg, ...]:
 # --- book-dependent checks and gates ------------------------------------
 
 
-def _validate_structure_trade(
-    action: Action, ctx: AggregationContext, strategy_id: str
-):
+def _validate_structure_trade(action: Action, ctx: AggregationContext):
     """Fail loudly if a structure does not belong to the named trade.
 
     Raises a distinct "not present in the T-1 book" error when the structure
@@ -304,13 +295,13 @@ def _validate_structure_trade(
     """
     if action.structure_id is None:
         return
-    book = ctx.position_books.for_strategy(strategy_id)
+    book = ctx.position_books.full()
     try:
         owner = book.trade_id_for_structure(action.structure_id)
     except ValueError:
         raise ValueError(
             f"structure {action.structure_id!r} is not present in the T-1 "
-            f"book for strategy {strategy_id!r}"
+            f"book"
         ) from None
     if owner != action.trade_id:
         raise ValueError(
@@ -319,11 +310,9 @@ def _validate_structure_trade(
         )
 
 
-def _structure_state(
-    action: Action, ctx: AggregationContext, strategy_id: str
-):
+def _structure_state(action: Action, ctx: AggregationContext):
     """The book's structure snapshot for ``action.structure_id`` (fail-loud)."""
-    book = ctx.position_books.for_strategy(strategy_id)
+    book = ctx.position_books.full()
     for trade in book.trades:
         for structure in trade.structures:
             if structure.structure_id == action.structure_id:
@@ -334,17 +323,14 @@ def _structure_state(
     )
 
 
-def _trade_state(
-    trade_id: str, ctx: AggregationContext, strategy_id: str
-):
+def _trade_state(trade_id: str, ctx: AggregationContext):
     """The T-1 trade snapshot for ``trade_id`` (fail-loud)."""
-    book = ctx.position_books.for_strategy(strategy_id)
+    book = ctx.position_books.full()
     for trade in book.trades:
         if trade.trade_id == trade_id:
             return trade
     raise ValueError(
-        f"no active trade {trade_id!r} in the T-1 position book for strategy "
-        f"{strategy_id!r}"
+        f"no active trade {trade_id!r} in the T-1 position book"
     )
 
 
@@ -382,8 +368,14 @@ def _gate_short(structure, label: str):
         )
 
 
-class OrderSynthesis:
-    """The plugin chain plus the ActionGroup -> order conversion."""
+class OrderAssembly:
+    """The order-assembly stage between signal emission and execution.
+
+    Runs the synthesis rule chain (empty today; mechanical rules land in a
+    later phase), then converts every surviving ActionGroup into an
+    :class:`~backtester.orders.OrderGroup` via
+    :func:`action_group_to_order_group`.
+    """
 
     def __init__(self, rules=()):
         self._rules = tuple(rules)
@@ -398,7 +390,7 @@ class OrderSynthesis:
     def rules(self) -> tuple:
         return self._rules
 
-    def synthesize(
+    def build_order_groups(
         self,
         action_groups,
         ctx: AggregationContext,
@@ -409,7 +401,7 @@ class OrderSynthesis:
         ``action_ids`` is parallel to ``action_groups`` (one tuple of ids per
         group, itself parallel to that group's actions).  Returns one
         OrderGroup per **input** group, positionally aligned with the appended
-        records.  A rule that removes an input group fails loudly: synthesis
+        records.  A rule that removes an input group fails loudly: assembly
         does not reject or drop.
         """
         action_groups = list(action_groups)
@@ -430,8 +422,9 @@ class OrderSynthesis:
         input_ids = [group.action_group_id for group in action_groups]
         if any(gid is None for gid in input_ids):
             raise ValueError(
-                "synthesize() requires action groups that were appended to "
-                "the log first: action_group_id is assigned at emission"
+                "build_order_groups() requires action groups that were "
+                "appended to the log first: action_group_id is assigned at "
+                "emission"
             )
         known = set(input_ids)
         survivors: dict[str, ActionGroup] = {}
@@ -439,7 +432,7 @@ class OrderSynthesis:
             gid = group.action_group_id
             if gid is None:
                 raise ValueError(
-                    "synthesize() received an ActionGroup with no "
+                    "build_order_groups() received an ActionGroup with no "
                     "action_group_id; it must be appended to the log first"
                 )
             if gid not in known:
@@ -468,7 +461,7 @@ class OrderSynthesis:
         for gid in input_ids:
             if gid not in survivors:
                 raise ValueError(
-                    "a synthesis rule removed an ActionGroup; synthesis does "
+                    "a synthesis rule removed an ActionGroup; assembly does "
                     "not drop or reject groups (rejection is conversion-stage)"
                 )
             out.append(

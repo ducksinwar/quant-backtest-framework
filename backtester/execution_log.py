@@ -40,7 +40,6 @@ class ExecutionRecord:
     action_id: str
     order_group_id: str
     action_group_id: str
-    strategy_id: str
     date: str
     status: str
     probe_status: OrderOutcome | None = None
@@ -94,7 +93,6 @@ class ExecutionLog:
             action_id=report.action_id,
             order_group_id=report.order_group_id,
             action_group_id=report.action_group_id,
-            strategy_id=report.strategy_id,
             date=report.date,
             status=report.outcome.value,
             probe_status=report.probe_status,

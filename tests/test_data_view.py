@@ -56,13 +56,21 @@ def env(tmp_path):
 HK_MAP = {"TEST": "HK"}
 
 
-def _view(feed, calendar, date=ANOMALY_LOOP_DAY, cutoff=ANOMALY_DAY, mapping=None):
+def _view(
+    feed,
+    calendar,
+    date=ANOMALY_LOOP_DAY,
+    cutoff=ANOMALY_DAY,
+    mapping=None,
+    max_staleness_days=7,
+):
     return DataView(
         feed,
         date=date,
         cutoff=cutoff,
         calendar=calendar,
         ticker_to_calendar_code=mapping,
+        max_staleness_days=max_staleness_days,
     )
 
 
@@ -192,7 +200,8 @@ class TestReferencePrice:
         assert view.reference_price("TEST") == 104.0
 
     def test_none_when_there_is_no_observation_at_or_before_the_cutoff(self, env):
-        """Test C: no fill limit exists; absence of any row is the only None."""
+        """Test C: ``None`` has two causes -- no observation at all, or a last
+        observation older than ``max_staleness_days``.  Here there is no row."""
         feed, calendar = env
         view = _view(feed, calendar, date="2013-08-09", cutoff="2013-08-08")
         assert view.reference_price("TEST") is None
@@ -200,6 +209,96 @@ class TestReferencePrice:
     def test_requires_a_feed(self):
         with pytest.raises(RuntimeError, match="no data feed"):
             _view(None, None).reference_price("TEST")
+
+
+class TestReferencePriceStaleness:
+    """B2: ``reference_price`` is bounded by ``max_staleness_days``."""
+
+    def test_mapped_ticker_gap_within_bound_falls_back(self, env):
+        """The mapped calendar day has no row; the last data row is used."""
+        feed, calendar = env
+        # Loop day 08-18 makes 08-16 (Fri) the calendar-valid day, which has no
+        # row; the fallback ignores the calendar and takes 08-15 (3 days old).
+        view = _view(
+            feed,
+            calendar,
+            date="2013-08-18",
+            cutoff="2013-08-17",
+            mapping=HK_MAP,
+        )
+        assert view.reference_price("TEST") == 104.0
+
+    def test_mapped_ticker_gap_beyond_bound_returns_none(self, env):
+        feed, calendar = env
+        # The last row is 08-15 and the cutoff is 08-26: an 11-day gap.
+        view = _view(
+            feed,
+            calendar,
+            date="2013-08-27",
+            cutoff="2013-08-26",
+            mapping=HK_MAP,
+        )
+        assert view.reference_price("TEST") is None
+
+    def test_unmapped_and_mapped_parity_on_gap(self, env):
+        feed, calendar = env
+        within = {"date": "2013-08-18", "cutoff": "2013-08-17"}
+        mapped = _view(feed, calendar, mapping=HK_MAP, **within)
+        unmapped = _view(feed, calendar, **within)
+        assert (
+            mapped.reference_price("TEST")
+            == unmapped.reference_price("TEST")
+            == 104.0
+        )
+
+        beyond = {"date": "2013-08-27", "cutoff": "2013-08-26"}
+        mapped = _view(feed, calendar, mapping=HK_MAP, **beyond)
+        unmapped = _view(feed, calendar, **beyond)
+        assert mapped.reference_price("TEST") is None
+        assert unmapped.reference_price("TEST") is None
+
+    def test_reference_price_at_exact_bound(self, env):
+        """A gap of exactly ``max_staleness_days`` is inclusive."""
+        feed, calendar = env
+        # 08-22 is exactly 7 days after the last row (08-15).
+        view = _view(
+            feed,
+            calendar,
+            date="2013-08-23",
+            cutoff="2013-08-22",
+            mapping=HK_MAP,
+        )
+        assert view.reference_price("TEST") == 104.0
+
+    def test_max_staleness_days_zero(self, env):
+        """A zero bound restricts sizing to the cutoff day itself."""
+        feed, calendar = env
+        at_cutoff = _view(
+            feed,
+            calendar,
+            date=ANOMALY_LOOP_DAY,
+            cutoff=ANOMALY_DAY,
+            max_staleness_days=0,
+        )
+        assert at_cutoff.reference_price("TEST") == 103.0
+
+        gap = _view(
+            feed,
+            calendar,
+            date="2013-08-18",
+            cutoff="2013-08-17",
+            max_staleness_days=0,
+        )
+        assert gap.reference_price("TEST") is None
+
+    def test_negative_max_staleness_days_raises(self):
+        with pytest.raises(ValueError, match="max_staleness_days"):
+            DataView(
+                None,
+                date=ANOMALY_LOOP_DAY,
+                cutoff=ANOMALY_DAY,
+                max_staleness_days=-1,
+            )
 
 
 class TestNoFeed:

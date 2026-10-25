@@ -21,8 +21,8 @@ from backtester.execution import (
 from backtester.execution_log import ExecutionLog
 from backtester.instruments import LegState
 from backtester.action_group_log import ActionGroupLog
-from backtester.order_synthesis import OrderSynthesis
-from backtester.orders import OrderOutcome
+from backtester.order_assembly import OrderAssembly
+from backtester.orders import OrderOutcome, OrderSide
 from backtester.position_books import PositionBooks
 from backtester.snapshots import (
     LegSnapshot,
@@ -64,10 +64,10 @@ class BacktestConfig:
     #: calendar scoping (data presence only), so the default ``None`` changes
     #: nothing for existing configs.
     ticker_to_calendar_code: dict[str, str] | None = None
-    #: ActionGroup -> order synthesis.  ``None`` uses an ``OrderSynthesis``
-    #: with no plugins, i.e. a pure pass-through; a configured instance
+    #: ActionGroup -> order assembly.  ``None`` uses an ``OrderAssembly``
+    #: with no rules, i.e. a pure pass-through; a configured instance
     #: supplies the synthesis rule chain.
-    order_synthesis: object | None = None
+    order_assembly: object | None = None
     #: Execution backend: the backtest/live parity boundary.  ``None`` uses the
     #: default :class:`~backtester.execution.SimulatedExecution`.  Unlike the
     #: required ``calendar_provider``, a ``None`` default is honest here: a
@@ -116,7 +116,7 @@ class Backtester:
         trade_history_snapshot: tuple[TradeRecord, ...] = ()
         self.action_group_log = ActionGroupLog()
         self.execution_log = ExecutionLog()
-        synthesis = self._config.order_synthesis or OrderSynthesis()
+        assembly = self._config.order_assembly or OrderAssembly()
         execution_backend = (
             self._config.execution_backend or SimulatedExecution()
         )
@@ -126,7 +126,7 @@ class Backtester:
             #    T-1 position book, never today's prices.
             self._compute_pnl_for_date(T)
 
-            # 2. Signal -> action groups -> log -> synthesis -> orders.
+            # 2. Signal -> action groups -> log -> assembly -> orders.
             position_books = PositionBooks(
                 portfolio_state, trade_history_snapshot
             )
@@ -139,12 +139,11 @@ class Backtester:
                 config=self._config,
             )
             data_view = self._build_data_view(T)
-            strategy_id = self._config.signal.strategy_id
 
             action_groups = self._config.signal.generate_action_groups(
                 data_view,
-                self.action_group_log.for_strategy(strategy_id),
-                position_books.for_strategy(strategy_id),
+                self.action_group_log,
+                position_books.full(),
             )
 
             # The log owns action_group_id and emission_date; the loop stamps
@@ -155,11 +154,12 @@ class Backtester:
                 action_groups, emission_date
             )
 
-            order_groups = synthesis.synthesize(
+            order_groups = assembly.build_order_groups(
                 [record.action_group for record in records],
                 ctx,
                 [record.action_ids for record in records],
             )
+            self._validate_no_duplicate_structure_mods(order_groups)
             for record, order_group in zip(records, order_groups):
                 self._dispatch_synthesized_order(
                     record, order_group, T, execution_backend
@@ -258,6 +258,24 @@ class Backtester:
             ticker_to_calendar_code=self._config.ticker_to_calendar_code,
         )
 
+    def _validate_no_duplicate_structure_mods(self, order_groups) -> None:
+        """Raise if any structure is targeted by more than one order in
+        the day's patch. Strategy-layer signals modify each structure at
+        most once per day; merge multi-step modifications into one action
+        before emitting."""
+        seen: set[str] = set()
+        for order_group in order_groups:
+            for order in order_group.orders:
+                if order.structure_id is None:
+                    continue
+                if order.structure_id in seen:
+                    raise ValueError(
+                        f"structure {order.structure_id!r} is targeted by "
+                        f"multiple actions in one day's patch; merge them "
+                        f"into one action before emitting"
+                    )
+                seen.add(order.structure_id)
+
     def _dispatch_synthesized_order(
         self, record, order_group, date: str, execution_backend
     ) -> None:
@@ -289,7 +307,6 @@ class Backtester:
             asset_class_configs=self._config.asset_class_configs,
             date=date,
             action_group_id=record.action_group.action_group_id,
-            strategy_id=record.action_group.strategy_id,
         )
         reports = execution_backend.execute_group(order_group, ctx)
         execution_records = tuple(
@@ -363,6 +380,62 @@ class Backtester:
 
     # --- order commit (fill application) --------------------------------
 
+    def _assert_commit_preconditions(self, order_group) -> None:
+        """Tripwire for the commit phase's structural preconditions.
+
+        This is a **tripwire, not a transaction**: the execution records and
+        the action group's ``finalize`` are already written when commit runs, so
+        a fire aborts loudly and leaves no rollback path.  Under the current
+        invariants (execution probing, B3a's duplicate rejection and the
+        conversion-time size validation) it cannot fire; it exists so a future
+        invariant break is noisy rather than silent.
+        """
+        for order in order_group.orders:
+            if order.structure_id is None:
+                continue
+            trade = self._find_active_trade(order.trade_id)
+            if trade is None:
+                raise RuntimeError(
+                    f"commit invariant violated: order {order.order_id!r} "
+                    f"targets trade {order.trade_id!r}, which is not in the "
+                    f"live book"
+                )
+            structure = self._find_structure_in_trade(
+                trade, order.structure_id
+            )
+            if structure is None:
+                raise RuntimeError(
+                    f"commit invariant violated: order {order.order_id!r} "
+                    f"targets structure {order.structure_id!r}, which is not "
+                    f"active in trade {trade.trade_id!r}"
+                )
+            for leg in order.legs:
+                leg_state = next(
+                    (
+                        state
+                        for state in structure.legs
+                        if state.contract.ticker == leg.ticker
+                    ),
+                    None,
+                )
+                if leg_state is None:
+                    raise RuntimeError(
+                        f"commit invariant violated: order {order.order_id!r} "
+                        f"targets leg {leg.ticker!r}, which is not in "
+                        f"structure {structure.structure_id!r}"
+                    )
+                reducing = (
+                    leg.side is OrderSide.SELL
+                    if leg_state.current_size >= 0
+                    else leg.side is OrderSide.BUY
+                )
+                if reducing and leg.quantity > abs(leg_state.current_size):
+                    raise RuntimeError(
+                        f"commit invariant violated: order {order.order_id!r} "
+                        f"reduces {leg.quantity} of {leg.ticker!r} but the "
+                        f"structure holds {abs(leg_state.current_size)}"
+                    )
+
     def _commit_order_group(
         self, order_group, record, date: str, execution_records
     ):
@@ -378,6 +451,7 @@ class Backtester:
         A single action's filled orders may create a trade, extend one trade
         with new structures, or target existing structures -- never a mix.
         """
+        self._assert_commit_preconditions(order_group)
         action_by_id = dict(
             zip(record.action_ids, record.action_group.actions)
         )

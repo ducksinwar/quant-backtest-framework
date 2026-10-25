@@ -1,4 +1,4 @@
-"""SMACrossoverSignal emits action groups; BaseSignal requires a strategy_id."""
+"""SMACrossoverSignal emits action groups; BaseSignal carries no strategy id."""
 
 from unittest.mock import MagicMock
 
@@ -18,8 +18,6 @@ from backtester.snapshots import (
     TradeSnapshot,
 )
 
-STRATEGY_ID = "sma_crossover"
-
 
 def _position_book(ticker="SPY", trade_id="trade_1", structure_id="S1", size=100.0):
     leg = LegSnapshot(
@@ -33,31 +31,33 @@ def _position_book(ticker="SPY", trade_id="trade_1", structure_id="S1", size=100
     structure = StructureSnapshot(legs=(leg,), structure_id=structure_id)
     trade = TradeSnapshot(trade_id=trade_id, structures=(structure,))
     state = PortfolioState(date="2024-06-14", trades=(trade,))
-    return PositionBooks(state, ()).for_strategy(STRATEGY_ID)
+    return PositionBooks(state, ()).full()
 
 
 class TestBaseSignal:
     def test_cannot_instantiate_abstract(self):
         with pytest.raises(TypeError):
-            BaseSignal(STRATEGY_ID)
+            BaseSignal()
 
     def test_cannot_instantiate_partial(self):
         class PartialSignal(BaseSignal):
             pass
 
         with pytest.raises(TypeError):
-            PartialSignal(STRATEGY_ID)
+            PartialSignal()
 
-    def test_requires_a_non_empty_strategy_id(self):
+    def test_identity_is_the_instance(self):
         class MySignal(BaseSignal):
             def generate_action_groups(
                 self, data_view, action_group_log, position_book
             ):
                 return []
 
-        with pytest.raises(ValueError, match="strategy_id"):
-            MySignal("")
-        assert MySignal(STRATEGY_ID).strategy_id == STRATEGY_ID
+        assert MySignal() is not MySignal()
+        assert set(vars(MySignal())) == {
+            "_calendar",
+            "_ticker_to_calendar_code",
+        }
 
     def test_the_signal_interface_is_generate_action_groups(self):
         assert hasattr(BaseSignal, "generate_action_groups")
@@ -83,12 +83,11 @@ class _TradableSignal(BaseSignal):
 
 class TestIsTradable:
     def test_is_calendar_blind_without_a_provider(self):
-        signal = _TradableSignal("s")
+        signal = _TradableSignal()
         assert signal.is_tradable("2024-06-15", ["SPY"]) is True
 
     def test_open_day_is_tradable(self):
         signal = _TradableSignal(
-            "s",
             calendar_provider=_StubCalendar(),
             ticker_to_calendar_code={"SPY": "US"},
         )
@@ -96,7 +95,6 @@ class TestIsTradable:
 
     def test_closed_day_is_not_tradable(self):
         signal = _TradableSignal(
-            "s",
             calendar_provider=_StubCalendar({("US", "2024-06-14")}),
             ticker_to_calendar_code={"SPY": "US"},
         )
@@ -104,7 +102,6 @@ class TestIsTradable:
 
     def test_every_ticker_must_be_open(self):
         signal = _TradableSignal(
-            "s",
             calendar_provider=_StubCalendar({("HK", "2024-06-14")}),
             ticker_to_calendar_code={"SPY": "US", "2800.HK": "HK"},
         )
@@ -112,7 +109,6 @@ class TestIsTradable:
 
     def test_unmapped_ticker_fails_closed(self):
         signal = _TradableSignal(
-            "s",
             calendar_provider=_StubCalendar(),
             ticker_to_calendar_code={"SPY": "US"},
         )
@@ -122,7 +118,6 @@ class TestIsTradable:
     def test_the_mapping_is_copied(self):
         mapping = {"SPY": "US"}
         signal = _TradableSignal(
-            "s",
             calendar_provider=_StubCalendar(),
             ticker_to_calendar_code=mapping,
         )
@@ -142,19 +137,21 @@ class TestSMACrossoverSignal:
             long_window=20,
             tickers=["SPY"],
             notional=100_000.0,
-            strategy_id=STRATEGY_ID,
         )
 
     @pytest.fixture
     def action_group_log(self):
-        return ActionGroupLog().for_strategy(STRATEGY_ID)
+        return ActionGroupLog()
 
     @pytest.fixture
     def flat_book(self):
-        return PositionBooks().for_strategy(STRATEGY_ID)
+        return PositionBooks().full()
 
-    def make_price_series(self, prices, start_date="2024-01-01"):
-        dates = pd.date_range(start=start_date, periods=len(prices), freq="B")
+    def make_price_series(self, prices, end_date="2024-06-14"):
+        # The series must end at (or within max_staleness_days of) the view's
+        # cutoff: ``reference_price`` is bounded, so a months-old fixture would
+        # now correctly resolve to ``None`` rather than a stale price.
+        dates = pd.date_range(end=end_date, periods=len(prices), freq="B")
         dates_str = [d.strftime("%Y-%m-%d") for d in dates]
         return pd.Series(prices, index=dates_str)
 
@@ -174,15 +171,6 @@ class TestSMACrossoverSignal:
         feed.get_value.return_value = 500.0
         return DataView(feed, date=date, cutoff="2024-06-14")
 
-    def test_strategy_id_is_required(self):
-        with pytest.raises(TypeError):
-            SMACrossoverSignal(
-                short_window=5,
-                long_window=20,
-                tickers=["SPY"],
-                notional=100_000.0,
-            )
-
     def test_signal_holds_no_market_data_feed(self, signal):
         """Ruling: the feed lives in the view, not in the signal."""
         for name in ("_data_feed", "data_feed"):
@@ -200,7 +188,6 @@ class TestSMACrossoverSignal:
         assert len(groups) == 1
         group = groups[0]
         assert isinstance(group, ActionGroup)
-        assert group.strategy_id == STRATEGY_ID
         assert group.provenance == PROVENANCE_SIGNAL
         # Signals own neither identifier; the loop stamps both at emission.
         assert group.action_group_id is None
@@ -265,7 +252,8 @@ class TestSMACrossoverSignal:
         )[0]
 
         assert group.actions[0].spec.structures[0].legs[0].size == 400.0
-        # reference_price == get_price(ticker): last observable row <= cutoff.
+        # Sizing reads the T-1 reference close through the bounded staleness
+        # resolution: last observable row <= cutoff, within the 7-day bound.
         feed.get_value.assert_called_once_with(
             "eod_prices", series.index[-1], "SPY"
         )
@@ -276,7 +264,6 @@ class TestSMACrossoverSignal:
             long_window=20,
             tickers=["SPY"],
             notional=100_000.0,
-            strategy_id=STRATEGY_ID,
             calendar_provider=_StubCalendar(closed),
             ticker_to_calendar_code={"SPY": "US"},
         )
@@ -409,7 +396,6 @@ class TestSMACrossoverSignal:
             long_window=20,
             tickers=["SPY", "QQQ"],
             notional=100_000.0,
-            strategy_id=STRATEGY_ID,
         )
         view = self.make_view(feed, self.rising_series())
 

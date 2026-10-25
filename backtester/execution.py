@@ -64,9 +64,9 @@ class ExecutionContext:
     pre-check did.  **Backends must treat this as immutable; violating this
     corrupts the engine's book.**
 
-    ``date`` / ``action_group_id`` / ``strategy_id`` are the loop day and the
-    emitted group's lineage; the backend copies them onto every report so the
-    execution log keeps the ``order <-> action <-> group`` chain.
+    ``date`` / ``action_group_id`` are the loop day and the emitted group's
+    lineage; the backend copies them onto every report so the execution log
+    keeps the ``order <-> action <-> group`` chain.
 
     There is deliberately no ``calendar`` field: calendar gating is signal-side
     (``BaseSignal.is_tradable``), so an execution backend never reads a
@@ -77,7 +77,6 @@ class ExecutionContext:
     asset_class_configs: dict
     date: str
     action_group_id: str
-    strategy_id: str
 
 
 @dataclass(frozen=True)
@@ -98,7 +97,6 @@ class ExecutionReport:
     action_id: str
     order_group_id: str
     action_group_id: str
-    strategy_id: str
     date: str
     outcome: ExecutionOutcome
     probe_status: OrderOutcome | None = None
@@ -205,7 +203,6 @@ class SimulatedExecution(ExecutionBackend):
             action_id=order.action_id,
             order_group_id=order_group.order_group_id,
             action_group_id=ctx.action_group_id,
-            strategy_id=ctx.strategy_id,
             date=ctx.date,
             **kwargs,
         )

@@ -50,10 +50,10 @@ class PositionBook:
         ``PortfolioState`` was built in (``active_trades`` insertion order), so
         "first match" means the same trade the ticker lookup found.
 
-        The book is global -- one strategy per run -- so a first match is
+        The book is global -- one signal per run -- so a first match is
         unambiguous.  Under multi-strategy runs this same call would return
-        *any* strategy's holding; strategy-scoped books are a future design
-        item, recorded in the worklog ledger rather than guessed at here.
+        *any* strategy's holding; per-strategy books are a future design item,
+        recorded in the worklog ledger rather than guessed at here.
         """
         for trade in self.trades:
             for structure in trade.structures:
@@ -112,13 +112,12 @@ class PositionBook:
 class PositionBooks:
     """Per-day access to position books.
 
-    A run holds a single, global book: a run has one strategy and positions are
-    not yet partitioned per strategy, so ``for_strategy`` returns the full book
-    -- the *same object* -- for every strategy id.  That identity is deliberate
-    and documented rather than a filter that silently returns nothing.
-    Per-strategy partitioning arrives with multi-strategy runs; ``full()`` is
-    the same book, named for the risk plugins that need the whole book rather
-    than a strategy view.
+    A run holds a single, global book: a run has one signal and positions are
+    not partitioned per strategy, so :meth:`full` returns that one book -- the
+    *same object* every time.  It is named for the risk plugins that need the
+    whole book; the signal receives the same book object directly.
+    Per-strategy partitioning is deferred with multi-strategy runs, and any
+    strategy tagging happens at the §10 ingestion boundary (``StrategyRun``).
     """
 
     def __init__(
@@ -130,11 +129,6 @@ class PositionBooks:
             portfolio_state=portfolio_state,
             trade_history=tuple(trade_history),
         )
-
-    def for_strategy(self, strategy_id: str) -> PositionBook:
-        if not isinstance(strategy_id, str) or not strategy_id:
-            raise ValueError("strategy_id must be a non-empty string")
-        return self._book
 
     def full(self) -> PositionBook:
         return self._book

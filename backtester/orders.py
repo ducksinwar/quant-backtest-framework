@@ -3,7 +3,7 @@
 The pipeline is::
 
     signal -> list[ActionGroup] -> ActionGroupLog
-           -> OrderSynthesis.synthesize(groups, ctx, action_ids)
+           -> OrderAssembly.build_order_groups(groups, ctx, action_ids)
            -> tuple[OrderGroup, ...] -> execution -> book commit
 
 An :class:`OrderGroup` is the atomic execution unit: conversion produces one per

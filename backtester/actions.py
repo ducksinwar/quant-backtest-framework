@@ -3,7 +3,7 @@
 The pipeline is::
 
     signal -> list[ActionGroup] -> ActionGroupLog (id + emission date assigned)
-           -> OrderSynthesis.synthesize(groups, ctx, action_ids)
+           -> OrderAssembly.build_order_groups(groups, ctx, action_ids)
            -> tuple[OrderGroup, ...] -> the execution path
 
 The object a signal emits is an :class:`ActionGroup`; the stage that turns it
@@ -387,7 +387,6 @@ class ActionGroup:
     belongs to the scaling rule, which is future work).
     """
 
-    strategy_id: str
     provenance: str
     actions: tuple[Action, ...]
     action_group_id: str | None = None
@@ -397,8 +396,6 @@ class ActionGroup:
         object.__setattr__(self, "actions", tuple(self.actions or ()))
         if not self.actions:
             raise ValueError("an ActionGroup requires at least one Action")
-        if not isinstance(self.strategy_id, str) or not self.strategy_id:
-            raise ValueError("strategy_id must be a non-empty string")
         if self.provenance not in PROVENANCE_CONSTANTS:
             raise ValueError(f"unknown provenance {self.provenance!r}")
         for action in self.actions:

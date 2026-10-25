@@ -79,10 +79,10 @@ backtester/
     calendar_provider.py                # (* Phase 2 *) CalendarProvider (holiday calendars)
     actions.py                          # (* 5a *) Action schema, ActionGroupRecord, AggregationContext
     orders.py                           # (* Phase B *) Order schema: Order, OrderLeg, OrderSide, OrderGroup, OrderOutcome
-    action_group_log.py                 # (* 5a *) Append-only action-group log + strategy-scoped view
+    action_group_log.py                 # (* 5a *) Append-only action-group log
     data_view.py                        # (* 5a *) T-1-clamped view handed to signals
     position_books.py                   # (* 5a *) Read-only T-1 position book
-    order_synthesis.py                  # (* 5a *) ActionGroup -> order synthesis + synthesis rule chain
+    order_assembly.py                   # (* 5a *) Order assembly: synthesis rule chain + order conversion
     execution.py                        # (* 5b-1 *) Execution seam: ExecutionBackend, SimulatedExecution
     execution_log.py                    # (* 5b-1 *) Write-once execution log + fill_id
     summary.py                          # (* Phase 1 *) Summary (thin data coordinator)
@@ -352,7 +352,7 @@ The framework uses a **DataFeed** class from Phase 1 – a single, concrete clas
 1. Create the `DataFeed` with a `CsvBackend` (later, an `SqlBackend`).
 2. Create typed data providers (`EquityPriceProvider`, `VolSurfaceProvider`, `RateCurveProvider`, etc.), passing them the `DataFeed`.
 3. Create pricers (`EquityPricer`, `EquityOptionPricer`, etc.), passing each the typed providers it requires and — for calendar-aware contracts — the `ticker_to_calendar_code` mapping, so `resolve_instrument` stamps `Contract.trading_calendar_code` (Task 5b-2).
-4. Create the signal with its required `strategy_id` (Task 5a).  The signal no longer receives the `DataFeed`; it reads market data only through the T-1-clamped `DataView` the loop builds.
+4. Create the signal (Task 5a).  A signal carries no `strategy_id` — a run has one signal, so identity is the instance; strategy tagging lives at the §10 ingestion boundary (see the §10 reconciliation note).  The signal no longer receives the `DataFeed`; it reads market data only through the T-1-clamped `DataView` the loop builds.
 5. Create the `CalendarProvider`, passing it the `DataFeed` — holidays are served through the backend contract exactly like prices, so the provider is constructed like every other typed provider (§3.5).
 6. Assemble the `asset_class_configs` dictionary, where each entry’s `AssetClassConfig` bundles the `pricer`, `risk_measures`, `pnl_calculator`, and `record_pricing_inputs`.
 7. Create the `Backtester` with the config — the signal, `asset_class_configs`, the required `calendar_provider` (no default, so omitting it raises `TypeError`), `simulation_calendar_codes`, and the optional `ticker_to_calendar_code` seam (shared by the `DataView`, the pricer and the signal's tradability gate).
@@ -479,9 +479,11 @@ A signal **emits action groups**, not orders: the mechanical translation from an
 The object a signal emits is an `ActionGroup`; the pipeline stage that turns it
 into orders is **action group synthesis**, recorded in the `ActionGroupLog`.
 
-- **`BaseSignal`** is an abstract class with a required constructor argument
-  `strategy_id` and one method:
-  `generate_action_groups(data_view: DataView, action_group_log: ActionGroupLogView, position_book: PositionBook) -> list[ActionGroup]`.
+- **`BaseSignal`** is an abstract class with one method:
+  `generate_action_groups(data_view: DataView, action_group_log: ActionGroupLog, position_book: PositionBook) -> list[ActionGroup]`.
+  It carries no `strategy_id`: a run has one signal, so identity is the
+  instance itself.  Strategy tagging is re-added at the §10 ingestion boundary
+  (`StrategyRun(strategy_id, result)`), where it has a real consumer.
   It returns :class:`ActionGroup` objects (one per action scope).  There is no
   `requires_portfolio_state` / `requires_trade_history` flag and no
   `generate_signals()`: the loop always builds the T-1 position book and its
@@ -508,10 +510,13 @@ into orders is **action group synthesis**, recorded in the `ActionGroupLog`.
   signal with no provider is calendar-blind.  Signals call it before emitting,
   so the engine needs no check stage and a closed day is silent.
 
-- **`ActionGroupLogView`** is a read-only, strategy-scoped window onto the run's
-  :class:`~backtester.action_group_log.ActionGroupLog`; **`PositionBook`** is the
-  read-only T-1 position snapshot.  A signal can inspect its own emission
-  history and its positions but cannot mutate them or see another strategy's.
+- **`ActionGroupLog`** is the run's append-only emission log; **`PositionBook`**
+  is the read-only T-1 position snapshot.  A signal receives the log directly
+  and can inspect its emission history and its positions.  There is no
+  strategy-scoped view: the append-only behaviour is a convention, not a
+  structural guarantee, so **a signal can now call `log.append()`**.  That
+  trade-off is deliberate in a one-signal layer; a read-only view returns only
+  with a real multi-strategy need (recorded in the worklog).
 
 #### 3.7.1 Action schema
 
@@ -531,7 +536,7 @@ The schema is **spec objects + actions + a group**:
 - **`Action`** — `type` (`NEW` / `UNWIND`), at most **one** `spec`
   (`TradeSpec | StructureSpec | None`), `trade_id`, `structure_id`, and `size`
   (the modification amount, a positive magnitude on the anchor leg).
-- **`ActionGroup`** — `strategy_id`, `provenance` (from the documented
+- **`ActionGroup`** — `provenance` (from the documented
   constants — `"signal"` for alpha), a required `actions` tuple (≥1), and the
   identifiers the log owns: `action_group_id` / `emission_date` (assigned at
   emission; the log raises if a signal set either).  There is deliberately
@@ -620,7 +625,7 @@ never as an action-layer fate.
   continuation run is reproducible.
 
 - **SMACrossoverSignal** (example): parameters `short_window`, `long_window`,
-  `tickers`, `notional`, `ticker_currency`, and a required `strategy_id`.  It
+  `tickers`, `notional`, and `ticker_currency`.  It
   evaluates each ticker independently and converts the target notional into
   fractional shares via `notional / price` using `DataView.reference_price`
   (the T-1 reference close).  It emits a
@@ -660,7 +665,7 @@ Order assembly is a single **synthesis chain**, stateless, sitting between the
 signal and the execution seam.  It was once a single planned `OrderGenerator`
 (§3.7's legacy note):
 
-1. **Synthesis chain** (`backtester/order_synthesis.py`) — transforms the day's
+1. **Synthesis chain** (`backtester/order_assembly.py`) — transforms the day's
    **ActionGroup list** *before orders exist*.  Rules are
    `rule(action_groups, ctx) -> list[ActionGroup]`.  By default the chain is
    **empty**, so synthesis is a pass-through; `action_group_to_order_group`
@@ -670,10 +675,12 @@ signal and the execution seam.  It was once a single planned `OrderGenerator`
    against — `("roll", "auto_unwind", "hedge_rebalance", "scaling")`.  Netting
    is deliberately **absent**: it is an order-level module, not a synthesis
    rule.  **The converter also runs the synthesis rule chain** — action group
-   synthesis and order conversion are colocated in `OrderSynthesis`; netting
-   stays out-of-band.
+   synthesis and order conversion are colocated in `OrderAssembly`; netting
+   stays out-of-band.  `OrderAssembly` is one class today; it splits into
+   `SynthesisChain` + `OrderConverter` when the first concrete rule lands
+   (registered in `docs/phase2_plan.md`).
 
-   `synthesize` returns a `tuple[OrderGroup, ...]` — **exactly one OrderGroup
+   `build_order_groups` returns a `tuple[OrderGroup, ...]` — **exactly one OrderGroup
    per input ActionGroup, positionally aligned** with the appended records.  It
    receives the day's `action_ids` in parallel with the groups, so every `Order`
    carries its producing `action_id`.  A synthesis rule that removes an input
@@ -704,7 +711,7 @@ signal and the execution seam.  It was once a single planned `OrderGenerator`
    **Multi-action gate.**  The single-action subset's pipeline rejects any
    ActionGroup with more than one Action here, *before* order conversion.  It
    is a **pipeline** rejection, not a schema one: the schema accepts the
-   `actions` tuple shape.  The crash on `synthesize` is intended; orphaned
+   `actions` tuple shape.  The crash on `build_order_groups` is intended; orphaned
    records (already appended) are terminal.
 
 **No order-side validation at the strategy layer.**  The engine has no
@@ -796,7 +803,7 @@ its (and the other plugins') reads.
   - `start_date`, `end_date` – the simulation period.
   - `calendar_provider` (required, no default) and `simulation_calendar_codes` – the union simulation calendar (§3.5).
   - `data_feed` and `ticker_to_calendar_code` – the feed the daily T-1 `DataView` draws from, and the ticker → calendar-code mapping the `DataView` uses for per-instrument scoping (§3.7).
-  - `order_synthesis` (default `None` → empty synthesis chain) – the order-assembly seam (§3.8).
+  - `order_assembly` (default `None` → empty synthesis rule chain) – the order-assembly seam (§3.8).
   - `execution_backend` (default `None` → `SimulatedExecution`) – the backtest/live parity boundary (`backtester/execution.py`).
   - `asset_class_configs` – a dictionary mapping each **asset class** to an `AssetClassConfig` dataclass.  
     An `AssetClassConfig` contains:
@@ -851,9 +858,9 @@ its (and the other plugins') reads.
   2. **Request and execute today’s orders (the action-group pipeline, as built):**  
       The Phase 1 `signal.generate_signals()` call is gone. Each day the loop:
       1. builds the T-1 `DataView`, the `PositionBooks` and the `AggregationContext`;
-      2. calls `signal.generate_action_groups(data_view, action_group_log.for_strategy(id), position_book)`;
+      2. calls `signal.generate_action_groups(data_view, action_group_log, position_book)` — the live log and book directly;
       3. appends the returned groups to the **action-group log** (`action_group_id` and `emission_date` are stamped at emission; the loop asserts the emission date is `T`);
-      4. runs the **synthesis chain** (§3.8), producing a `tuple[OrderGroup, ...]` — one OrderGroup per input group, positionally aligned — each holding `Order` objects with their own `order_id` / `action_id`;
+      4. runs **order assembly** (§3.8), producing a `tuple[OrderGroup, ...]` — one OrderGroup per input group, positionally aligned — each holding `Order` objects with their own `order_id` / `action_id`;
       5. for each record/OrderGroup pair **in order**, dispatches the group to the **execution seam** (`backtester/execution.py`) — the execute → finalize → commit ordering lives in one function, `_dispatch_synthesized_order`.
 
       - **No rejection path.**  A group either fills (and commits) or blocks at execution.  The per-order ids and outcomes are recorded on the record (`order_ids`, `order_outcomes`).  A missing price (data gap beyond the forward-fill limit) is an *order outcome*: the execution backend decides it, the engine writes an execution-log record `blocked(code="DATA_MISSING")` (plus the single warning) and does **not** commit to the book (Flow A).  An order built but blocked is discarded before persistence — never added then removed.  The signal is responsible for not emitting on a closed market (§3.7).
@@ -1550,7 +1557,7 @@ Backtester
 Daily flow
 signal (T-1 DataView)
   -> ActionGroup[]  -> ActionGroupLog.append_many  (stamps id + emission_date)
-  -> OrderSynthesis.synthesize (synthesis rule chain, empty by default)
+  -> OrderAssembly.build_order_groups (synthesis rule chain, empty by default)
        -> tuple[OrderGroup, ...] { order_group_id, orders: Order[] }  (1 per group)
   -> for each (record, OrderGroup):  ExecutionBackend.execute_group
        -> ExecutionLog.append per order -> commit on all FILLED
@@ -1698,7 +1705,7 @@ Build the following in order, each tested before moving on:
 ### Phase 2: Validation
 
 **Order pipeline (Task 5) — as built and split across three steps.**
-1. **Task 5a (done; schema restructured since):** the signal action-group interface (`BaseSignal.generate_action_groups`), the T-1-clamped `DataView`, the append-only `ActionGroupLog` with the `action_group_id -> action_ids` chain, `PositionBooks`, and the pass-through **synthesis** chain (`OrderSynthesis`; `action_group_to_order_group` materializes `Order` objects). Breaking: `generate_signals` and the `requires_*` flags are gone; signals return `list[ActionGroup]`.  (Originating names: `Intent`/`LegIntent`/`StructureIntent`/`WorkingSet`/`IntentLog`/`intent_to_target_trade`; see the Action schema §3.7.)
+1. **Task 5a (done; schema restructured since):** the signal action-group interface (`BaseSignal.generate_action_groups`), the T-1-clamped `DataView`, the append-only `ActionGroupLog` with the `action_group_id -> action_ids` chain, `PositionBooks`, and the pass-through **order assembly** stage (`OrderAssembly`; `action_group_to_order_group` materializes `Order` objects). Breaking: `generate_signals` and the `requires_*` flags are gone; signals return `list[ActionGroup]`.  (Originating names: `Intent`/`LegIntent`/`StructureIntent`/`WorkingSet`/`IntentLog`/`intent_to_target_trade`; see the Action schema §3.7.)
 2. **Task 5b-1 (done):** the **execution seam** (`ExecutionBackend` / `SimulatedExecution` — the backtest/live parity boundary), the write-once **execution log** + `fill_id`, the execution-side cost-exposure writer (`write_cost_exposures`), and trade↔execution linkage. The data-availability pre-check collapses into `SimulatedExecution` blocking; a blocked group has `order_outcomes == (BLOCKED,)` and an execution-log `blocked(DATA_MISSING)`.  `SimulatedExecution` is all-or-nothing by as-built design (no partial fills; live partial-fill handling deferred).
 3. **Task 5b-2 (superseded by Phase C):** the order-side validation stage was
    **removed**.  Calendar gating moved into the signal
@@ -1897,7 +1904,9 @@ This architectural continuity—from backtest to OMS to lifecycle monitoring—e
 
 > **Status:** This section specifies the planned Portfolio Layer, a coordination layer that spans the Research, Risk, and Execution pillars. It is **forward‑looking and not part of the current Phase 1 or Phase 2 implementation**. It builds on the existing Backtester, Event Log, CostModel, Pricer, and Trade/Structure/Instrument classes.
 
-> **Reconciliation with Task 5 (2026‑10‑04).** Task 5 has now realized the **order/execution primitives** this section composes: the action-group log (what a strategy wanted), the synthesis chain (how an action group becomes an order), the execution seam (`ExecutionBackend`, the single decision point for an order's outcome), and the execution log (`ExecutionRecord`, the terminal outcome). The Portfolio Layer is the *multi-strategy composition* of those primitives: its `NettingEngine` merges N strategies' action-group/execution logs, its `RiskConstraint`/`PortfolioAllocator`/`StrategySizer` are the portfolio-level check/modify rules, and its `BaseExecutionHandler` is the live counterpart of the `ExecutionBackend` seam. Nothing in Task 5 is single-strategy-specific by construction — the per-strategy scoping (`strategy_id` on action groups and execution records, `PositionBooks.for_strategy`) is deliberately present so the Portfolio Layer can consume the same logs rather than a parallel representation. The §10 names (`BacktesterResult` / `BaseCostModel`) remain the forward-looking aliases for the current `BacktestResult` / `CostModel`.
+> **Reconciliation with Task 5 (2026‑10‑04, revised 2026‑10‑23).** Task 5 has now realized the **order/execution primitives** this section composes: the action-group log (what a strategy wanted), the order-assembly stage (how an action group becomes an order), the execution seam (`ExecutionBackend`, the single decision point for an order's outcome), and the execution log (`ExecutionRecord`, the terminal outcome). The Portfolio Layer is the *multi-strategy composition* of those primitives: its `NettingEngine` merges N strategies' action-group/execution logs, its `RiskConstraint`/`PortfolioAllocator`/`StrategySizer` are the portfolio-level check/modify rules, and its `BaseExecutionHandler` is the live counterpart of the `ExecutionBackend` seam.
+
+> **`strategy_id` is not a strategy-layer field.** A run has one signal, so every strategy-layer record would carry the same identifier, and a scoping API built on it would fail the moment two strategies ran in one loop. `strategy_id` is therefore re-added at the **§10 ingestion boundary**, where it has a real consumer: each saved `BacktestResult` came from one strategy, so at load time wrap it as `StrategyRun(strategy_id, result)` and tag `Trade` / `ExecutionRecord` if they are flattened. This is the single place strategy identity enters a multi-strategy composition. The §10 names (`BacktesterResult` / `BaseCostModel`) remain the forward-looking aliases for the current `BacktestResult` / `CostModel`.
 
 > **Terminology mapping:** The Portfolio Layer specification below uses `BacktesterResult` and `BaseCostModel`; in the current codebase these correspond to `BacktestResult` and `BaseCostCalculator`/`CostModel`, respectively. When the Portfolio Layer is implemented, these names will be aligned with the existing code.
 

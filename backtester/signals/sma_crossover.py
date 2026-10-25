@@ -46,12 +46,10 @@ class SMACrossoverSignal(BaseSignal):
         notional: float,
         ticker_currency: dict[str, str] | None = None,
         *,
-        strategy_id: str,
         calendar_provider=None,
         ticker_to_calendar_code: dict[str, str] | None = None,
     ):
         super().__init__(
-            strategy_id=strategy_id,
             calendar_provider=calendar_provider,
             ticker_to_calendar_code=ticker_to_calendar_code,
         )
@@ -120,7 +118,6 @@ class SMACrossoverSignal(BaseSignal):
                 return None
             return ActionGroup(
                 action_group_id=None,
-                strategy_id=self.strategy_id,
                 provenance=PROVENANCE_SIGNAL,
                 actions=(
                     Action(
@@ -153,7 +150,6 @@ class SMACrossoverSignal(BaseSignal):
             # converter never has to resolve the trade from the book.
             return ActionGroup(
                 action_group_id=None,
-                strategy_id=self.strategy_id,
                 provenance=PROVENANCE_SIGNAL,
                 actions=(
                     Action(

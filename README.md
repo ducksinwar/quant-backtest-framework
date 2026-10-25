@@ -60,7 +60,7 @@ backtester/
     action_group_log.py         # Append‑only action-group log
     data_view.py                # T‑1‑clamped market‑data view handed to signals
     position_books.py           # Read‑only T‑1 position book
-    order_synthesis.py          # ActionGroup → order synthesis chain
+    order_assembly.py           # ActionGroup → order assembly (synthesis rules + conversion)
     execution.py                # Execution seam (ExecutionBackend / SimulatedExecution)
     execution_log.py            # Write‑once execution log
     backtest_engine.py          # Daily loop orchestrator
@@ -118,14 +118,14 @@ If you don’t have a `market_data/` folder yet, create one and place your CSV i
 ## Usage
 
 1. Place a CSV of daily adjusted prices (columns: `date`, `close`) in `market_data/`.  
-2. Create a signal class that inherits from `BaseSignal` (pass a `strategy_id`) and implements `generate_action_groups()`.  
+2. Create a signal class that inherits from `BaseSignal` and implements `generate_action_groups()`.  A run has one signal, so identity is the instance.  
 3. Instantiate the components:
    - `DataFeed` with a `CsvBackend`
    - `EquityPriceProvider` wrapping the feed
    - `EquityPricer` (pass the optional `ticker_to_calendar_code` mapping to enable calendar validation)
    - `CalendarProvider` (over the same feed)
-   - Your `Signal` (with a `strategy_id`)
-   - `Backtester` config with the signal, asset class config, calendar provider, and optional `ticker_to_calendar_code`; the order-pipeline seams are all optional and default sensibly — `data_feed` (the daily T-1 `DataView`'s source), `order_synthesis` (`None` → empty synthesis chain), and `execution_backend` (`None` → `SimulatedExecution`)
+   - Your `Signal`
+   - `Backtester` config with the signal, asset class config, calendar provider, and optional `ticker_to_calendar_code`; the order-pipeline seams are all optional and default sensibly — `data_feed` (the daily T-1 `DataView`'s source), `order_assembly` (`None` → empty synthesis rule chain), and `execution_backend` (`None` → `SimulatedExecution`)
    - `CostModel(calculators={"equity": EquityCostCalculator(bps=2.0)})`
 4. Run `backtester.run()` and pass the resulting `trade_history` to `Summary` for reports.
 

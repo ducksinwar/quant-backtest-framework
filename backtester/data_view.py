@@ -10,10 +10,10 @@ a signal receives.  Two rules make the no-look-ahead convention structural:
   clamped: a strategy's pre-backtest lookback must keep working, and a ``start``
   before the instrument's first data point simply returns the shorter available
   series (the ``Series.loc[start:end]`` behaviour -- no raise).
-* :meth:`DataView.reference_price` is the sizing read -- the T-1 reference
-  close, defined as exactly ``get_price(ticker)`` so it inherits both the
-  cutoff bound and the calendar/data-presence resolution.  There is no read of
-  the loop day's own data anywhere in the view.
+* :meth:`DataView.reference_price` is the sizing read -- the last observable
+  close at or before the cutoff, **bounded by ``max_staleness_days``**.  It
+  never reads the loop day's own data.  A gap longer than the bound resolves
+  to ``None``, which the caller's price guard handles.
 
 Terminology: **T-1** means the *calendar day before T* -- the cutoff, a
 structural bound -- and is not the same thing as an instrument's **previous
@@ -29,6 +29,14 @@ instrument's calendar considers valid before the loop day, and an explicit
 ``as_of`` on a calendar-invalid day resolves to ``None`` (no observation).
 An unmapped ticker gets no calendar scoping at all -- data presence only.
 
+``get_price`` and ``last_valid_day`` keep their pre-staleness semantics: a
+mapped ticker's ``as_of=None`` read resolves to its last calendar-valid day and
+does **not** bridge a data gap at that day.  ``reference_price`` -- the sizing
+read, not a general price read -- is the only place a gap is bridged: when the
+resolved day has no data row it scans back for the last data row at or before
+the cutoff regardless of calendar, so mapped and unmapped tickers size
+identically across a gap.  The staleness bound is then applied to that day.
+
 ``get_series`` deliberately does **not** consult the calendar.  Clamping a
 series to ``prev_valid_day`` would drop rows the data path keeps: in the
 committed ``market_data/`` fixtures there are days (e.g. 2800.HK 2013-08-14,
@@ -39,6 +47,8 @@ else.
 """
 
 from __future__ import annotations
+
+import datetime
 
 
 class DataViewCutoffError(ValueError):
@@ -57,6 +67,7 @@ class DataView:
         calendar=None,
         dataset: str = "eod_prices",
         ticker_to_calendar_code: dict[str, str] | None = None,
+        max_staleness_days: int = 7,
     ):
         if not isinstance(date, str) or not date:
             raise ValueError("DataView.date must be a non-empty ISO date string")
@@ -75,6 +86,12 @@ class DataView:
         self._calendar = calendar
         self._dataset = dataset
         self._ticker_to_calendar_code = dict(ticker_to_calendar_code or {})
+        if max_staleness_days < 0:
+            raise ValueError(
+                f"DataView.max_staleness_days must be >= 0, got "
+                f"{max_staleness_days!r}"
+            )
+        self._max_staleness_days = max_staleness_days
 
     # --- identity -------------------------------------------------------
 
@@ -169,20 +186,49 @@ class DataView:
     def reference_price(self, ticker: str) -> float | None:
         """The **T-1 reference close** used for sizing.
 
-        Defined as exactly :meth:`get_price` with ``as_of=None``: the last
-        observable close at or before the construction-validated cutoff
-        (calendar-valid when the ticker is mapped, data-presence otherwise).
+        The last observable close at or before the construction-validated
+        cutoff, **bounded by** ``max_staleness_days`` (default 7): a gap beyond
+        the bound resolves to ``None`` and the caller's price guard handles it.
+
+        Resolution starts from :meth:`last_valid_day` (calendar-valid for a
+        mapped ticker, data-presence otherwise).  If that day has no data row --
+        the mapped-ticker gap case -- resolution falls back to the last data row
+        at or before the cutoff **regardless of calendar**, so mapped and
+        unmapped tickers size identically across a gap.  The staleness bound is
+        applied to whatever day the scan lands on.
+
         Two guarantees are structural, not conventional:
 
         * The loop day's own close is unreachable: construction rejects a
-          ``cutoff`` on or after ``date``, and ``get_price`` raises beyond the
+          ``cutoff`` on or after ``date``, and resolution never scans beyond the
           cutoff, so ``reference_price`` cannot return T's row even when one
           exists in the feed.
-        * There is **no forward-fill limit**.  If the last row is several
-          calendar days before the cutoff (a weekend plus holidays, or a data
-          gap), that row is the reference.  The only ``None`` case is *no
-          observation at or before the cutoff* (the instrument has not started
-          trading yet, or the ticker is unknown); the SMA's
-          ``price is None or price <= 0`` guard owns that case.
+        * ``None`` has exactly two causes: there is no observation at or before
+          the cutoff, or the last observation is more than
+          ``max_staleness_days`` before it.
         """
-        return self.get_price(ticker)
+        day = self.last_valid_day(ticker)
+        if day is None:
+            return None
+        value = self._feed.get_value(self._dataset, day, ticker)
+        if value is None:
+            day = self._last_data_day_at_or_before_cutoff(ticker)
+            if day is None:
+                return None
+            value = self._feed.get_value(self._dataset, day, ticker)
+        staleness = (
+            datetime.date.fromisoformat(str(self._cutoff)[:10])
+            - datetime.date.fromisoformat(str(day)[:10])
+        ).days
+        if staleness > self._max_staleness_days:
+            return None
+        return value
+
+    def _last_data_day_at_or_before_cutoff(self, ticker: str) -> str | None:
+        """The last data row at or before the cutoff, ignoring the calendar."""
+        series = self._feed.get_series(
+            self._dataset, None, self._cutoff, ticker
+        )
+        if series is None or len(series) == 0:
+            return None
+        return str(series.index[-1])

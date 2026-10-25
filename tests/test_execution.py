@@ -48,7 +48,6 @@ def _ctx(pricer, active_trades=(), date="2024-01-02"):
         asset_class_configs={"equity": AssetClassConfig(pricer=pricer)},
         date=date,
         action_group_id="i1",
-        strategy_id="s",
     )
 
 
@@ -136,7 +135,6 @@ class TestSimulatedExecution:
         assert rep.action_id == "a9"
         assert rep.order_group_id == group.order_group_id
         assert rep.action_group_id == "i1"
-        assert rep.strategy_id == "s"
         assert rep.date == "2024-01-02"
 
     def test_multi_leg_fill_preserves_sign(self):

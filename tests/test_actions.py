@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from backtester.action_group_log import ActionGroupLog, ActionGroupLogView
+from backtester.action_group_log import ActionGroupLog
 from backtester.actions import (
     Action,
     ActionGroup,
@@ -48,24 +48,17 @@ def _action(**kwargs):
     return Action(**kwargs)
 
 
-def _group(
-    actions,
-    *,
-    strategy_id="strat",
-    provenance=PROVENANCE_SIGNAL,
-):
+def _group(actions, *, provenance=PROVENANCE_SIGNAL):
     return ActionGroup(
-        strategy_id=strategy_id,
         provenance=provenance,
         actions=tuple(actions),
     )
 
 
-def _unwind_group(strategy_id="strat", structure_id=None, trade_id=None):
+def _unwind_group(structure_id=None, trade_id=None):
     return _group(
         (_action(type=ActionType.UNWIND, structure_id=structure_id,
                  trade_id=trade_id),),
-        strategy_id=strategy_id,
     )
 
 
@@ -329,26 +322,15 @@ class TestActionGroup:
     def test_is_frozen(self):
         group = _group((_action(type=ActionType.UNWIND),))
         with pytest.raises(dataclasses.FrozenInstanceError):
-            group.strategy_id = "other"
+            group.provenance = "scaling_rule"
 
     def test_requires_at_least_one_action(self):
         with pytest.raises(ValueError, match="at least one Action"):
-            ActionGroup(
-                strategy_id="s", provenance=PROVENANCE_SIGNAL, actions=()
-            )
-
-    def test_requires_a_strategy_id(self):
-        with pytest.raises(ValueError, match="strategy_id"):
-            ActionGroup(
-                strategy_id="",
-                provenance=PROVENANCE_SIGNAL,
-                actions=(_action(type=ActionType.UNWIND),),
-            )
+            ActionGroup(provenance=PROVENANCE_SIGNAL, actions=())
 
     def test_unknown_provenance_is_rejected(self):
         with pytest.raises(ValueError, match="unknown provenance"):
             ActionGroup(
-                strategy_id="s",
                 provenance="made_up",
                 actions=(_action(type=ActionType.UNWIND),),
             )
@@ -356,7 +338,6 @@ class TestActionGroup:
     def test_actions_must_hold_action_objects(self):
         with pytest.raises(TypeError, match="Action objects"):
             ActionGroup(
-                strategy_id="s",
                 provenance=PROVENANCE_SIGNAL,
                 actions=({"type": "UNWIND"},),
             )
@@ -490,7 +471,6 @@ class TestActionGroupLogAppend:
     def test_signal_assigned_id_is_rejected(self):
         log = ActionGroupLog()
         stamped = ActionGroup(
-            strategy_id="s",
             provenance=PROVENANCE_SIGNAL,
             actions=(_action(type=ActionType.UNWIND),),
             action_group_id="abc",
@@ -501,7 +481,6 @@ class TestActionGroupLogAppend:
     def test_signal_assigned_emission_date_is_rejected(self):
         log = ActionGroupLog()
         stamped = ActionGroup(
-            strategy_id="s",
             provenance=PROVENANCE_SIGNAL,
             actions=(_action(type=ActionType.UNWIND),),
             emission_date="2024-01-02",
@@ -517,32 +496,19 @@ class TestActionGroupLogAppend:
 class TestActionGroupLogIndices:
     def _log(self):
         log = ActionGroupLog()
-        log.append(_unwind_group(strategy_id="a"), "2024-01-02")
+        log.append(_unwind_group(), "2024-01-02")
         log.append(
-            _unwind_group(strategy_id="a", structure_id="S1", trade_id="T1"),
+            _unwind_group(structure_id="S1", trade_id="T1"),
             "2024-01-02",
         )
-        log.append(_unwind_group(strategy_id="b"), "2024-01-03")
-        log.append(_unwind_group(strategy_id="a"), "2024-01-04")
+        log.append(_unwind_group(), "2024-01-03")
+        log.append(_unwind_group(), "2024-01-04")
         return log
-
-    def test_by_strategy(self):
-        log = self._log()
-        assert len(log.by_strategy("a")) == 3
-        assert len(log.by_strategy("b")) == 1
-        assert log.by_strategy("nope") == ()
-
-    def test_by_strategy_last_n_days_keeps_whole_days(self):
-        log = self._log()
-        assert len(log.by_strategy("a", 1)) == 1
-        assert len(log.by_strategy("a", 2)) == 3
-        assert len(log.by_strategy("a", 0)) == 0
-        assert len(log.by_strategy("a")) == 3
 
     def test_by_structure(self):
         log = self._log()
         assert len(log.by_structure("S1")) == 1
-        assert log.by_structure("S1")[0].action_group.strategy_id == "a"
+        assert log.by_structure("S1")[0].action_group.emission_date == "2024-01-02"
         assert log.by_structure("S9") == ()
 
     def test_by_structure_indexes_addressing_actions_only(self):
@@ -608,33 +574,20 @@ class TestActionGroupLogIndices:
 
     def test_record_for(self):
         log = self._log()
-        record = log.by_strategy("b")[0]
+        record = log.records[1]
         assert (
             log.record_for(record.action_group.action_group_id) is record
         )
         assert log.record_for("missing") is None
 
-    def test_last_action_group(self):
-        log = self._log()
-        assert (
-            log.last_action_group("a").action_group.emission_date
-            == "2024-01-04"
-        )
-        assert (
-            log.last_action_group("b").action_group.emission_date
-            == "2024-01-03"
-        )
-        assert log.last_action_group("nope") is None
-
     def test_records_are_live_references(self):
         log = self._log()
-        record = log.last_action_group("a")
+        record = log.records[-1]
         record.finalize(("o1",), (OrderOutcome.FILLED,))
 
         assert (
             log.record_for(record.action_group.action_group_id) is record
         )
-        assert log.by_strategy("a")[-1] is record
         assert log.records[-1] is record
         assert (
             log.record_for(
@@ -646,32 +599,8 @@ class TestActionGroupLogIndices:
     def test_records_are_append_only(self):
         log = self._log()
         before = list(log.records)
-        log.append(_unwind_group(strategy_id="a"), "2024-01-05")
+        log.append(_unwind_group(), "2024-01-05")
         assert list(log.records)[: len(before)] == before
-
-    def test_for_strategy_view_is_scoped(self):
-        log = self._log()
-        view = log.for_strategy("a")
-        assert isinstance(view, ActionGroupLogView)
-        assert view.strategy_id == "a"
-        assert len(view) == 3
-        assert {r.action_group.strategy_id for r in view} == {"a"}
-        assert view.last_action_group() is log.last_action_group("a")
-        assert len(view.recent(1)) == 1
-        assert view.by_structure("S1")[0].action_group.strategy_id == "a"
-        assert view.by_structure("S1") == view.records()[1:2]
-
-    def test_for_strategy_view_does_not_expose_other_strategies(self):
-        log = self._log()
-        assert log.for_strategy("b").by_structure("S1") == ()
-
-    def test_for_strategy_requires_an_id(self):
-        with pytest.raises(ValueError):
-            ActionGroupLog().for_strategy("")
-
-    def test_view_has_no_append(self):
-        view = self._log().for_strategy("a")
-        assert not hasattr(view, "append")
 
 
 class TestAggregationContext:
@@ -705,17 +634,11 @@ class TestAggregationContext:
 
 
 class TestPositionBooks:
-    def test_for_strategy_returns_the_full_book_identity(self):
+    def test_full_returns_the_book_identity(self):
         state = _snapshot()
         books = PositionBooks(state, ())
-        book = books.for_strategy("whatever")
-        assert book is books.for_strategy("another")
-        assert book is books.full()
-        assert book.portfolio_state is state
-
-    def test_for_strategy_requires_an_id(self):
-        with pytest.raises(ValueError):
-            PositionBooks().for_strategy("")
+        assert books.full() is books.full()
+        assert books.full().portfolio_state is state
 
     def test_empty_book(self):
         book = PositionBooks().full()

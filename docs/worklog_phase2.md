@@ -4273,3 +4273,304 @@ SMA signal, `DataView.reference_price`, `SimulatedExecution._probe_target` and t
 
 ### Scope / process
 No git operations.  `results/` not written by the gates (scratch copies only).
+
+## 2026-10-22 – Task 5d-1b: bounded sizing staleness (B2) + duplicate structure mods (B3a) + commit tripwire (B3b)
+
+### Prompt
+Three post-review fixes.  B2 replaces Phase C's unbounded forward-fill with a
+bounded-staleness model (default 7 days) applied identically to mapped and
+unmapped tickers; the SMA baseline is re-captured (behaviour may move in either
+direction).  B3a rejects two same-day actions targeting one structure.  B3b
+adds a defensive commit precondition tripwire.  No git operations.
+
+### `get_price` verification (pre-apply item 1)
+`get_price(ticker, as_of=None)` **does** call `last_valid_day` internally
+(`data_view.py:135`), so the naive B2 patch would have widened `get_price`
+(mapped ticker, calendar-valid day with no row: `None` -> fallback row).  The
+reviewer's split was adopted: `last_valid_day` and `get_price` keep their
+pre-B2 shape; the mapped-gap fallback lives **only** in `reference_price`.
+Verified by extracting both functions from the pre-edit and post-edit trees:
+`get_price` **IDENTICAL**, `last_valid_day` **IDENTICAL**.  Case A, split path.
+
+### B2 — bounded `reference_price`
+- `DataView(max_staleness_days=7)` keyword; negative rejected with `ValueError`.
+- `reference_price`: resolve `last_valid_day`; if that day has no data row, scan
+  back for the last data row at/before the cutoff regardless of calendar; then
+  bound the landing day by `max_staleness_days` and return its value.  A gap
+  beyond the bound -> `None`.  `None` now has two causes: no observation, or
+  stale beyond the bound (Phase C's "no fill limit" wording removed).
+- `get_price` / `last_valid_day` unchanged (see above), so other price readers
+  see no semantic widening.
+
+### B2 attribution (two-stage)
+```
+SMA baseline (scratch, canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                   257 lines / 46,189 raw / 39,979 normalized / 230 UUIDs / 0 stderr
+Post-B2 SMA (scratch, canonical)   SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                   IDENTICAL to baseline; 230 trades / 457 records
+entries added  (None -> price)     0
+entries skipped (price -> None)    0
+reference_price calls during run   230 (all unchanged)
+```
+Counted by wrapping `DataView.reference_price` during the real SMA run and
+comparing the pre-B2 read (`get_price(ticker)`) with the post-B2 result.  The
+SMA's mapped tickers never hit the two changed paths: their calendar-valid day
+always has a row, and their gaps are within 7 days.
+
+### B3a — reject duplicate structure modifications per day
+`_validate_no_duplicate_structure_mods` runs after `synthesize` and before the
+dispatch loop.  Two orders in one day's patch naming the same `structure_id`
+raise `ValueError("... targeted by multiple actions ...")`; this is a fail-loud
+abort, not a `REJECTED` record (the no-reject-path invariant holds).  Covers
+two groups, whole-trade UNWIND overlapping a structure action, and whole-book
+UNWIND overlapping a structure action.
+
+### B3b — commit precondition tripwire
+`_assert_commit_preconditions` runs at the top of `_commit_order_group`, before
+any mutation, raising `RuntimeError("commit invariant violated: ...")` when a
+targeted trade or structure is absent, an order leg's ticker is not in the
+target structure, or a reducing leg exceeds the structure's current size.  It
+is a **tripwire, not a transaction/rollback**: execution records and
+`finalize` are already written, so a fire aborts loudly with no undo.  Under
+the current invariants it cannot fire.
+
+### Attribution result (B3)
+```
+Post-B3 SMA (scratch, canonical)   SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+Assertion  post-B3 == post-B2      PASS (canonical diff empty)
+                                   230 trades / 457 records; 0 stderr
+```
+B3 is behaviour-inert for the SMA, as designed.
+
+### Tests (577 -> 591, +14)
+| file | change | delta |
+|---|---|---:|
+| `tests/test_data_view.py` | +6 staleness tests; `_view` pass-through; Test C comment updated | +6 |
+| `tests/test_backtester.py` | +4 duplicate-mod tests, +4 commit-tripwire tests (incl. unmatched leg) | +8 |
+| `tests/test_signal.py` | fixture dates moved to end at the cutoff (no count change) | 0 |
+
+### Deviation — `tests/test_signal.py` fixture dates
+The file is not in the original change list.  Its mocked price series started
+`2024-01-01`, ending ~4 months before the view's `2024-06-14` cutoff; under the
+new bound that is correctly *stale* and five signal tests failed.  The fixtures
+now end at the cutoff (`make_price_series(..., end_date="2024-06-14")`), which
+tests the intended signal behaviour instead of asserting a stale price.  No
+production semantics were relaxed for this.
+
+### Gates (applied tree)
+```
+Stage 1 (B2)       python -m pytest -q -> 583 passed
+Stage 2 (B3a+B3b)  python -m pytest -q -> 591 passed
+SMA canonical      pre-edit == post-B2 == post-B3 (be8d9825…); 0 stderr
+```
+
+### Scope / process
+No git operations.  Gates run in scratch copies; repo `results/` not written.
+
+## 2026-10-23 – Strategy-layer cleanup: remove preemptive `strategy_id`, rename `OrderSynthesis` → `OrderAssembly`
+
+### Prompt
+Two behavior-preserving cleanups.  (1) `strategy_id` was preemptive
+multi-strategy scoping: the framework is one-signal-per-run, every record carried
+the same value, and the supporting scoping machinery (`ActionGroupLogView`,
+`_by_strategy`, `PositionBooks.for_strategy`, per-record copies on execution)
+would *fail* if two strategies ever ran in one loop.  `Trade` already omitted it;
+this extends that design to the whole pipeline and re-adds `strategy_id` at the
+§10 ingestion boundary, where it has a real consumer.  (2) `OrderSynthesis` was a
+misleading name — the class runs the synthesis rule chain *and* the order
+conversion — so it is renamed `OrderAssembly`, matching design-notes §3.8 "Order
+assembly".  No git operations.
+
+### Ruling checkpoint (verified before edits)
+```
+Grep hit counts (live code), before:
+  strategy_id      backtester 38 / tests 47 / examples 1
+  OrderSynthesis   backtester 8  / tests 20 / design 3 / phase2 2
+  .synthesize(     engine 1 / module 1 / docstrings 2 / tests 16
+  for_strategy     backtester 7  / tests 15
+  ActionGroupLogView backtester 6 / tests 2 / design 2
+  by_strategy      backtester 10 / tests 11
+  last_action_group backtester 3 / tests 7
+PositionBooks.find_holding directly reachable:
+  tests/test_actions.py::TestPositionBooks::test_find_holding_reports_address_and_leg
+  and ::test_find_holding_uses_snapshot_order already call
+  PositionBooks(...).full().find_holding(...); the SMA uses only
+  position_book.find_holding (sma_crossover.py:112).
+Behaviour-inert: the SMA never branches on strategy_id; for_strategy returned the
+  same global book and the view filtered the single run id (i.e. all records);
+  the converter used for_strategy only to fetch that same book.
+SMA baseline (scratch, canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                   257 lines / 46,189 raw / 39,979 normalized / 230 UUIDs / 0 stderr
+Collected tests (actual)           591
+```
+
+### `OrderSynthesis` → `OrderAssembly`
+- Class `OrderSynthesis` → `OrderAssembly`; method `.synthesize(...)` →
+  `.build_order_groups(...)`; module `order_synthesis.py` →
+  `order_assembly.py`; `BacktestConfig.order_synthesis` → `.order_assembly`.
+- Class docstring rewritten to describe the stage (synthesis rule chain, empty
+  today, then `action_group_to_order_group` per surviving group), not one of its
+  two operations.
+- Test module renamed `tests/test_order_synthesis.py` →
+  `tests/test_order_assembly.py` (count-neutral).
+
+### `strategy_id` removal (strategy layer)
+Fields removed: `ActionGroup.strategy_id` (and its `__post_init__` validation),
+`ExecutionContext.strategy_id`, `ExecutionReport.strategy_id`,
+`ExecutionRecord.strategy_id`, and `BaseSignal.__init__(strategy_id=...)` plus
+`self.strategy_id`.  Machinery removed: `ActionGroupLog._by_strategy`,
+`.by_strategy(...)`, `.last_action_group(strategy_id)`, `.for_strategy(...)`,
+the whole `ActionGroupLogView` class, and `PositionBooks.for_strategy(...)`.
+
+The engine now calls
+`signal.generate_action_groups(data_view, self.action_group_log, position_books.full())`
+and `assembly.build_order_groups(...)`.  `position_books.full()` is used rather
+than passing the `PositionBooks` wrapper because the signal needs the
+`PositionBook` (`find_holding`); `full()` returns the same object `for_strategy`
+did, so this is behavior-identical.  The converter's four book lookups likewise
+use `ctx.position_books.full()`.
+
+**Read-only guarantee trade-off (explicit).**  `ActionGroupLogView` enforced
+"signals can read but not append."  After removal the signal receives the
+`ActionGroupLog` directly and **signals can now call `log.append()`**.  This is a
+conscious swap of a structural guarantee for a convention in a one-signal layer;
+re-introduction is deferred to a real multi-strategy need.
+
+### Test-removal audit
+Removed outright (10) — each subject is either a deleted field/API or a
+guarantee consciously traded away, never the sole coverage of surviving
+behaviour:
+
+| removed test | subject |
+|---|---|
+| `TestActionGroup::test_requires_a_strategy_id` | deleted field validation |
+| `...LogIndices::test_by_strategy` | deleted strategy index |
+| `...::test_by_strategy_last_n_days_keeps_whole_days` | deleted recent-tail API |
+| `...::test_last_action_group` | deleted per-strategy last-record API |
+| `...::test_for_strategy_view_is_scoped` | deleted view |
+| `...::test_for_strategy_view_does_not_expose_other_strategies` | deleted view isolation |
+| `...::test_for_strategy_requires_an_id` (view) | deleted view arg validation |
+| `...::test_view_has_no_append` | the structural read-only guarantee (traded away) |
+| `TestPositionBooks::test_for_strategy_requires_an_id` | deleted book arg validation |
+| `TestSMACrossoverSignal::test_strategy_id_is_required` | deleted constructor requirement |
+
+Rewritten in place (count preserved, orthogonal coverage kept):
+- `test_is_frozen` (provenance instead of strategy_id);
+  `test_by_structure` (asserts emission_date, not strategy_id);
+  `test_record_for` / `test_records_are_live_references` / `test_records_are_append_only`
+  (direct log API; live-reference coverage uses `log.records[-1]` + `record_for`);
+  `test_for_strategy_returns_the_full_book_identity` → `test_full_returns_the_book_identity`;
+  `test_requires_a_non_empty_strategy_id` → `test_identity_is_the_instance`;
+  `test_book_and_log_view_are_always_passed` → `test_book_and_log_are_always_passed`;
+  `test_action_group_log_view_grows_with_this_strategy` → `test_action_group_log_grows_across_the_run`.
+
+Orphan check: append/id stamping + `action_ids` minting remain covered by the
+untouched `TestActionGroupLogAppend` suite; live references and append-only by
+the rewritten tests above; `find_holding` direct by the existing `.full()` tests.
+No surviving orthogonal behaviour lost coverage.
+
+Count: **591 → 581 (−10)**; the test-module rename is count-neutral.
+
+### Deferred (registered in `docs/phase2_plan.md`)
+- **`strategy_id` at §10 ingestion.** Each saved `BacktestResult` came from one
+  strategy; at load time wrap with `StrategyRun(strategy_id, result)` and tag
+  `Trade` / `ExecutionRecord` if flattened.  `strategy_id` is not a
+  strategy-layer field.  Design notes carry the same statement in the §10
+  reconciliation note.
+- **Split `OrderAssembly` when rules land.** One class holds the synthesis rule
+  chain (empty) and order conversion; split into `SynthesisChain` +
+  `OrderConverter` when the first concrete rule (roll / auto-unwind / hedge /
+  scaling) lands.
+
+### Gates (applied tree)
+```
+Gate A  SMA applied (scratch, canonical)  SHA be8d98254dce3c937a4effba0202a1e09b56b7b1d4115f80d24334ded981572c
+                                          -> IDENTICAL to pre-edit baseline; 257 lines / 46,189 raw /
+                                             39,979 normalized / 230 UUIDs; 0 stderr
+Gate B  full suite                        python -m pytest -q -> 581 passed, 2 warnings
+Gate C  greps (live code + design live prose; historical worklog exempt)
+        strategy_id -> backtester/ tests/ examples/: zero hits
+        OrderSynthesis / .synthesize( / for_strategy / ActionGroupLogView /
+        by_strategy / last_action_group / order_synthesis -> zero hits
+        (design_notes.md + phase2_plan.md live sections also zero)
+```
+`strategy_id` survives only in the §10 planned prose (`PortfolioAllocator` /
+`StrategyContribution` / `ExecutionRecord` planning), the new §10-ingestion
+statements, the deferred phase2 registrations, and historical worklog entries.
+
+### Scope / process
+No git operations.  Gates run in scratch copies; repo `results/` not written.
+`Trade`, `StrategyStructure`, `LegState`, `Contract`, `Order*`, B2 staleness,
+B3a duplicate check and B3b commit tripwire untouched; SMA signal behavior,
+sizing and calendar gating untouched.
+
+## 2026-10-23 – Remove the local DeepSeek-harness `tmp_path` workaround
+
+### Prompt
+The local `tests/conftest.py` existed only to work around the restricted-token
+sandbox shipped with the DeepSeek harness (dsh); that harness is no longer in
+use.  Delete the workaround, its scratch base `tests/.tmp/`, and every live
+reference to it.  No git operations.
+
+### Why the sandbox kept asking to delete files
+`pytest_sessionstart` in the local conftest swept `tests/.tmp/*` with
+`shutil.rmtree` **at every pytest invocation, including `--collect-only`** (the
+hook runs, fixtures do not).  Each `tmp_path` consumer created its own
+`tests/.tmp/<test_name>_<uuid8>/` directory, removed by a per-test `finally`.
+When the sandbox's bulk-delete guard rejected the sweep, the pytest process was
+killed before those `finally` blocks ran, leaving the directories behind — which
+made the next session start with a larger sweep, i.e. a self-sustaining loop:
+
+    stale dirs -> sessionstart sweep blocked -> run killed -> teardown skipped
+               -> more stale dirs
+
+At the time of removal `tests/.tmp/` held **16 directories / 42 files**, all
+created 2026-10-23 23:01:47–23:02:15 by the two blocked runs.
+
+### Removal
+- `tests/conftest.py` — deleted.  Was local-only, never committed
+  (`git ls-files tests/conftest.py` -> empty), so no untracking was needed.
+  Verbatim backup kept at
+  `%TEMP%\qbt_tests_conftest_backup_20261023.py` for one-session rollback.
+- `tests/.tmp/` — deleted recursively (16 dirs / 42 files).
+- The per-test teardown path is gone with the file; nothing writes inside the
+  repo tree during tests any more.
+
+### Documentation updates
+- **`AGENT.md`** — `## Testing Infrastructure (environment-specific)` (the dsh
+  recipe, incl. the upstream discussion #81 link) replaced by a section stating
+  the built-in `tmp_path` works as-is, recording the verification
+  (581 passed, 0 errors, no `WinError 5`), and carrying forward the standing
+  rules: no `--basetemp`, no probe/diagnostic directories, no elevated or
+  full-access permission requests, stop-and-report on recurrence.
+- **`.gitignore`** — dropped the now-orphaned `tests/.tmp/`, the
+  `# local-only sandbox workaround; never commit` comment and the
+  `tests/conftest.py` entry.  `.workbuddy/` stays.
+- **`docs/phase2_plan.md`** (Testing & hardening) — the
+  "Revisit the local conftest workaround ... once the DSH sandbox tmp_path bug
+  is confirmed fixed upstream" checkbox is now `- [x]` with its resolution,
+  per the file's convention of marking completed items rather than deleting
+  them.
+- **`docs/worklog_phase2.md`** — historical entries (2026-09-19 / 2026-09-20,
+  and today's strategy-layer entry) left untouched; they are records of what
+  was true when written.
+
+### Gates (applied tree)
+```
+Gate A  full suite (conftest deleted)   python -m pytest -q -> 581 passed, 2 warnings in 19.70s
+Gate B  full suite (after doc edits)    python -m pytest -q -> 581 passed, 2 warnings in 19.26s
+        0 failures, 0 errors, 0 PermissionError [WinError 5]
+Gate C  tests/.tmp recreated?           -> absent after both runs
+Gate D  grep -rn "tests/.tmp|tests/conftest" AGENT.md .gitignore
+        -> AGENT.md:53,55 only (the deliberate "do not recreate" warning)
+        -> .gitignore: zero hits
+Gate E  git ls-files tests/conftest.py  -> empty (never tracked)
+```
+
+### Scope / process
+No git operations; nothing committed or staged.  Files changed: `AGENT.md`,
+`.gitignore`, `docs/phase2_plan.md` (content) and `tests/conftest.py`,
+`tests/.tmp/` (deleted).  No production code, no tests under `tests/*.py`, and
+no other project files were touched; the 581-test count is unchanged by this
+cleanup — it is the same suite as before, now running on pytest's own
+`tmp_path`.

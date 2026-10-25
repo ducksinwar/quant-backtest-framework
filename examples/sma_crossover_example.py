@@ -79,7 +79,6 @@ def main():
         tickers=tickers,
         notional=notional,
         ticker_currency=ticker_currency,
-        strategy_id="sma_crossover",
         calendar_provider=calendar_provider,
         ticker_to_calendar_code=ticker_to_calendar_code,
     )

@@ -33,8 +33,14 @@ from backtester.actions import (
     TradeSpec,
 )
 from backtester.action_group_log import ActionGroupLog
-from backtester.order_synthesis import action_group_to_order_group
-from backtester.orders import OrderOutcome
+from backtester.order_assembly import action_group_to_order_group
+from backtester.orders import (
+    Order,
+    OrderGroup,
+    OrderLeg,
+    OrderOutcome,
+    OrderSide,
+)
 from backtester.signals.sma_crossover import SMACrossoverSignal
 from backtester.position_books import PositionBooks
 from backtester.strategy_structure import StrategyStructure
@@ -44,10 +50,9 @@ from backtester.trade import Trade
 MARKET_DATA_DIR = Path(__file__).resolve().parents[1] / "market_data"
 
 
-def _group(action, *, strategy_id="mock"):
+def _group(action):
     return ActionGroup(
         action_group_id=None,
-        strategy_id=strategy_id,
         provenance=PROVENANCE_SIGNAL,
         actions=(action,),
     )
@@ -100,7 +105,7 @@ def _unwind(trade_id=None, structure_id=None, size=None):
     )
 
 
-def _make_mock_signal(orders_lookup=None, strategy_id="mock"):
+def _make_mock_signal(orders_lookup=None):
     """Create a mock signal that returns pre-programmed action groups per date.
 
     The lookup values are already ActionGroups built by ``_new_trade`` /
@@ -111,7 +116,6 @@ def _make_mock_signal(orders_lookup=None, strategy_id="mock"):
     arguments.
     """
     mock = MagicMock()
-    mock.strategy_id = strategy_id
 
     def generate_action_groups(data_view, action_group_log=None, position_book=None):
         groups = (orders_lookup or {}).get(data_view.date, [])
@@ -411,7 +415,7 @@ class TestBacktesterPositionBook:
         )
         return Backtester(bt_config).run()
 
-    def test_book_and_log_view_are_always_passed(self, simple_csv):
+    def test_book_and_log_are_always_passed(self, simple_csv):
         captured = []
 
         def capture(data_view, action_group_log, position_book):
@@ -429,7 +433,7 @@ class TestBacktesterPositionBook:
                 position_book.portfolio_state, (PortfolioState, type(None))
             )
             assert isinstance(position_book.trade_history, tuple)
-            assert action_group_log.strategy_id == "mock"
+            assert isinstance(action_group_log, ActionGroupLog)
 
     def test_book_holds_the_open_position_from_the_next_day(self, simple_csv):
         captured = []
@@ -459,7 +463,7 @@ class TestBacktesterPositionBook:
             == holding.trade_id
         )
 
-    def test_action_group_log_view_grows_with_this_strategy(self, simple_csv):
+    def test_action_group_log_grows_across_the_run(self, simple_csv):
         seen_lengths = []
 
         def capture(data_view, action_group_log, position_book):
@@ -474,8 +478,8 @@ class TestBacktesterPositionBook:
         signal.generate_action_groups.side_effect = capture
         self._run(simple_csv, signal)
 
-        # A live, strategy-scoped window: empty before the first emission and
-        # one record richer from the next day on.
+        # The live log: empty before the first emission and one record
+        # richer from the next day on.
         assert seen_lengths == [0, 1, 1, 1]
 
 
@@ -1094,6 +1098,262 @@ class TestUnwindShapeEquivalence:
         )
 
 
+class TestDuplicateStructureMods:
+    """B3a: two same-day actions may not target one structure."""
+
+    def _engine(self, simple_csv, side_effect):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        signal = _make_mock_signal()
+        signal.generate_action_groups.side_effect = side_effect
+        return Backtester(
+            BacktestConfig(
+                signal=signal,
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+
+    def _two_structure_trade(self):
+        structure = StructureSpec(
+            legs=(
+                LegSpec(
+                    ContractSpec("TEST", asset_class="equity"),
+                    Side.LONG,
+                    10.0,
+                ),
+            )
+        )
+        return _group(
+            Action(
+                type=ActionType.NEW,
+                spec=TradeSpec(structures=(structure, structure)),
+            )
+        )
+
+    def test_two_groups_targeting_same_structure_raise(self, simple_csv):
+        def side_effect(data_view, action_group_log=None, position_book=None):
+            if data_view.date == "2024-01-02":
+                return [_new_trade("TEST", 100)]
+            if data_view.date == "2024-01-03":
+                holding = position_book.find_holding("TEST")
+                return [
+                    _unwind(
+                        trade_id=holding.trade_id,
+                        structure_id=holding.structure_id,
+                    ),
+                    _unwind(
+                        trade_id=holding.trade_id,
+                        structure_id=holding.structure_id,
+                    ),
+                ]
+            return []
+
+        bt = self._engine(simple_csv, side_effect)
+        with pytest.raises(ValueError, match="targeted by multiple actions"):
+            bt.run()
+
+    def test_two_groups_targeting_distinct_structures_succeed(
+        self, simple_csv
+    ):
+        def side_effect(data_view, action_group_log=None, position_book=None):
+            if data_view.date == "2024-01-02":
+                return [self._two_structure_trade()]
+            if data_view.date == "2024-01-03":
+                trade = position_book.trades[0]
+                return [
+                    _unwind(
+                        trade_id=trade.trade_id,
+                        structure_id=structure.structure_id,
+                    )
+                    for structure in trade.structures
+                ]
+            return []
+
+        bt = self._engine(simple_csv, side_effect)
+        result = bt.run()
+
+        assert len(result.trade_history) == 1
+        assert result.trade_history[0].exit_date == "2024-01-03"
+        assert bt.active_trades == []
+
+    def test_whole_trade_unwind_then_structure_unwind_raises(
+        self, simple_csv
+    ):
+        def side_effect(data_view, action_group_log=None, position_book=None):
+            if data_view.date == "2024-01-02":
+                return [_new_trade("TEST", 100)]
+            if data_view.date == "2024-01-03":
+                holding = position_book.find_holding("TEST")
+                return [
+                    _unwind(trade_id=holding.trade_id),
+                    _unwind(
+                        trade_id=holding.trade_id,
+                        structure_id=holding.structure_id,
+                    ),
+                ]
+            return []
+
+        bt = self._engine(simple_csv, side_effect)
+        with pytest.raises(ValueError, match="targeted by multiple actions"):
+            bt.run()
+
+    def test_whole_book_unwind_then_any_structure_unwind_raises(
+        self, simple_csv
+    ):
+        def side_effect(data_view, action_group_log=None, position_book=None):
+            if data_view.date == "2024-01-02":
+                return [_new_trade("TEST", 100)]
+            if data_view.date == "2024-01-03":
+                holding = position_book.find_holding("TEST")
+                return [
+                    _unwind(),
+                    _unwind(
+                        trade_id=holding.trade_id,
+                        structure_id=holding.structure_id,
+                    ),
+                ]
+            return []
+
+        bt = self._engine(simple_csv, side_effect)
+        with pytest.raises(ValueError, match="targeted by multiple actions"):
+            bt.run()
+
+
+class TestCommitPreconditionTripwire:
+    """B3b: the commit guard fires independently of the upstream guards."""
+
+    def _engine(self, simple_csv):
+        backend = CsvBackend(base_dir=simple_csv)
+        data_feed = DataFeed(backend)
+        pricer = EquityPricer(EquityPriceProvider(data_feed))
+        config = AssetClassConfig(pricer=pricer, risk_measures=[])
+        return Backtester(
+            BacktestConfig(
+                signal=_make_mock_signal(orders_lookup={}),
+                start_date="2024-01-02",
+                end_date="2024-01-05",
+                asset_class_configs={"equity": config},
+                calendar_provider=CalendarProvider(data_feed),
+                simulation_calendar_codes=None,
+            )
+        )
+
+    def _open_trade(self, bt, size=40.0):
+        from backtester.execution import SimulatedExecution
+
+        record = bt.action_group_log.append(
+            _new_trade("TEST", size), "2024-01-02"
+        )
+        ctx = AggregationContext(
+            date="2024-01-02",
+            action_group_log=ActionGroupLog(),
+            execution_log=None,
+            position_books=PositionBooks(),
+            calendar=None,
+            config=None,
+        )
+        order_group = action_group_to_order_group(
+            record.action_group, record.action_ids, ctx
+        )
+        bt._dispatch_synthesized_order(
+            record, order_group, "2024-01-02", SimulatedExecution()
+        )
+        return bt.active_trades[0]
+
+    def _order_group(self, record, structure_id, trade_id, ticker="TEST",
+                     quantity=10.0):
+        return OrderGroup(
+            orders=(
+                Order(
+                    action_id=record.action_ids[0],
+                    order_id="order-1",
+                    legs=(OrderLeg(ticker, OrderSide.SELL, quantity),),
+                    structure_id=structure_id,
+                    trade_id=trade_id,
+                ),
+            )
+        )
+
+    def test_commit_raises_when_trade_missing(self, simple_csv):
+        bt = self._engine(simple_csv)
+        record = bt.action_group_log.append(
+            _unwind(trade_id="missing"), "2024-01-03"
+        )
+        order_group = self._order_group(
+            record, "structure-1", "missing"
+        )
+        with pytest.raises(RuntimeError, match="commit invariant violated"):
+            bt._commit_order_group(
+                order_group, record, "2024-01-03", ()
+            )
+
+    def test_commit_raises_when_structure_missing(self, simple_csv):
+        bt = self._engine(simple_csv)
+        trade = self._open_trade(bt)
+        record = bt.action_group_log.append(
+            _unwind(trade_id=trade.trade_id, structure_id="missing"),
+            "2024-01-03",
+        )
+        order_group = self._order_group(
+            record, "missing", trade.trade_id
+        )
+        with pytest.raises(RuntimeError, match="commit invariant violated"):
+            bt._commit_order_group(
+                order_group, record, "2024-01-03", ()
+            )
+
+    def test_commit_raises_when_unmatched_leg_ticker(self, simple_csv):
+        """The order leg's ticker is not in the target structure."""
+        bt = self._engine(simple_csv)
+        trade = self._open_trade(bt)
+        structure = trade.active_structures[0]
+        record = bt.action_group_log.append(
+            _unwind(
+                trade_id=trade.trade_id,
+                structure_id=structure.structure_id,
+            ),
+            "2024-01-03",
+        )
+        order_group = self._order_group(
+            record,
+            structure.structure_id,
+            trade.trade_id,
+            ticker="WRONG_TICKER",
+        )
+        with pytest.raises(RuntimeError, match="commit invariant violated"):
+            bt._commit_order_group(
+                order_group, record, "2024-01-03", ()
+            )
+
+    def test_commit_raises_when_unwind_exceeds_size(self, simple_csv):
+        bt = self._engine(simple_csv)
+        trade = self._open_trade(bt, size=40.0)
+        structure = trade.active_structures[0]
+        record = bt.action_group_log.append(
+            _unwind(
+                trade_id=trade.trade_id,
+                structure_id=structure.structure_id,
+            ),
+            "2024-01-03",
+        )
+        order_group = self._order_group(
+            record,
+            structure.structure_id,
+            trade.trade_id,
+            quantity=60.0,
+        )
+        with pytest.raises(RuntimeError, match="commit invariant violated"):
+            bt._commit_order_group(
+                order_group, record, "2024-01-03", ()
+            )
+
+
 class TestBacktesterActionGroupLog:
     """The loop's action-group pipeline: emission, finalize and the id chain."""
 
@@ -1133,7 +1393,7 @@ class TestBacktesterActionGroupLog:
         # Every accessor hands back the same live record, and the order id
         # never entered the legacy dict that execution consumed.
         assert bt.action_group_log.record_for(record.action_group.action_group_id) is record
-        assert bt.action_group_log.last_action_group("mock") is record
+        assert bt.action_group_log.records[-1] is record
         assert len(result.trade_history) == 1
 
     def test_no_action_groups_on_a_quiet_day(self, simple_csv):
@@ -1450,7 +1710,6 @@ def sma_run():
         tickers=list(mapping),
         notional=100_000,
         ticker_currency={"2800.HK": "HKD", "SXRT.DE": "EUR"},
-        strategy_id="sma_crossover",
         calendar_provider=calendar,
         ticker_to_calendar_code=mapping,
     )
